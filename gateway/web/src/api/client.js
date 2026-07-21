@@ -1,89 +1,28 @@
 import axios from 'axios'
 import { getItem, setItem, removeItem, getJSON } from '../utils/storage'
 
+// ====== claw 双通道 baseURL ======
+// 本地 claw gateway：对话/视觉/模型/技能/Agent 工作流/对话历史/同步/STT/本地模块
 const API_BASE = import.meta.env.VITE_API_BASE || '/api'
+// 云端 eleball：账户（登录/注册/邮箱OTP/刷新/我的）/充值/支付/VIP/CDK/秘技购买/已购秘技拉取
+const CLOUD_API = import.meta.env.VITE_CLOUD_API || 'https://api.eleball.cn/v1'
+// 云端 web：首页/文档/充值页面（整页跳转用）
+export const CLOUD_BASE = import.meta.env.VITE_CLOUD_BASE || 'https://www.eleball.cn'
 
 // 把后端/网络错误信息转换成普通用户能看懂的文案
 function normalizeErrorMessage(status, rawMessage) {
   const msg = String(rawMessage || '')
-  // 认证相关：统一提示登录
   if (status === 401 || /Authorization|Token|登录|缺少.*头|请先登录/.test(msg)) {
     return '登录已过期或无效，请重新登录'
   }
-  // 上游限流或服务端限流
   if (status === 429) {
     return '服务繁忙，请稍后再试'
   }
-  // 视觉生成模型未选择（兼容旧版 Gin 校验提示）
   if (/Provider|Model/.test(msg) && /required|不能为空|请选择/.test(msg)) {
     return '请选择生成模型'
   }
   return msg
 }
-
-const client = axios.create({
-  baseURL: API_BASE,
-  timeout: 15000,
-  headers: {
-    'Content-Type': 'application/json'
-  }
-})
-
-// 请求拦截器：注入 JWT Token
-client.interceptors.request.use(
-  (config) => {
-    const token = getItem('token')
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`
-    }
-    return config
-  },
-  (error) => Promise.reject(error)
-)
-
-// 响应拦截器：剥离后端统一包装 { code, message, data }
-client.interceptors.response.use(
-  (response) => {
-    const body = response.data
-    if (body && typeof body === 'object' && 'code' in body) {
-      if (body.code === 0) {
-        return body.data
-      }
-      return Promise.reject(new Error(body.message || '请求失败'))
-    }
-    return body
-  },
-  async (error) => {
-    const originalRequest = error.config
-    const status = error.response?.status
-
-    // 401 且不是刷新 token 请求本身，尝试刷新
-    if (status === 401 && originalRequest && !originalRequest._retry) {
-      originalRequest._retry = true
-      const refreshToken = getItem('refresh_token')
-      if (refreshToken) {
-        try {
-          const data = await authApi.refresh(refreshToken)
-          if (data?.access_token) {
-            setItem('token', data.access_token)
-            setItem('refresh_token', data.refresh_token || refreshToken)
-            originalRequest.headers.Authorization = `Bearer ${data.access_token}`
-            return client(originalRequest)
-          }
-        } catch (refreshError) {
-          // 刷新失败，清空登录态
-          clearAuth()
-          return Promise.reject(refreshError)
-        }
-      }
-      clearAuth()
-    }
-
-    const rawMessage = error.response?.data?.message || error.message || '网络错误'
-    const friendlyMessage = normalizeErrorMessage(status, rawMessage)
-    return Promise.reject(new Error(friendlyMessage))
-  }
-)
 
 function clearAuth() {
   removeItem('token')
@@ -91,70 +30,155 @@ function clearAuth() {
   removeItem('user')
 }
 
-// ====== 认证 API ======
+// 云端 token 刷新（统一账户：claw 与云端共享 JWT secret，一个 token 两端通用；
+// 刷新统一走云端 /auth/refresh，避免在双 client 上递归触发拦截器）
+async function refreshTokenCloud(refreshToken) {
+  try {
+    const resp = await axios.post(
+      `${CLOUD_API}/auth/refresh`,
+      { refresh_token: refreshToken },
+      { headers: { 'Content-Type': 'application/json' } }
+    )
+    const body = resp.data
+    if (body && body.code === 0) return body.data
+    return null
+  } catch {
+    return null
+  }
+}
+
+// 创建带统一拦截器的 axios 实例：注入 JWT、剥离 { code, message, data }、401 自动刷新。
+// baseURL 决定该实例指向本地 claw 还是云端 eleball。
+function createClient(baseURL, { timeout = 15000 } = {}) {
+  const c = axios.create({
+    baseURL,
+    timeout,
+    headers: { 'Content-Type': 'application/json' }
+  })
+
+  c.interceptors.request.use(
+    (config) => {
+      const token = getItem('token')
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`
+      }
+      return config
+    },
+    (error) => Promise.reject(error)
+  )
+
+  c.interceptors.response.use(
+    (response) => {
+      const body = response.data
+      if (body && typeof body === 'object' && 'code' in body) {
+        if (body.code === 0) {
+          return body.data
+        }
+        return Promise.reject(new Error(body.message || '请求失败'))
+      }
+      return body
+    },
+    async (error) => {
+      const originalRequest = error.config
+      const status = error.response?.status
+
+      // 401 且不是刷新请求本身，尝试刷新（统一走云端）
+      if (status === 401 && originalRequest && !originalRequest._retry) {
+        originalRequest._retry = true
+        const refreshToken = getItem('refresh_token')
+        if (refreshToken) {
+          try {
+            const data = await refreshTokenCloud(refreshToken)
+            if (data?.access_token) {
+              setItem('token', data.access_token)
+              setItem('refresh_token', data.refresh_token || refreshToken)
+              originalRequest.headers.Authorization = `Bearer ${data.access_token}`
+              return c(originalRequest)
+            }
+          } catch (refreshError) {
+            clearAuth()
+            return Promise.reject(refreshError)
+          }
+        }
+        clearAuth()
+      }
+
+      const rawMessage = error.response?.data?.message || error.message || '网络错误'
+      const friendlyMessage = normalizeErrorMessage(status, rawMessage)
+      return Promise.reject(new Error(friendlyMessage))
+    }
+  )
+
+  return c
+}
+
+// 本地 claw gateway 实例
+const client = createClient(API_BASE)
+// 云端 eleball 实例（账户/充值/秘技购买/已购拉取）
+const cloudClient = createClient(CLOUD_API)
+
+// ====== 认证 API（云端统一账户）======
 export const authApi = {
-  login: (username, password, deviceId) => client.post('/auth/login', { username, password, device_id: deviceId }),
-  register: (username, password, deviceId) => client.post('/auth/register', { username, password, device_id: deviceId }),
-  refresh: (refreshToken) => client.post('/auth/refresh', { refresh_token: refreshToken }),
-  sendEmailOTP: (email) => client.post('/auth/email/otp/send', { email }),
-  emailLogin: (email, code, deviceId) => client.post('/auth/email/login', { email, code, device_id: deviceId }),
-  me: () => client.get('/auth/me')
+  login: (username, password, deviceId) => cloudClient.post('/auth/login', { username, password, device_id: deviceId }),
+  register: (username, password, deviceId) => cloudClient.post('/auth/register', { username, password, device_id: deviceId }),
+  refresh: (refreshToken) => cloudClient.post('/auth/refresh', { refresh_token: refreshToken }),
+  sendEmailOTP: (email) => cloudClient.post('/auth/email/otp/send', { email }),
+  emailLogin: (email, code, deviceId) => cloudClient.post('/auth/email/login', { email, code, device_id: deviceId }),
+  me: () => cloudClient.get('/auth/me')
 }
 
-// ====== 余额 API ======
+// ====== 余额 API（云端账户余额；claw 本地不计费，余额即云端弹丸）======
 export const billingApi = {
-  getBalance: () => client.get('/billing/balance'),
+  getBalance: () => cloudClient.get('/billing/balance'),
   getRechargeHistory: (page = 1, pageSize = 20) =>
-    client.get(`/billing/recharge-history?page=${page}&page_size=${pageSize}`)
+    cloudClient.get(`/billing/recharge-history?page=${page}&page_size=${pageSize}`)
 }
 
-// ====== 模型 API ======
+// ====== 模型 API（本地 claw：展示本地化模型配置，非云端获取）======
 export const modelApi = {
   list: () => client.get('/eleagent/models')
 }
 
-// ====== Ele Agent API ======
+// ====== Ele Agent API（本地 claw 凭证）======
 export const eleAgentApi = {
   credentials: (subProvider, subModel) =>
     client.get('/eleagent/credentials', { params: { subProvider, subModel } })
 }
 
-// ====== 充值套餐 API ======
+// ====== 充值套餐 API（云端）======
 export const rechargeApi = {
-  listPackages: () => client.get('/recharge/packages')
+  listPackages: () => cloudClient.get('/recharge/packages')
 }
 
-// ====== 支付 API ======
+// ====== 支付 API（云端）======
 export const paymentApi = {
   wechatPrepay: (userId, packageId, quantity = 1) =>
-    client.post('/payment/wechat/prepay', { user_id: userId, package_id: packageId, quantity }),
+    cloudClient.post('/payment/wechat/prepay', { user_id: userId, package_id: packageId, quantity }),
   alipayOrder: (userId, packageId, quantity = 1) =>
-    client.post('/payment/alipay/order', { user_id: userId, package_id: packageId, quantity }),
-  // 支付宝扫码预下单（收银台二维码）。充值场景传 {package_id, quantity}；VIP 场景传 {order_id}
-  alipayPrecreate: (params) => client.post('/payment/alipay/precreate', params),
-  // 查询订单支付状态（收银台轮询）
-  getOrderStatus: (orderId) => client.get(`/orders/${orderId}/status`)
+    cloudClient.post('/payment/alipay/order', { user_id: userId, package_id: packageId, quantity }),
+  alipayPrecreate: (params) => cloudClient.post('/payment/alipay/precreate', params),
+  getOrderStatus: (orderId) => cloudClient.get(`/orders/${orderId}/status`)
 }
 
-// ====== VIP 会员 API ======
+// ====== VIP 会员 API（云端）======
 export const vipApi = {
-  listPlans: () => client.get('/vip/plans'),
-  getStatus: () => client.get('/vip/status'),
+  listPlans: () => cloudClient.get('/vip/plans'),
+  getStatus: () => cloudClient.get('/vip/status'),
   subscribe: (planId, channel = 'wechat', useElegantBalance = false) =>
-    client.post('/vip/subscribe', { plan_id: planId, channel, use_elegant_balance: useElegantBalance })
+    cloudClient.post('/vip/subscribe', { plan_id: planId, channel, use_elegant_balance: useElegantBalance })
 }
 
-// ====== 兑换码 API ======
+// ====== 兑换码 API（云端）======
 export const cdkApi = {
-  redeem: (code) => client.post('/cdk/redeem', { code })
+  redeem: (code) => cloudClient.post('/cdk/redeem', { code })
 }
 
-// ====== 公开配置 API ======
+// ====== 公开配置 API（本地 claw）======
 export const publicSettingApi = {
   get: () => client.get('/public/settings')
 }
 
-// ====== 对话历史 API ======
+// ====== 对话历史 API（本地 claw：本地存储）======
 export const conversationApi = {
   list: (page = 1, pageSize = 20) =>
     client.get(`/conversations?page=${page}&page_size=${pageSize}`),
@@ -167,7 +191,7 @@ export const conversationApi = {
   saveMessage: (id, data) => client.post(`/conversations/${id}/messages`, data)
 }
 
-// ====== Agent 工作流 API ======
+// ====== Agent 工作流 API（本地 claw）======
 export const agentApi = {
   listSearchProviders: () => client.get('/agent/search-providers'),
   listSessions: (page = 1, pageSize = 20) =>
@@ -234,8 +258,7 @@ export const agentApi = {
   }
 }
 
-// ====== 视觉生成 API ======
-// 视觉生成上游耗时较长（图片同步生成可能数十秒），单独放宽超时。
+// ====== 视觉生成 API（本地 claw）======
 export const visualApi = {
   create: (body) => client.post('/visual/generations', body, { timeout: 120000 }),
   get: (id) => client.get(`/visual/generations/${id}`),
@@ -259,37 +282,48 @@ export const visualApi = {
 
 export default client
 
-// ====== Agent 市场 API ======
+// ====== Agent 市场 API（本地 + 云端混合）======
+// 本地部分（claw 本地模块/驱动 + 云端已购合并展示）走 client；
+// 云端部分（购买/我的空间/能力/已购拉取）走 cloudClient。
 export const agentMarketApi = {
-  // 获取当前账户能力（含 agent_market.enabled）
-  getCapabilities: () => client.get('/capabilities'),
-  // 分类列表
+  // --- 本地 claw ---
   getCategories: () => client.get('/market/categories'),
-  // 秘技列表
+  // 秘技列表：claw 本地（本地自部署模块 + 已安装的云端模块），登录态由页面再合并云端已购
   listAgents: (page = 1, pageSize = 20, category = '', sort = 'hot', filter = '') =>
     client.get('/agents', { params: { page, page_size: pageSize, category, sort, filter } }),
-  // 秘技详情
   getAgent: (id) => client.get(`/agents/${id}`),
-  // 购买秘技
-  purchase: (id, currency = 'danwan') =>
-    client.post(`/agents/${id}/purchase`, { agent_id: id, currency }),
-  // 切换收藏
+  // 切换收藏 / 激活（本地运行态）
   toggleFavorite: (id) => client.post(`/agents/${id}/favorite`),
-  // 切换激活状态（购买后控制是否作为工具注入 Agent 工作流）
   toggleActive: (id) => client.post(`/agents/${id}/active`),
-  // 评价列表
+  // 评价（本地）
   listReviews: (id, page = 1, pageSize = 20) =>
     client.get(`/agents/${id}/reviews`, { params: { page, page_size: pageSize } }),
-  // 用户弹丸空间（用于"我的秘技"入口）
-  getUserSpace: () => client.get('/space'),
-  // 查询某 SKU 的凭证 schema 与当前值
+  createReview: (id, rating, comment) =>
+    client.post(`/agents/${id}/reviews`, { rating, comment }),
+  // SKU 凭证（本地）
   getCredentials: (id) => client.get(`/agents/${id}/credentials`),
-  // 保存某 SKU 的凭证
-  saveCredentials: (id, values) => client.post(`/agents/${id}/credentials`, { values })
+  saveCredentials: (id, values) => client.post(`/agents/${id}/credentials`, { values }),
+  // 提交本地秘技到云端审核（转发云端 register 接口）
+  submitForReview: (payload) => cloudClient.post('/market/modules/register', payload),
+
+  // --- 云端 eleball ---
+  // 购买秘技（云端账户扣费）
+  purchase: (id, currency = 'danwan') =>
+    cloudClient.post(`/agents/${id}/purchase`, { agent_id: id, currency }),
+  // 用户弹丸空间（云端账户）
+  getUserSpace: () => cloudClient.get('/space'),
+  // 账户能力（含 agent_market.enabled，云端门控）
+  getCapabilities: () => cloudClient.get('/capabilities')
 }
 
+// ====== claw 云端秘技拉取（claw 登录态拉已购秘技元数据，安装到本地）======
+// 契约：GET /v1/market/modules/installed -> ModuleInstallMeta[]（见 specs/api-schema.yml）
+export const clawMarketApi = {
+  listInstalledModules: (since) =>
+    cloudClient.get('/market/modules/installed', { params: since ? { since } : {} })
+}
 
-// ====== SKU 凭证 API（Cookie / API Key / Token 等） ======
+// ====== SKU 凭证 API（本地 claw，Cookie / API Key / Token）======
 export const agentCredentialApi = {
   getCredentials: (id) => client.get(`/agents/${id}/credentials`),
   saveCredentials: (id, values) => client.post(`/agents/${id}/credentials`, { values })

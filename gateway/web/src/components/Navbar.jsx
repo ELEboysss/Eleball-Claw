@@ -10,6 +10,7 @@ const navLinks = [
   { label: '视觉', href: '/visual' },
   { label: '模型', href: '/models' },
   { label: '技能', href: '/agents' },
+  { label: 'claw 指南', href: '/claw-guide' },
   { label: '文档', href: '/docs' },
 ]
 

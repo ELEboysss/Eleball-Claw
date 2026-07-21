@@ -10,6 +10,7 @@ import VisualStudio from './pages/VisualStudio'
 import Docs from './pages/Docs'
 import Privacy from './pages/Privacy'
 import Terms from './pages/Terms'
+import ClawGuide from './pages/ClawGuide'
 
 function App() {
   const location = useLocation()
@@ -29,6 +30,7 @@ function App() {
           <Route path="/visual" element={<VisualStudio />} />
           <Route path="/video" element={<Navigate to="/visual?tab=video" replace />} />
           <Route path="/docs" element={<Docs />} />
+          <Route path="/claw-guide" element={<ClawGuide />} />
           <Route path="/privacy" element={<Privacy />} />
           <Route path="/terms" element={<Terms />} />
         </Routes>

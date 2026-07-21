@@ -268,6 +268,21 @@ export default function AgentMarket() {
         </p>
       </div>
 
+      {/* claw 未登录提示：仅展示本地自部署模块与驱动，登录后可拉取云端已购秘技 */}
+      {!isLoggedIn && (
+        <div className="mb-6 rounded-xl border border-eleball-primary/30 bg-eleball-primary-light/50 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <p className="text-sm text-eleball-text-secondary">
+            当前仅展示本地自部署模块与驱动。若需要更多秘技，请登录账号从云端拉取已购。
+          </p>
+          <button
+            onClick={() => setLoginOpen(true)}
+            className="btn-primary text-xs px-4 py-1.5 shrink-0"
+          >
+            登录账号
+          </button>
+        </div>
+      )}
+
       {/* 全部 / 我的秘技 Tab */}
       <div className="flex justify-center mb-6">
         <div className="inline-flex p-1 rounded-xl bg-eleball-surface-variant border border-eleball-outline-variant">
