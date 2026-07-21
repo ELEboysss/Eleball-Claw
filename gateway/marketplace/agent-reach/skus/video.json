@@ -1,0 +1,52 @@
+{
+  "$schema": "../../../specs/tool-manifest-schema.json",
+  "id": "com.eleball.tools.agent_reach.video",
+  "name": "视频解析器",
+  "description": "基于 Agent-Reach 的 YouTube/B站 字幕提取与搜索。",
+  "driver": "agent_reach",
+  "runtime_type": "remote",
+  "category": "互联网",
+  "level": 3,
+  "permissions": ["network"],
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["youtube_subtitles", "bilibili_search"],
+        "description": "操作类型：youtube_subtitles 提取 YouTube 字幕，bilibili_search 搜索 B站 视频"
+      },
+      "query": {
+        "type": "string",
+        "description": "YouTube 视频 URL、B站 视频 URL 或 B站 搜索关键词"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "返回条数，仅 bilibili_search 生效",
+        "default": 5
+      }
+    },
+    "required": ["action", "query"]
+  },
+  "actions": [
+    { "name": "youtube_subtitles", "description": "提取 YouTube 字幕" },
+    { "name": "bilibili_search", "description": "B站搜索" }
+  ],
+  "credentials": {
+    "youtube_cookie": {
+      "type": "cookie",
+      "label": "YouTube Cookie",
+      "description": "用于提取年龄限制或会员视频字幕的浏览器 Cookie Header String（yt-dlp 可用格式）。",
+      "placeholder": "粘贴 Cookie-Editor 导出的 Header String",
+      "required": false
+    },
+    "bilibili_cookie": {
+      "type": "cookie",
+      "label": "B站 Cookie",
+      "description": "用于 B站搜索/字幕的 SESSDATA 或完整 Cookie Header String。",
+      "placeholder": "粘贴 B站 Cookie",
+      "required": false
+    }
+  },
+  "timeout_seconds": 120
+}

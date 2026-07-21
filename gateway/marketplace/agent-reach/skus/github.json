@@ -1,0 +1,45 @@
+{
+  "$schema": "../../../specs/tool-manifest-schema.json",
+  "id": "com.eleball.tools.agent_reach.github",
+  "name": "开发者雷达",
+  "description": "基于 Agent-Reach 的 GitHub 仓库查看与代码搜索。",
+  "driver": "agent_reach",
+  "runtime_type": "remote",
+  "category": "开发",
+  "level": 2,
+  "permissions": ["network"],
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["github_repo", "github_search"],
+        "description": "操作类型：github_repo 查看仓库，github_search 搜索仓库"
+      },
+      "query": {
+        "type": "string",
+        "description": "仓库名（owner/repo）或搜索关键词"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "返回条数，仅 github_search 生效",
+        "default": 5
+      }
+    },
+    "required": ["action", "query"]
+  },
+  "actions": [
+    { "name": "github_repo", "description": "查看 GitHub 仓库" },
+    { "name": "github_search", "description": "搜索 GitHub 仓库" }
+  ],
+  "credentials": {
+    "github_token": {
+      "type": "api_key",
+      "label": "GitHub Token",
+      "description": "可选，用于提高 GitHub API 速率限额或访问私有仓库。",
+      "placeholder": "ghp_...",
+      "required": false
+    }
+  },
+  "timeout_seconds": 60
+}

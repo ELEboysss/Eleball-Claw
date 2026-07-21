@@ -1,0 +1,718 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/eleball/gateway/internal/model"
+	"github.com/eleball/gateway/internal/repository"
+)
+
+// ToolFunc 工具函数签名
+type ToolFunc func(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error)
+
+// ToolEnv 工具执行环境
+type ToolEnv struct {
+	UserID         string
+	AgentID        string // 当前调用的 SKU/AgentItem ID，用于凭证注入
+	ConversationID string
+	SessionID      string
+	Sandbox        *FileSandbox
+	SessionRepo    *repository.AgentSessionRepo
+	SearchProvider string // 当前 conversation 选择的搜索源，如 baidu / bing
+	// Credentials 当前工具声明的凭证字段定义，供驱动校验/注入
+	Credentials map[string]model.CredentialDef
+}
+
+// SaveOutput 将工具产物登记为匿名资源
+func (env *ToolEnv) SaveOutput(fileName, mimeType, diskPath string, fileSize int64) (string, error) {
+	if env.SessionRepo == nil {
+		return "", errors.New("SessionRepo 未配置，无法保存资源")
+	}
+	id := generateID("ar")
+	output := &model.AgentSessionOutput{
+		ID:         generateID("aso"),
+		SessionID:  env.SessionID,
+		ResourceID: id,
+		FileName:   fileName,
+		MimeType:   mimeType,
+		FileSize:   fileSize,
+		DiskPath:   diskPath,
+		CreatedAt:  time.Now().Unix(),
+	}
+	if err := env.SessionRepo.SaveOutput(output); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// Tool 工具定义
+type Tool struct {
+	Name        string
+	Description string
+	Parameters  map[string]interface{} // JSON Schema
+	Func        ToolFunc
+	ServerSide  bool                // 是否需要服务器端权限（VIP）
+	Manifest    *model.ToolManifest // 工具标准描述（可选，用于集市化与动态加载）
+	Driver      string              // 驱动标识：builtin / agent_reach / remote_url 等
+	AgentID     string              // 对应 AgentItem/SKU ID，用于凭证注入
+	Credentials map[string]model.CredentialDef
+}
+
+// ToolRegistry 工具注册表
+type ToolRegistry struct {
+	tools          map[string]*Tool
+	runner         PlatformToolRunner
+	searchProvider SearchProvider
+	driverRegistry *ToolDriverRegistry
+}
+
+// NewToolRegistry 创建工具注册表，使用默认跨平台运行器和搜索提供者
+func NewToolRegistry() *ToolRegistry {
+	driverRegistry := NewToolDriverRegistry()
+	r := &ToolRegistry{
+		tools:          make(map[string]*Tool),
+		runner:         NewPlatformRunner(),
+		searchProvider: NewSearchProvider(),
+		driverRegistry: driverRegistry,
+	}
+	r.registerBuiltinDriver(driverRegistry)
+	driverRegistry.Register(newRemoteURLDriver(60))
+	r.registerDefaults()
+	return r
+}
+
+// NewToolRegistryWithDeps 创建工具注册表，可注入自定义运行器和搜索提供者（便于测试）
+func NewToolRegistryWithDeps(runner PlatformToolRunner, sp SearchProvider) *ToolRegistry {
+	driverRegistry := NewToolDriverRegistry()
+	r := &ToolRegistry{
+		tools:          make(map[string]*Tool),
+		runner:         runner,
+		searchProvider: sp,
+		driverRegistry: driverRegistry,
+	}
+	r.registerBuiltinDriver(driverRegistry)
+	r.registerDefaults()
+	return r
+}
+
+// NewToolRegistryWithDriverRegistry 创建工具注册表，可注入驱动注册表（便于动态加载测试）
+func NewToolRegistryWithDriverRegistry(runner PlatformToolRunner, sp SearchProvider, driverRegistry *ToolDriverRegistry) *ToolRegistry {
+	r := &ToolRegistry{
+		tools:          make(map[string]*Tool),
+		runner:         runner,
+		searchProvider: sp,
+		driverRegistry: driverRegistry,
+	}
+	r.registerDefaults()
+	return r
+}
+
+// registerBuiltinDriver 注册系统内置驱动
+func (r *ToolRegistry) registerBuiltinDriver(registry *ToolDriverRegistry) {
+	registry.Register(&builtinToolDriver{registry: r})
+}
+
+// Register 注册工具
+func (r *ToolRegistry) Register(tool *Tool) {
+	r.tools[tool.Name] = tool
+}
+
+// Get 获取工具
+func (r *ToolRegistry) Get(name string) (*Tool, bool) {
+	tool, ok := r.tools[name]
+	return tool, ok
+}
+
+// List 列出所有工具
+func (r *ToolRegistry) List() []*Tool {
+	items := make([]*Tool, 0, len(r.tools))
+	for _, tool := range r.tools {
+		items = append(items, tool)
+	}
+	return items
+}
+
+// ListAvailable 根据用户权限列出可用工具
+func (r *ToolRegistry) ListAvailable(isVIP bool) []*Tool {
+	var items []*Tool
+	for _, tool := range r.tools {
+		if tool.ServerSide && !isVIP {
+			continue
+		}
+		items = append(items, tool)
+	}
+	return items
+}
+
+// DriverRegistry 返回驱动注册表
+func (r *ToolRegistry) DriverRegistry() *ToolDriverRegistry {
+	return r.driverRegistry
+}
+
+// Clone 深度克隆工具注册表（用于会话级动态工具注入）
+func (r *ToolRegistry) Clone() *ToolRegistry {
+	cloned := &ToolRegistry{
+		tools:          make(map[string]*Tool, len(r.tools)),
+		runner:         r.runner,
+		searchProvider: r.searchProvider,
+		driverRegistry: r.driverRegistry,
+	}
+	for name, tool := range r.tools {
+		cloned.tools[name] = tool
+	}
+	return cloned
+}
+
+// registerDefaults 注册默认工具
+func (r *ToolRegistry) registerDefaults() {
+	r.Register(&Tool{
+		Name:        "SearchWeb",
+		Description: "联网搜索，获取实时信息。国内云服务器推荐配置 baidu（每日 100 次免费额度）或 bing",
+		ServerSide:  false,
+		Driver:      string(model.ToolDriverBuiltin),
+		Manifest: &model.ToolManifest{
+			ID:          "com.eleball.tools.search_web",
+			Name:        "联网搜索",
+			Description: "联网搜索，获取实时信息。",
+			Driver:      model.ToolDriverBuiltin,
+			Category:    "搜索",
+			Level:       1,
+			Permissions: []model.ToolPermission{},
+			Actions:     []model.ToolAction{{Name: "search", Description: "执行搜索", Params: map[string]string{"query": "query"}}},
+		},
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query": map[string]interface{}{
+					"type":        "string",
+					"description": "搜索关键词",
+				},
+			},
+			"required": []string{"query"},
+		},
+		Func: r.toolSearchWeb,
+	})
+
+	r.Register(&Tool{
+		Name:        "FetchURL",
+		Description: "抓取指定网页的正文内容，用于深度阅读搜索结果页面",
+		ServerSide:  false,
+		Driver:      string(model.ToolDriverBuiltin),
+		Manifest: &model.ToolManifest{
+			ID:          "com.eleball.tools.fetch_url",
+			Name:        "网页抓取",
+			Description: "抓取指定网页的正文内容。",
+			Driver:      model.ToolDriverBuiltin,
+			Category:    "搜索",
+			Level:       1,
+			Permissions: []model.ToolPermission{model.ToolPermissionNetwork},
+			Actions:     []model.ToolAction{{Name: "fetch", Description: "抓取网页", Params: map[string]string{"url": "url"}}},
+		},
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"url": map[string]interface{}{
+					"type":        "string",
+					"description": "需要抓取的网页 URL",
+				},
+			},
+			"required": []string{"url"},
+		},
+		Func: r.toolFetchURL,
+	})
+
+	r.Register(&Tool{
+		Name:        "ReadFile",
+		Description: "读取用户 conversation 目录或公共知识库中的文件内容",
+		ServerSide:  true,
+		Driver:      string(model.ToolDriverBuiltin),
+		Manifest: &model.ToolManifest{
+			ID:          "com.eleball.tools.read_file",
+			Name:        "读取文件",
+			Description: "读取用户 conversation 目录或公共知识库中的文件内容。",
+			Driver:      model.ToolDriverBuiltin,
+			Category:    "文件",
+			Level:       1,
+			Permissions: []model.ToolPermission{model.ToolPermissionFileTools},
+			Actions:     []model.ToolAction{{Name: "read", Description: "读取文件", Params: map[string]string{"path": "path"}}},
+		},
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "文件相对路径",
+				},
+			},
+			"required": []string{"path"},
+		},
+		Func: r.toolReadFile,
+	})
+
+	r.Register(&Tool{
+		Name:        "WriteFile",
+		Description: "在用户 conversation 目录中写入或覆盖文件",
+		ServerSide:  true,
+		Driver:      string(model.ToolDriverBuiltin),
+		Manifest: &model.ToolManifest{
+			ID:          "com.eleball.tools.write_file",
+			Name:        "写入文件",
+			Description: "在用户 conversation 目录中写入或覆盖文件。",
+			Driver:      model.ToolDriverBuiltin,
+			Category:    "文件",
+			Level:       1,
+			Permissions: []model.ToolPermission{model.ToolPermissionFileTools},
+			Actions:     []model.ToolAction{{Name: "write", Description: "写入文件", Params: map[string]string{"path": "path", "content": "content"}}},
+		},
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "文件相对路径",
+				},
+				"content": map[string]interface{}{
+					"type":        "string",
+					"description": "文件内容",
+				},
+			},
+			"required": []string{"path", "content"},
+		},
+		Func: r.toolWriteFile,
+	})
+
+	r.Register(&Tool{
+		Name:        "StrReplaceFile",
+		Description: "修改用户 conversation 目录中的文件内容",
+		ServerSide:  true,
+		Driver:      string(model.ToolDriverBuiltin),
+		Manifest: &model.ToolManifest{
+			ID:          "com.eleball.tools.str_replace_file",
+			Name:        "替换文件内容",
+			Description: "修改用户 conversation 目录中的文件内容。",
+			Driver:      model.ToolDriverBuiltin,
+			Category:    "文件",
+			Level:       1,
+			Permissions: []model.ToolPermission{model.ToolPermissionFileTools},
+			Actions:     []model.ToolAction{{Name: "replace", Description: "替换文件内容", Params: map[string]string{"path": "path", "old_string": "old_string", "new_string": "new_string"}}},
+		},
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "文件相对路径",
+				},
+				"old_string": map[string]interface{}{
+					"type":        "string",
+					"description": "需要替换的原始字符串",
+				},
+				"new_string": map[string]interface{}{
+					"type":        "string",
+					"description": "替换后的新字符串",
+				},
+			},
+			"required": []string{"path", "old_string", "new_string"},
+		},
+		Func: r.toolStrReplaceFile,
+	})
+
+	r.Register(&Tool{
+		Name:        "Grep",
+		Description: "在沙箱内搜索文件内容。仅允许访问当前用户的 conversation/session 目录和公共知识库目录",
+		ServerSide:  true,
+		Driver:      string(model.ToolDriverBuiltin),
+		Manifest: &model.ToolManifest{
+			ID:          "com.eleball.tools.grep",
+			Name:        "文件搜索",
+			Description: "在沙箱内搜索文件内容。",
+			Driver:      model.ToolDriverBuiltin,
+			Category:    "文件",
+			Level:       1,
+			Permissions: []model.ToolPermission{model.ToolPermissionFileTools},
+			Actions:     []model.ToolAction{{Name: "grep", Description: "搜索文件内容", Params: map[string]string{"path": "path", "pattern": "pattern", "recursive": "recursive"}}},
+		},
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "相对路径，文件或目录",
+				},
+				"pattern": map[string]interface{}{
+					"type":        "string",
+					"description": "搜索模式（支持基本正则）",
+				},
+				"recursive": map[string]interface{}{
+					"type":        "boolean",
+					"description": "是否递归搜索目录，path 为目录时自动递归",
+				},
+			},
+			"required": []string{"path", "pattern"},
+		},
+		Func: r.toolGrep,
+	})
+
+	r.Register(&Tool{
+		Name:        "Shell",
+		Description: "在服务器执行受限 shell 命令。格式要求：command 只填主命令（单个词，不含空格），参数必须放入 args 数组，不要把整行命令塞进 command。仅允许白名单命令（ls/cat/pwd/echo/head/tail/wc/grep/find/sort/uniq/cut/python3/pip3/node/which/date 等只读命令）；不支持管道 |、重定向 >/<、多命令（&&/||/;）、内联执行（-c/-e）。示例：{\"command\":\"grep\",\"args\":[\"-rn\",\"关键词\",\".\"]}",
+		ServerSide:  true,
+		Driver:      string(model.ToolDriverBuiltin),
+		Manifest: &model.ToolManifest{
+			ID:          "com.eleball.tools.shell",
+			Name:        "受限 Shell",
+			Description: "在服务器执行受限 shell 命令。",
+			Driver:      model.ToolDriverBuiltin,
+			Category:    "系统",
+			Level:       2,
+			Permissions: []model.ToolPermission{model.ToolPermissionFileTools, model.ToolPermissionShell},
+			Actions:     []model.ToolAction{{Name: "shell", Description: "执行受限 shell 命令", Params: map[string]string{"command": "command", "args": "args"}}},
+		},
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"command": map[string]interface{}{
+					"type":        "string",
+					"description": "主命令（单个词，不含空格与参数），如 ls、grep、python3",
+				},
+				"args": map[string]interface{}{
+					"type":        "array",
+					"items":       map[string]interface{}{"type": "string"},
+					"description": "命令参数数组，每个元素一个参数，如 [\"-rn\",\"关键词\",\".\"]；不要拼接成单个字符串",
+				},
+			},
+			"required": []string{"command"},
+		},
+		Func: r.toolShell,
+	})
+
+	r.Register(&Tool{
+		Name:        "OCR",
+		Description: "识别图片中的文字。Ubuntu 24.04 需安装 tesseract-ocr；Windows 需安装 tesseract 并加入 PATH",
+		ServerSide:  true,
+		Driver:      string(model.ToolDriverBuiltin),
+		Manifest: &model.ToolManifest{
+			ID:          "com.eleball.tools.ocr",
+			Name:        "图片文字识别",
+			Description: "识别图片中的文字。",
+			Driver:      model.ToolDriverBuiltin,
+			Category:    "多媒体",
+			Level:       2,
+			Permissions: []model.ToolPermission{model.ToolPermissionFileTools},
+			Actions:     []model.ToolAction{{Name: "ocr", Description: "识别图片文字", Params: map[string]string{"path": "path"}}},
+		},
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "图片相对路径",
+				},
+			},
+			"required": []string{"path"},
+		},
+		Func: r.toolOCR,
+	})
+
+	// VideoGenerate 已移除：当前实现仅为 ffmpeg 占位视频，非真正 AI 视频生成，
+	// 避免误导用户。后续接入 Seedance / CogVideo / 可灵等真实文生视频 API 后再恢复。
+}
+
+// toolSearchWeb 搜索工具
+func (r *ToolRegistry) toolSearchWeb(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
+	query, _ := input["query"].(string)
+	if query == "" {
+		return nil, errors.New("query 不能为空")
+	}
+	// 优先使用 conversation 选择的搜索源；未指定或指定的源不可用时，动态回退到第一个可用源
+	providerName := ""
+	if env != nil && env.SearchProvider != "" {
+		providerName = env.SearchProvider
+	}
+	if providerName == "" || !IsSearchProviderAvailable(providerName) {
+		providerName = GetFirstAvailableSearchProvider()
+	}
+	if providerName == "" {
+		return r.searchProvider.Search(ctx, query)
+	}
+	return GetSearchProvider(providerName).Search(ctx, query)
+}
+
+// toolFetchURL 抓取网页正文工具
+func (r *ToolRegistry) toolFetchURL(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
+	urlStr, _ := input["url"].(string)
+	if urlStr == "" {
+		return nil, errors.New("url 不能为空")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.0")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("网页返回 %d", resp.StatusCode)
+	}
+
+	// 限制读取长度，避免 token 爆炸
+	const maxBytes = 256 * 1024
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	if err != nil {
+		return nil, err
+	}
+
+	title := extractTitle(string(body))
+	text := stripHTMLTags(string(body))
+	// 进一步压缩空白字符
+	re := regexp.MustCompile(`\s+`)
+	text = re.ReplaceAllString(text, " ")
+	// 限制返回字符数
+	const maxChars = 8000
+	if len(text) > maxChars {
+		text = text[:maxChars] + "\n[内容已截断]"
+	}
+
+	return map[string]interface{}{
+		"url":   urlStr,
+		"title": title,
+		"text":  text,
+	}, nil
+}
+
+// extractTitle 从 HTML 中提取 <title> 内容
+func extractTitle(html string) string {
+	re := regexp.MustCompile(`(?i)<title[^>]*>([^<]*)</title>`)
+	matches := re.FindStringSubmatch(html)
+	if len(matches) > 1 {
+		return strings.TrimSpace(matches[1])
+	}
+	return ""
+}
+
+// toolReadFile 读文件工具
+func (r *ToolRegistry) toolReadFile(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
+	path, _ := input["path"].(string)
+	absPath, err := env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := env.Sandbox.ReadFile(absPath)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"path":     path,
+		"abs_path": absPath,
+		"content":  string(data),
+	}, nil
+}
+
+// toolWriteFile 写文件工具
+func (r *ToolRegistry) toolWriteFile(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
+	path, _ := input["path"].(string)
+	content, _ := input["content"].(string)
+	if path == "" {
+		return nil, errors.New("path 不能为空")
+	}
+	absPath, err := env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
+	if err != nil {
+		return nil, err
+	}
+	if err := env.Sandbox.WriteFile(absPath, []byte(content)); err != nil {
+		return nil, err
+	}
+
+	fileName := filepath.Base(absPath)
+	mimeType := mime.TypeByExtension(filepath.Ext(absPath))
+	var fileSize int64
+	if fi, err := os.Stat(absPath); err == nil {
+		fileSize = fi.Size()
+	}
+	resourceID, err := env.SaveOutput(fileName, mimeType, absPath, fileSize)
+	if err != nil {
+		// 资源登记失败不影响工具结果，但记录日志以便排查
+		return map[string]interface{}{
+			"path":     path,
+			"abs_path": absPath,
+			"written":  true,
+			"error":    fmt.Sprintf("登记下载资源失败: %v", err),
+		}, nil
+	}
+
+	return map[string]interface{}{
+		"path":         path,
+		"abs_path":     absPath,
+		"written":      true,
+		"resource_id":  resourceID,
+		"mime_type":    mimeType,
+		"download_url": fmt.Sprintf("/v1/agent/resources/%s", resourceID),
+	}, nil
+}
+
+// toolStrReplaceFile 修改文件工具
+func (r *ToolRegistry) toolStrReplaceFile(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
+	path, _ := input["path"].(string)
+	oldString, _ := input["old_string"].(string)
+	newString, _ := input["new_string"].(string)
+	if oldString == "" {
+		return nil, errors.New("old_string 不能为空")
+	}
+
+	absPath, err := env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := env.Sandbox.ReadFile(absPath)
+	if err != nil {
+		return nil, err
+	}
+	content := strings.ReplaceAll(string(data), oldString, newString)
+	if err := env.Sandbox.WriteFile(absPath, []byte(content)); err != nil {
+		return nil, err
+	}
+
+	fileName := filepath.Base(absPath)
+	mimeType := mime.TypeByExtension(filepath.Ext(absPath))
+	var fileSize int64
+	if fi, err := os.Stat(absPath); err == nil {
+		fileSize = fi.Size()
+	}
+	resourceID, err := env.SaveOutput(fileName, mimeType, absPath, fileSize)
+	if err != nil {
+		return map[string]interface{}{
+			"path":     path,
+			"abs_path": absPath,
+			"modified": true,
+			"error":    fmt.Sprintf("登记下载资源失败: %v", err),
+		}, nil
+	}
+
+	return map[string]interface{}{
+		"path":         path,
+		"abs_path":     absPath,
+		"modified":     true,
+		"resource_id":  resourceID,
+		"mime_type":    mimeType,
+		"download_url": fmt.Sprintf("/v1/agent/resources/%s", resourceID),
+	}, nil
+}
+
+// toolGrep 在沙箱内搜索文件内容
+// 仅允许访问当前用户 conversation/session 目录和公共知识库目录。
+// 实现为 Go 内置正则搜索（跨平台，不依赖外部 grep 命令，Windows 部署可用）。
+func (r *ToolRegistry) toolGrep(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
+	path, _ := input["path"].(string)
+	pattern, _ := input["pattern"].(string)
+	if path == "" {
+		return nil, errors.New("path 不能为空")
+	}
+	if pattern == "" {
+		return nil, errors.New("pattern 不能为空")
+	}
+
+	absPath, err := env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
+	if err != nil {
+		return nil, err
+	}
+
+	// 安全检查：pattern 中不能包含 shell 元字符或空字节
+	if err := shellSafe(pattern); err != nil {
+		return nil, fmt.Errorf("pattern 包含非法字符: %w", err)
+	}
+
+	recursive := false
+	if rec, ok := input["recursive"].(bool); ok {
+		recursive = rec
+	}
+
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("正则表达式非法: %w", err)
+	}
+
+	matches, err := searchPattern(ctx, absPath, re, recursive, false)
+	if err != nil {
+		return nil, fmt.Errorf("grep 执行失败: %w", err)
+	}
+
+	// 与 GNU grep 输出习惯对齐：单文件输出 "行号:内容"，目录搜索输出 "路径:行号:内容"
+	singleFile := true
+	if info, statErr := os.Stat(absPath); statErr == nil && info.IsDir() {
+		singleFile = false
+	}
+	return map[string]interface{}{
+		"path":      path,
+		"abs_path":  absPath,
+		"pattern":   pattern,
+		"matches":   formatGrepMatches(matches, singleFile),
+		"truncated": len(matches) >= grepMaxMatches,
+	}, nil
+}
+
+// toolShell 受限 shell 工具
+func (r *ToolRegistry) toolShell(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
+	command, _ := input["command"].(string)
+	if command == "" {
+		return nil, errors.New("command 不能为空")
+	}
+	if err := shellSafe(command); err != nil {
+		return nil, fmt.Errorf("%w。%s", err, shellUsageHint)
+	}
+
+	var args []string
+	if rawArgs, ok := input["args"].([]interface{}); ok {
+		for _, a := range rawArgs {
+			if s, ok := a.(string); ok {
+				if err := shellSafe(s); err != nil {
+					return nil, fmt.Errorf("参数包含非法字符: %w。%s", err, shellUsageHint)
+				}
+				args = append(args, s)
+			}
+		}
+	}
+
+	output, err := r.runner.Shell(ctx, command, args)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"command": command,
+		"args":    args,
+		"output":  output,
+	}, nil
+}
+
+// toolOCR OCR 工具
+func (r *ToolRegistry) toolOCR(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
+	path, _ := input["path"].(string)
+	absPath, err := env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
+	if err != nil {
+		return nil, err
+	}
+	text, err := r.runner.OCR(ctx, absPath)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"path": path,
+		"text": text,
+	}, nil
+}

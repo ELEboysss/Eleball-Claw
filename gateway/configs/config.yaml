@@ -1,0 +1,106 @@
+server:
+  port: 8080
+  mode: release
+  eleagent_base_url: "http://localhost:8080/v1"
+
+database:
+  driver: sqlite
+  # 数据库文件放在 data/ 下，与 docker-compose.yml 的 ./data:/root/data 挂载对齐，
+  # 确保账户、订单、Ele Agent 模型配置等数据在容器重建后不会丢失。
+  dsn: "data/eleball.db"
+
+cdk_database:
+  driver: sqlite
+  # 兑换码库存单独存放，避免与主业务库混用，同时保留持久化。
+  dsn: "data/cdk.db"
+
+jwt:
+  secret: "change-me-in-production"
+  access_expire_hours: 2
+  refresh_expire_hours: 720
+
+llm:
+  timeout: 120s
+  max_retries: 3
+
+asr:
+  # 语音识别代理供应商，目前仅支持 baidu
+  provider: "baidu"
+  # 百度短语音识别应用凭证，建议通过环境变量 ASR_APP_ID / ASR_API_KEY / ASR_SECRET_KEY 注入
+  app_id: ""
+  api_key: ""
+  secret_key: ""
+  # 百度语音识别 BaseURL，默认 https://vop.baidu.com
+  base_url: "https://vop.baidu.com"
+  timeout: 30s
+  # 单条音频最大限制（MB）
+  max_audio_mb: 10
+
+rate_limit:
+  # 写操作（POST/PUT/PATCH/DELETE）每 IP 每分钟限制
+  requests_per_minute: 180
+  # 读操作（GET/HEAD/OPTIONS）限流倍率，读请求限制 = requests_per_minute * read_multiplier
+  # 视觉轮询等高频读请求需要更宽松的限制
+  read_multiplier: 3.0
+
+release:
+  # 发布产物根目录，gateway 通过 /v1/releases/android 接口提供 APK 下载。
+  # 本地开发使用 "releases"（相对 gateway 工作目录）；
+  # Docker / 生产部署应通过环境变量 RELEASE_ROOT_PATH 覆盖为绝对路径，
+  # 例如 /root/releases，确保 manifest.json 与 APK 可被正确读取。
+  root_path: "releases"
+
+agent:
+  enabled: true
+  base_path: "data/sessions"
+  knowledge_base: "data/knowledge_base"
+  model: "gpt-4o-mini"
+  # 允许模型进行较复杂的工具链编排；循环调用同工具同参数会被单独检测并终止
+  max_steps: 500
+  # 环境变量 AGENT_API_KEY / AGENT_BASE_URL 可覆盖
+  api_key: ""
+  base_url: ""
+
+agent_reach:
+  # 集市模块探测客户端配置（已泛化，不再绑定具体 SKU）。
+  # 默认模块服务地址（空表示使用 modules 表中各模块自身 URL）
+  module_url: ""
+  # 请求触发时的健康检查缓存间隔
+  health_check_interval: 30s
+  # 后端主动探测周期，默认 5 分钟；0 表示关闭后台探测
+  probe_interval: 5m
+  # 代理地址，用于受限网络（如 http://user:pass@ip:port）
+  proxy: ""
+
+admin:
+  # 是否启用 /v1/admin 管理后台接口与 admin-web。
+  # 默认为 false，只有显式开启后才会注册 /v1/admin/* 路由，防止生产环境误暴露管理后台。
+  enabled: false
+  # 是否启用管理后台接口 IP 白名单
+  # 开启后，仅 allowed_ips 中的 IP/CIDR 可访问 /v1/admin/*。
+  ip_whitelist_enabled: false
+  # 允许访问管理后台的 IP 或 CIDR 列表
+  # 示例：["127.0.0.1", "10.0.0.0/8", "192.168.1.0/24"]
+  allowed_ips: []
+
+payment:
+  # 订单过期时长（分钟）：超时未支付的 pending 订单由后台任务自动关闭（status→closed）。
+  # 与支付宝二维码 timeout_express（30m）对齐；环境变量 PAYMENT_ORDER_EXPIRE_MINUTES 可覆盖。
+  order_expire_minutes: 30
+  alipay:
+    # 是否启用支付宝支付。未配置真实密钥前保持 false，
+    # 此时 /v1/payment/alipay/precreate 返回“支付未开通”，用户端引导使用兑换码。
+    enabled: false
+    # 支付宝开放平台应用 APPID，建议环境变量 ALIPAY_APP_ID 注入
+    app_id: ""
+    # 应用私钥（RSA2）。严禁把真实私钥提交到仓库！
+    # 生产环境务必通过环境变量 ALIPAY_PRIVATE_KEY 注入（多行 PEM 可用 \n 转义单行）。
+    private_key: ""
+    # 支付宝公钥（用于回调验签，注意不是应用公钥），可用环境变量 ALIPAY_PUBLIC_KEY 注入
+    alipay_public_key: ""
+    # 公网可达的异步通知地址，例如 https://api.eleball.cn/v1/payment/alipay/notify
+    notify_url: ""
+    # 沙箱模式：true 时使用支付宝沙箱网关（联调阶段），生产必须为 false
+    sandbox: false
+    # 预留：周期扣款（自动续费）产品码，当前版本仅单次支付，不启用
+    sign_product_code: ""

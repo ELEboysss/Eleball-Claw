@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <radialGradient id="iconGradient" cx="35%" cy="30%" r="65%" fx="35%" fy="30%">
+      <stop offset="0%" stop-color="#5DE8D4" />
+      <stop offset="40%" stop-color="#14B8A6" />
+      <stop offset="100%" stop-color="#0D9488" />
+    </radialGradient>
+    <filter id="iconShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#0D9488" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <circle cx="128" cy="128" r="90" fill="url(#iconGradient)" filter="url(#iconShadow)" />
+  <ellipse cx="98" cy="98" rx="36" ry="24" fill="#FFFFFF" opacity="0.35" transform="rotate(-45 98 98)" />
+  <ellipse cx="110" cy="90" rx="20" ry="8" fill="#FFFFFF" opacity="0.2" transform="rotate(-45 110 90)" />
+
+  <!-- 眨眼 -->
+  <path d="M 93 121 Q 103 126 113 121" stroke="#0F172A" stroke-width="5" stroke-linecap="round" fill="none" opacity="0.85" />
+  <!-- 右眼 -->
+  <circle cx="143" cy="124" r="7" fill="#0F172A" opacity="0.85" />
+  <circle cx="141" cy="122" r="2.5" fill="#FFFFFF" opacity="0.9" />
+  <!-- 微笑 -->
+  <path d="M 98 148 Q 123 171 148 143" stroke="#0F172A" stroke-width="6" stroke-linecap="round" fill="none" opacity="0.85" />
+  <!-- 红晕 -->
+  <ellipse cx="88" cy="148" rx="10" ry="6" fill="#F472B6" opacity="0.25" />
+</svg>

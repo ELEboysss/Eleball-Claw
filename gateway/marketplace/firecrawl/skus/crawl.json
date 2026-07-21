@@ -1,0 +1,39 @@
+{
+  "$schema": "../../../specs/tool-manifest-schema.json",
+  "id": "com.eleball.tools.firecrawl.crawl",
+  "name": "Firecrawl 批量爬取",
+  "description": "对指定网站启动批量爬取任务，返回任务 ID。",
+  "driver": "firecrawl",
+  "runtime_type": "remote",
+  "category": "互联网",
+  "level": 3,
+  "permissions": ["network"],
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "爬取起始 URL"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "最大抓取页数",
+        "default": 10
+      }
+    },
+    "required": ["url"]
+  },
+  "actions": [
+    { "name": "crawl", "description": "批量爬取网站，返回任务 ID" }
+  ],
+  "credentials": {
+    "firecrawl_api_key": {
+      "type": "api_key",
+      "label": "Firecrawl API Key",
+      "description": "用于调用 Firecrawl Cloud API，可从 https://firecrawl.dev 获取。",
+      "placeholder": "fc-...",
+      "required": false
+    }
+  },
+  "timeout_seconds": 120
+}

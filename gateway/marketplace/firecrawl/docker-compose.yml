@@ -1,0 +1,33 @@
+version: "3.8"
+
+services:
+  firecrawl:
+    build:
+      # 使用项目根目录作为 build context，便于后续扩展引入 providers/firecrawl 子模块
+      context: ../../..
+      dockerfile: gateway/marketplace/firecrawl/Dockerfile
+      args:
+        # 允许通过环境变量覆盖 Python 基础镜像，解决国内拉取 Docker Hub 超时问题
+        - PYTHON_BASE_IMAGE=${PYTHON_BASE_IMAGE:-swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.12-slim}
+    container_name: eleball-firecrawl
+    networks:
+      - eleball-net
+    environment:
+      - PORT=8080
+      # 默认使用 Firecrawl Cloud API（推荐，最轻量）。
+      # Firecrawl API Key 也可以在网关侧按 SKU 由用户自行填写（通过 credentials.firecrawl_api_key 传入），
+      # 这里的环境变量仅作为模块级兜底，方便未配置 SKU 凭证时的快速测试。
+      - FIRECRAWL_BASE_URL=${FIRECRAWL_BASE_URL:-https://api.firecrawl.dev}
+      - FIRECRAWL_API_KEY=${FIRECRAWL_API_KEY:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+networks:
+  eleball-net:
+    external: true
+    name: eleball-net

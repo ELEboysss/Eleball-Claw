@@ -1,0 +1,23 @@
+{
+  "module_id": "agent-reach",
+  "name": "Agent-Reach 互联网能力",
+  "description": "网页阅读、搜索、视频字幕、GitHub、社交平台等",
+  "url": "http://agent-reach:8080",
+  "transport_type": "module",
+  "capabilities": [
+    "web_read",
+    "search",
+    "youtube_subtitles",
+    "bilibili_search",
+    "github_repo",
+    "github_search",
+    "rss_read",
+    "social_search",
+    "social_read"
+  ],
+  "driver": {
+    "driver_id": "agent_reach",
+    "name": "Agent-Reach 互联网能力",
+    "description": "网页阅读、搜索、视频字幕、GitHub、社交平台等"
+  }
+}

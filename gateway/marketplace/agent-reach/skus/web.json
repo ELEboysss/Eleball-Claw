@@ -1,0 +1,36 @@
+{
+  "$schema": "../../../specs/tool-manifest-schema.json",
+  "id": "com.eleball.tools.agent_reach.web",
+  "name": "全网洞察",
+  "description": "基于 Agent-Reach 的网页阅读与全网语义搜索，零配置即用。",
+  "driver": "agent_reach",
+  "runtime_type": "remote",
+  "category": "互联网",
+  "level": 2,
+  "permissions": ["network"],
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["web_read", "search"],
+        "description": "操作类型：web_read 读取网页，search 执行全网语义搜索"
+      },
+      "query": {
+        "type": "string",
+        "description": "网页 URL 或搜索关键词"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "返回条数，仅 search 生效",
+        "default": 5
+      }
+    },
+    "required": ["action", "query"]
+  },
+  "actions": [
+    { "name": "web_read", "description": "读取任意网页正文" },
+    { "name": "search", "description": "全网语义搜索" }
+  ],
+  "timeout_seconds": 60
+}

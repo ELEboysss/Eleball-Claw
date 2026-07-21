@@ -1,0 +1,110 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Eleball Web 全局样式 —— 对齐 App 端 Material 3 白紫极简风格 */
+:root {
+  --eleball-bg: #FFFFFF;
+  --eleball-surface: #FFFFFF;
+  --eleball-primary: #6750A4;
+  --eleball-primary-light: #EADDFF;
+  --eleball-primary-dark: #21005D;
+  --eleball-secondary: #625B71;
+  --eleball-text: #1C1B1F;
+  --eleball-text-secondary: #49454F;
+  --eleball-outline: #E2E0E5;
+  --eleball-outline-variant: #F0EDF4;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  background-color: var(--eleball-bg);
+  color: var(--eleball-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* 禁止移动端双击缩放，提升 H5 体验 */
+  touch-action: manipulation;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* 滚动条样式 —— 简洁细条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--eleball-outline-variant);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--eleball-outline);
+}
+
+@layer components {
+  /* 主按钮 */
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full font-semibold text-white transition-colors duration-200;
+    background-color: var(--eleball-primary);
+  }
+  .btn-primary:hover {
+    filter: brightness(1.05);
+  }
+  .btn-primary:active {
+    filter: brightness(0.97);
+  }
+
+  /* 次按钮 */
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full font-semibold transition-colors duration-200;
+    color: var(--eleball-primary);
+    background-color: var(--eleball-primary-light);
+  }
+  .btn-secondary:hover {
+    filter: brightness(0.98);
+  }
+
+  /* 卡片 */
+  .card {
+    @apply rounded-3xl p-6 transition-colors duration-200;
+    background-color: var(--eleball-surface);
+    border: 1px solid var(--eleball-outline-variant);
+  }
+
+  /* 输入框 */
+  .input {
+    @apply w-full px-4 py-3 rounded-2xl outline-none transition-colors duration-200;
+    background-color: var(--eleball-surface-variant);
+    color: var(--eleball-text);
+    border: 1px solid var(--eleball-outline-variant);
+  }
+  .input:focus {
+    border-color: var(--eleball-primary);
+  }
+  .input::placeholder {
+    color: var(--eleball-text-tertiary);
+  }
+
+  /* 渐变装饰条 */
+  .gradient-accent {
+    background: var(--eleball-primary);
+  }
+}

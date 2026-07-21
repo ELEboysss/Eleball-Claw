@@ -1,0 +1,85 @@
+# Eleball-claw 本地网关配置
+# 与云端 configs/config.yaml 的差异：
+#   - server.eleagent_base_url 指向云端 api.eleball.cn/v1（Ele Agent 模型经此转发，由云端账户计费）
+#   - admin / admin_gate / payment 全 disabled（claw 无管理后台、无前置闸门、无支付）
+#   - mail 默认 disabled（本地 OTP 走控制台打印；启用见 MAIL_* 环境变量）
+#   - 本地不计费：claw-server 注入 nil billing，chat/agent/visual 流程跳过扣费
+# 云端地址（cloud_base / cloud_api）供 web 双通道与 auth 转发用，P2 实现，gateway 侧暂不需要。
+
+server:
+  port: 8090
+  mode: debug
+  # Ele Agent 模型经此 BaseURL 转发至云端，由云端账户计费（claw 本地不计费）
+  eleagent_base_url: "https://api.eleball.cn/v1"
+
+database:
+  driver: sqlite
+  # 本地 SQLite，与云端开发环境一致；claw 数据自主可控
+  dsn: "data/claw.db"
+
+cdk_database:
+  driver: sqlite
+  dsn: "data/cdk.db"
+
+jwt:
+  secret: "change-me-in-claw-production"
+  access_expire_hours: 2
+  refresh_expire_hours: 720
+
+llm:
+  timeout: 120s
+  max_retries: 3
+
+asr:
+  provider: "baidu"
+  app_id: ""
+  api_key: ""
+  secret_key: ""
+  base_url: "https://vop.baidu.com"
+  timeout: 30s
+  max_audio_mb: 10
+
+rate_limit:
+  requests_per_minute: 180
+  read_multiplier: 3.0
+
+release:
+  root_path: "releases"
+
+agent:
+  enabled: true
+  base_path: "data/sessions"
+  knowledge_base: "data/knowledge_base"
+  model: "gpt-4o-mini"
+  max_steps: 500
+  # BYOK 兜底：未配置用户自有 Key 时使用（本地开发）
+  api_key: ""
+  base_url: ""
+
+agent_reach:
+  # 本地预置模块的探测客户端配置；第三方模块拉镜像后按 modules 表独立维护地址
+  module_url: ""
+  health_check_interval: 30s
+  probe_interval: 5m
+  proxy: ""
+
+admin:
+  enabled: false
+  ip_whitelist_enabled: false
+  allowed_ips: []
+
+admin_gate:
+  enabled: false
+
+payment:
+  order_expire_minutes: 30
+  alipay:
+    enabled: false
+
+mail:
+  enabled: false
+  host: ""
+  port: 465
+  username: ""
+  password: ""
+  from: ""

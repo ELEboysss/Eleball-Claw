@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  agent-reach:
+    build:
+      # 使用项目根目录作为 build context，以便 Dockerfile 能 COPY 本地子模块
+      context: ../../..
+      dockerfile: gateway/marketplace/agent-reach/Dockerfile
+    container_name: eleball-agent-reach
+    networks:
+      - eleball-net
+    volumes:
+      # 模块执行期间产生的临时 Cookie/数据目录
+      - ./data/cookies:/data/cookies
+    environment:
+      - AGENT_REACH_DATA_ROOT=/data/cookies
+      # 可选代理（服务器访问 Twitter/Reddit 受限平台时使用）
+      # - HTTP_PROXY=http://user:pass@host:port
+      # - HTTPS_PROXY=http://user:pass@host:port
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+networks:
+  eleball-net:
+    external: true
+    name: eleball-net

@@ -1,0 +1,57 @@
+{
+  "$schema": "../../../specs/tool-manifest-schema.json",
+  "id": "com.eleball.tools.agent_reach.social",
+  "name": "社媒雷达",
+  "description": "基于 Agent-Reach 的社媒内容搜索与阅读，支持 Twitter、小红书、Reddit、B站。",
+  "driver": "agent_reach",
+  "runtime_type": "remote",
+  "category": "互联网",
+  "level": 3,
+  "permissions": ["network"],
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["social_search", "social_read"],
+        "description": "操作类型：social_search 搜索社媒内容，social_read 读取社媒帖子详情"
+      },
+      "social_platform": {
+        "type": "string",
+        "enum": ["twitter", "xiaohongshu", "reddit", "bilibili"],
+        "description": "社交平台：twitter / xiaohongshu(小红书) / reddit / bilibili"
+      },
+      "query": {
+        "type": "string",
+        "description": "搜索关键词或帖子链接"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "返回条数，仅 social_search 生效",
+        "default": 5
+      }
+    },
+    "required": ["action", "social_platform", "query"]
+  },
+  "actions": [
+    { "name": "social_search", "description": "搜索社媒内容" },
+    { "name": "social_read", "description": "读取社媒帖子详情" }
+  ],
+  "credentials": {
+    "twitter_cookie": {
+      "type": "cookie",
+      "label": "Twitter Cookie",
+      "description": "用于 Twitter 搜索/阅读的浏览器登录态 Cookie Header String（登录态缓存）。",
+      "placeholder": "粘贴 Cookie-Editor 导出的 Header String",
+      "required": false
+    },
+    "xiaohongshu_cookie": {
+      "type": "cookie",
+      "label": "小红书 Cookie",
+      "description": "用于小红书搜索/阅读的浏览器登录态 Cookie Header String（登录态缓存）。",
+      "placeholder": "粘贴小红书 Cookie",
+      "required": false
+    }
+  },
+  "timeout_seconds": 120
+}
