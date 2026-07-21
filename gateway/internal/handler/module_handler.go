@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 
 	"github.com/eleball/gateway/internal/model"
@@ -13,11 +15,18 @@ import (
 type ModuleHandler struct {
 	moduleService *service.ModuleService
 	logger        *zap.Logger
+	// P4：claw 转发云端秘技审核提交的 BaseURL（https://api.eleball.cn/v1）
+	cloudAPIBase string
 }
 
 // NewModuleHandler 创建模块处理器
 func NewModuleHandler(moduleService *service.ModuleService, logger *zap.Logger) *ModuleHandler {
 	return &ModuleHandler{moduleService: moduleService, logger: logger}
+}
+
+// SetCloudAPIBase 注入云端 API Base（claw 用：SubmitForReview 转发云端秘技审核提交）。
+func (h *ModuleHandler) SetCloudAPIBase(base string) {
+	h.cloudAPIBase = base
 }
 
 // RescanMarketplace 运行时重新扫描 marketplace/ 目录并补齐内置模块与驱动别名
@@ -155,4 +164,79 @@ func (h *ModuleHandler) UnregisterDriver(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success"})
+}
+
+// InstallModule P4：把云端拉取的 ModuleInstallMeta 安装到本地。
+//
+// claw 控制台/技能页「安装到本地」按钮调用：
+//   - official=true：直接激活本地预置模块。
+//   - 第三方：拉镜像 + cosign 签名校验 + 启动容器 + 注册激活。
+//
+// 请求体为 ModuleInstallMeta（见 specs/api-schema.yml）。
+// 路由：POST /v1/claw-console/modules/install（claw_router 注册）。
+func (h *ModuleHandler) InstallModule(c *gin.Context) {
+	var meta service.ModuleInstallMeta
+	if err := c.ShouldBindJSON(&meta); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "参数错误: " + err.Error()})
+		return
+	}
+	if meta.ModuleID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "module_id 不能为空"})
+		return
+	}
+
+	record, err := h.moduleService.InstallFromCloudMeta(meta)
+	if err != nil {
+		h.logger.Warn("模块安装失败", zap.String("module_id", meta.ModuleID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 3001, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": record})
+}
+
+// SubmitForReview P4：本地秘技提交云端审核。
+//
+// 把本地模块/驱动信息转发到云端 POST /v1/market/modules/register（需 auth_token，
+// 从请求头 X-Module-Auth-Token 或 body 取）。云端审核通过后上架为云端秘技。
+// 路由：POST /v1/claw-console/modules/submit-review（claw_router 注册）。
+func (h *ModuleHandler) SubmitForReview(c *gin.Context) {
+	if h.cloudAPIBase == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 3001, "message": "未配置云端 API Base，无法提交审核"})
+		return
+	}
+
+	var req model.ModuleRegisterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "参数错误: " + err.Error()})
+		return
+	}
+
+	providedToken := c.GetHeader("X-Module-Auth-Token")
+	if providedToken == "" {
+		providedToken = req.AuthToken
+	}
+
+	// 转发到云端 register 接口
+	body, _ := json.Marshal(req)
+	cloudReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost,
+		h.cloudAPIBase+"/market/modules/register", bytes.NewReader(body))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 3001, "message": "构造云端请求失败: " + err.Error()})
+		return
+	}
+	cloudReq.Header.Set("Content-Type", "application/json")
+	if providedToken != "" {
+		cloudReq.Header.Set("X-Module-Auth-Token", providedToken)
+	}
+
+	resp, err := http.DefaultClient.Do(cloudReq)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"code": 3001, "message": "转发云端失败: " + err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	var cloudResp map[string]interface{}
+	_ = json.NewDecoder(resp.Body).Decode(&cloudResp)
+	c.JSON(resp.StatusCode, cloudResp)
 }

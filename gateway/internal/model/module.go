@@ -67,6 +67,14 @@ type ModuleRecord struct {
 	LastHeartbeat  *time.Time          `json:"last_heartbeat,omitempty"`
 	CreatedAt      time.Time           `json:"created_at"`
 	UpdatedAt      time.Time           `json:"updated_at"`
+	// ====== P4 第三方模块安装信息（镜像 + 签名）======
+	// 官方预置模块（Official=true）这些字段为空，无需拉镜像。
+	// 第三方模块从云端拉取 ModuleInstallMeta 后填充，记录已安装的镜像来源与签名。
+	Official       bool   `gorm:"default:false" json:"official"`                     // 是否官方预置模块（免镜像）
+	ImageRef       string `json:"image_ref,omitempty"`                              // 完整镜像引用 registry/repo@digest 或 registry/repo:tag
+	ImageDigest    string `json:"image_digest,omitempty"`                            // 镜像 sha256 摘要（内容寻址，防篡改）
+	Signature      string `json:"signature,omitempty"`                              // cosign/sigstore 签名（校验通过方可激活）
+	InstallSource  string `json:"install_source,omitempty"`                         // 安装来源：cloud-purchased / local / preset
 	// 以下字段不在数据库中，由实时健康探测填充
 	HealthError    string              `gorm:"-" json:"error,omitempty"`
 }

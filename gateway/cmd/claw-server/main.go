@@ -314,6 +314,8 @@ func main() {
 	sttHandler := handler.NewSttHandler(sttService, userRepo, vipService, logger)
 	conversationHandler := handler.NewConversationHandler(conversationService, agentWorkflowService)
 	moduleHandler := handler.NewModuleHandler(moduleService, logger)
+	// P4：提交审核转发云端 register 接口
+	moduleHandler.SetCloudAPIBase(cfg.Server.EleagentBaseURL)
 	agentWorkflowHandler := handler.NewAgentWorkflowHandler(agentWorkflowService)
 	// claw：search-providers 优先转发 search-web 模块的 list_sources（搜索源配置在模块侧）
 	agentWorkflowHandler.SetModuleRegistry(moduleRegistry)

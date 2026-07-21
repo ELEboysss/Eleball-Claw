@@ -170,6 +170,10 @@ func NewClawRouter(
 				console.DELETE("/modules/:id", moduleHandler.UnregisterModule)
 				console.POST("/modules/:id/refresh", moduleHandler.RefreshModule)
 				console.POST("/modules/rescan", moduleHandler.RescanMarketplace)
+				// P4：安装云端已购模块到本地（拉镜像+签名校验+激活）
+				console.POST("/modules/install", moduleHandler.InstallModule)
+				// P4：本地秘技提交云端审核（转发云端 register）
+				console.POST("/modules/submit-review", moduleHandler.SubmitForReview)
 
 				// 本地动态驱动管理
 				console.GET("/drivers", moduleHandler.ListDrivers)

@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
-import { moduleApi } from '../api/client'
+import { moduleApi, clawMarketApi } from '../api/client'
 
 export default function Modules() {
   const [modules, setModules] = useState([])
   const [drivers, setDrivers] = useState([])
+  const [cloudInstalled, setCloudInstalled] = useState([]) // P4：云端已购可安装模块
+  const [installing, setInstalling] = useState(null) // P4：安装中 module_id
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [activeTab, setActiveTab] = useState('modules')
@@ -37,10 +39,52 @@ export default function Modules() {
       const [mRes, dRes] = await Promise.all([moduleApi.listModules(), moduleApi.listDrivers()])
       setModules(mRes?.data?.items || mRes?.items || [])
       setDrivers(dRes?.data?.items || dRes?.items || [])
+      // P4：拉取云端已购可安装模块（失败不阻塞本地展示）
+      clawMarketApi.listInstalledModules()
+        .then((d) => setCloudInstalled(d?.items || d || []))
+        .catch(() => setCloudInstalled([]))
     } catch (err) {
       setError(err?.message || err || '加载失败')
     } finally {
       setLoading(false)
+    }
+  }
+
+  // P4：安装云端已购模块到本地（官方预置直接激活；第三方拉镜像+签名校验）
+  const handleInstall = async (meta) => {
+    if (!window.confirm(`确定安装模块 ${meta.module_id} 到本地？${meta.official ? '（官方预置，直接激活）' : '（第三方，将拉取容器镜像并校验签名，需 Docker/Podman）'}`)) return
+    setInstalling(meta.module_id)
+    setError('')
+    try {
+      await moduleApi.install(meta)
+      setError(`模块 ${meta.module_id} 安装成功`)
+      await fetchData()
+    } catch (err) {
+      setError(err?.message || err || '安装失败')
+    } finally {
+      setInstalling(null)
+    }
+  }
+
+  // P4：本地秘技提交云端审核（转发云端 register，需 auth_token）
+  const handleSubmitReview = async (m) => {
+    const authToken = window.prompt(`提交模块 ${m.module_id} 到云端审核。\n请输入云端下发的 auth_token（管理员审批后获得）：`)
+    if (authToken === null) return
+    setError('')
+    try {
+      await moduleApi.submitForReview({
+        module_id: m.module_id,
+        name: m.name,
+        description: m.description,
+        url: m.url,
+        transport_type: m.transport_type,
+        capabilities: m.capabilities_list || [],
+        version: m.version,
+        auth_token: authToken,
+      }, authToken)
+      setError(`模块 ${m.module_id} 已提交云端审核`)
+    } catch (err) {
+      setError(err?.message || err || '提交失败')
     }
   }
 
@@ -162,6 +206,12 @@ export default function Modules() {
           >
             驱动映射
           </button>
+          <button
+            onClick={() => setActiveTab('cloud')}
+            className={`px-4 py-2 rounded-xl text-sm font-medium ${activeTab === 'cloud' ? 'bg-eleball-primary text-white' : 'bg-white border border-eleball-outline'}`}
+          >
+            云端已购
+          </button>
         </div>
         <button
           onClick={handleRescanMarketplace}
@@ -229,6 +279,7 @@ export default function Modules() {
                     <td className="px-4 py-3">{formatTime(m.last_heartbeat)}</td>
                     <td className="px-4 py-3 space-x-2">
                       <button onClick={() => handleRefreshModule(m.module_id)} className="text-eleball-primary hover:underline">刷新</button>
+                      <button onClick={() => handleSubmitReview(m)} className="text-blue-600 hover:underline">提交审核</button>
                       <button onClick={() => handleDeleteModule(m.module_id)} className="text-red-600 hover:underline">注销</button>
                     </td>
                   </tr>
@@ -297,6 +348,63 @@ export default function Modules() {
             </table>
           </div>
         </>
+      )}
+
+      {activeTab === 'cloud' && (
+        <div className="bg-white rounded-2xl border border-eleball-outline overflow-hidden">
+          <div className="px-4 py-3 border-b border-eleball-outline bg-gray-50">
+            <h2 className="font-semibold text-sm">云端已购秘技</h2>
+            <p className="text-xs text-eleball-text-secondary mt-1">
+              从云端拉取已购模块，点「安装到本地」激活。官方模块直接激活，第三方模块拉取容器镜像并校验签名（需 Docker/Podman + cosign）。
+            </p>
+          </div>
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="text-left px-4 py-3 font-medium">模块</th>
+                <th className="text-left px-4 py-3 font-medium">版本</th>
+                <th className="text-left px-4 py-3 font-medium">类型</th>
+                <th className="text-left px-4 py-3 font-medium">镜像</th>
+                <th className="text-left px-4 py-3 font-medium">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cloudInstalled.map((m) => (
+                <tr key={m.module_id} className="border-t border-eleball-outline">
+                  <td className="px-4 py-3">
+                    <div className="font-medium">{m.name}</div>
+                    <div className="text-xs text-eleball-text-secondary font-mono">{m.module_id}</div>
+                  </td>
+                  <td className="px-4 py-3">{m.version || '-'}</td>
+                  <td className="px-4 py-3">
+                    {m.official ? (
+                      <span className="px-2 py-0.5 rounded text-xs bg-emerald-50 text-emerald-600">官方预置</span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded text-xs bg-amber-50 text-amber-600">第三方</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-xs text-eleball-text-secondary font-mono">
+                    {m.image ? `${m.image.repository}@${m.image.digest?.slice(0, 19) || m.image.tag || '-'}` : '-'}
+                  </td>
+                  <td className="px-4 py-3">
+                    <button
+                      onClick={() => handleInstall(m)}
+                      disabled={installing === m.module_id}
+                      className="px-3 py-1 rounded-lg text-xs font-medium bg-eleball-primary text-white hover:bg-eleball-primary-dark disabled:opacity-50"
+                    >
+                      {installing === m.module_id ? '安装中…' : '安装到本地'}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {cloudInstalled.length === 0 && !loading && (
+                <tr><td colSpan={5} className="px-4 py-8 text-center text-eleball-text-secondary">
+                  暂无云端已购秘技。请在云端 eleball.cn 购买秘技后刷新，或登录账号。
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   )

@@ -1,8 +1,10 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -18,6 +20,8 @@ type ModuleService struct {
 	registry   *ModuleRegistry
 	moduleRepo *repository.ModuleRepo
 	driverRepo *repository.DriverRepo
+	// P4：第三方模块镜像安装器（拉镜像 + 签名校验 + 启动容器）。官方预置模块不经此安装器。
+	installer *ImageInstaller
 }
 
 // NewModuleService 创建模块业务服务
@@ -26,7 +30,34 @@ func NewModuleService(registry *ModuleRegistry, moduleRepo *repository.ModuleRep
 		registry:   registry,
 		moduleRepo: moduleRepo,
 		driverRepo: driverRepo,
+		installer:  NewImageInstaller(""), // 自动探测 docker/podman
 	}
+}
+
+// ModuleImageMeta 第三方模块容器镜像信息（云端 ModuleInstallMeta.image）
+type ModuleImageMeta struct {
+	Registry   string `json:"registry"`
+	Repository string `json:"repository"`
+	Tag        string `json:"tag,omitempty"`
+	Digest     string `json:"digest,omitempty"` // sha256:... 内容寻址
+}
+
+// ModuleInstallMeta 云端秘技拉取接口返回的单项（见 specs/api-schema.yml ModuleInstallMeta）。
+// claw 据此安装到本地：official=true 直接激活预置；否则走 ImageInstaller 拉镜像 + 签名校验。
+type ModuleInstallMeta struct {
+	ModuleID      string          `json:"module_id"`
+	Name          string          `json:"name"`
+	Description    string          `json:"description"`
+	Version       string          `json:"version"`
+	TransportType string          `json:"transport_type"`
+	DriverID      string          `json:"driver_id,omitempty"`
+	Official      bool            `json:"official"`
+	Capabilities  []string        `json:"capabilities,omitempty"`
+	Image         *ModuleImageMeta `json:"image,omitempty"`
+	Signature     string          `json:"signature,omitempty"`
+	Manifest      json.RawMessage `json:"manifest,omitempty"`
+	AuthToken     string          `json:"auth_token,omitempty"`
+	UpdatedAt     string          `json:"updated_at,omitempty"`
 }
 
 // RegisterModule 管理后台注册/更新模块
@@ -297,4 +328,78 @@ func (s *ModuleService) BindDriverModule(driverID, moduleID string) error {
 		return errors.New("DriverRepo 未初始化")
 	}
 	return s.driverRepo.UpdateModuleID(driverID, moduleID)
+}
+
+// InstallFromCloudMeta 把云端拉取的 ModuleInstallMeta 安装到本地。
+//
+// P4 安装流程（见 docs/marketing/claw-implementation-plan.md §F.2）：
+//   - official=true：直接激活本地预置（marketplace/ 已扫描注册），无需拉镜像。
+//   - 第三方：ImageInstaller 拉镜像 + 签名校验 + 启动容器，再写入 registry 激活。
+//
+// 返回安装后的 ModuleRecord（含 image/signature 元数据）。已安装同 module_id 视为幂等成功。
+func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.ModuleRecord, error) {
+	if s.registry == nil {
+		return nil, errors.New("ModuleRegistry 未初始化")
+	}
+
+	// 已存在则幂等返回（避免重复拉镜像/启动容器）
+	if existing, err := s.moduleRepo.GetByID(meta.ModuleID); err == nil && existing != nil {
+		existing.Status = model.ModuleStatusOnline
+		if st := s.registry.Check(meta.ModuleID); st != nil {
+			if !st.Online {
+				existing.Status = model.ModuleStatusOffline
+			}
+			existing.HealthError = st.Error
+		}
+		return existing, nil
+	}
+
+	var record *model.ModuleRecord
+	if meta.Official {
+		// 官方模块：依赖 marketplace 扫描已注册；此处补齐 official 标记并返回
+		rec, err := s.moduleRepo.GetByID(meta.ModuleID)
+		if err != nil || rec == nil {
+			return nil, fmt.Errorf("官方模块 %s 未在本地预置，请确认 marketplace/ 已包含", meta.ModuleID)
+		}
+		rec.Official = true
+		rec.InstallSource = "preset"
+		if meta.Version != "" {
+			rec.Version = meta.Version
+		}
+		if err := s.moduleRepo.CreateOrUpdate(rec); err != nil {
+			return nil, err
+		}
+		record = rec
+	} else {
+		// 第三方：拉镜像 + 签名 + 启动容器
+		if s.installer == nil || s.installer.Runtime() == "" {
+			return nil, fmt.Errorf("未检测到容器运行时（docker/podman），无法安装第三方模块 %s", meta.ModuleID)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+		defer cancel()
+		rec, err := s.installer.Install(ctx, meta)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.registry.RegisterRecord(rec); err != nil {
+			return nil, fmt.Errorf("注册模块到 registry 失败: %w", err)
+		}
+		// 绑定驱动别名（云端下发 driver_id）
+		if meta.DriverID != "" {
+			_ = s.BindDriverModule(meta.DriverID, meta.ModuleID)
+		}
+		record = rec
+	}
+
+	// 触发一次健康探测刷新状态
+	if st := s.registry.ForceProbe(meta.ModuleID); st != nil {
+		record.Status = model.ModuleStatusOffline
+		if st.Online {
+			record.Status = model.ModuleStatusOnline
+		}
+		record.Version = st.Version
+		record.SetCapabilities(st.Capabilities)
+		record.HealthError = st.Error
+	}
+	return record, nil
 }

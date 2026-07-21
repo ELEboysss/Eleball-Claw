@@ -85,8 +85,18 @@ export const moduleApi = {
   listDrivers: () => client.get('/claw-console/drivers'),
   registerDriver: (data) => client.post('/claw-console/drivers', data),
   deleteDriver: (id) => client.delete(`/claw-console/drivers/${id}`),
-  // 提交本地秘技到云端审核（转发云端 register 接口，需 auth_token）
-  submitForReview: (payload) => cloudClient.post('/market/modules/register', payload),
+  // P4：把云端已购模块元数据安装到本地（拉镜像+签名校验+激活）
+  install: (installMeta) => client.post('/claw-console/modules/install', installMeta),
+  // P4：本地秘技提交云端审核（转发云端 register）
+  submitForReview: (payload, authToken) =>
+    client.post('/claw-console/modules/submit-review', payload, authToken ? { headers: { 'X-Module-Auth-Token': authToken } } : {}),
+}
+
+// ====== claw 云端秘技拉取（已购列表，安装到本地）======
+// 契约：GET /v1/market/modules/installed -> ModuleInstallMeta[]（见 specs/api-schema.yml）
+export const clawMarketApi = {
+  listInstalledModules: (since) =>
+    cloudClient.get('/market/modules/installed', { params: since ? { since } : {} }),
 }
 
 // ====== 本地模型配置 API（claw 本地，改名"模型配置"，无调用价格）======
