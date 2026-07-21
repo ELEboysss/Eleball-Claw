@@ -22,14 +22,28 @@
 
 ## 标准接口
 
-- `GET /health` -> `{module_id, version, status, capabilities}`
+- `GET /health` -> `{module_id, version, status, capabilities, providers: [{name, label, available, recommended, description}]}`
+  - `providers` 字段上报当前可用源列表（含已配置可用标记），上游探测在线时即可拿到源概览。
 - `POST /execute` -> 按 `action` 执行：
-  - `search`：参数 `{query, provider?}`，返回 `{results: [{title, url, snippet}]}`
-  - `fetch`：参数 `{url}`，返回 `{title, url, content}`（网页正文）
+  - `list_sources`：实时返回可用源列表 `{sources: [...]}`，供上游动态刷新搜索源下拉。
+  - `search`：参数 `{query, provider?}`，按选定 `provider` 搜索，返回 `{provider, results: [{title, url, snippet}]}`。未传 `provider` 时模块按优先级兜底（仅防御，上游应显式选源）。
+  - `fetch`：参数 `{url}`，返回 `{title, url, content}`（网页正文）。
 
-请求体：
+### 选源契约（不写死源）
+
+上游调用流程：
+1. 先调 `GET /health` 或 `POST /execute {action: "list_sources"}` 获取可用源列表（含 `available` 标记）。
+2. 按用户选择确定目标源（`provider` 字段，如 `baidu` / `bing`）。
+3. 调 `POST /execute {action: "search", params: {query, provider}}` 执行搜索。
+
+模块不在内部写死单一源；`provider` 由上游传入，未传时才按优先级兜底并打日志提示。
+
+请求体示例：
 ```json
-{ "action": "search", "params": { "query": "Eleball" }, "user_id": "user_xxx" }
+// 列源
+{ "action": "list_sources", "params": {} }
+// 搜索（显式选源）
+{ "action": "search", "params": { "query": "Eleball", "provider": "baidu" }, "user_id": "user_xxx" }
 ```
 
 ## 运行

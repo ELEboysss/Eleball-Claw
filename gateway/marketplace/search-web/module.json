@@ -1,10 +1,11 @@
 {
   "module_id": "search-web",
   "name": "联网搜索（本地）",
-  "description": "本地运行的网页搜索工具，claw 内置范例。双重身份：claw 对话页联网搜索源 + 开发者借鉴实现源码的自定义秘技范例。",
+  "description": "本地运行的网页搜索工具。",
   "url": "http://localhost:8091",
   "transport_type": "module",
   "capabilities": [
+    "list_sources",
     "search",
     "fetch"
   ],

@@ -315,6 +315,8 @@ func main() {
 	conversationHandler := handler.NewConversationHandler(conversationService, agentWorkflowService)
 	moduleHandler := handler.NewModuleHandler(moduleService, logger)
 	agentWorkflowHandler := handler.NewAgentWorkflowHandler(agentWorkflowService)
+	// claw：search-providers 优先转发 search-web 模块的 list_sources（搜索源配置在模块侧）
+	agentWorkflowHandler.SetModuleRegistry(moduleRegistry)
 	agentHandler := handler.NewAgentHandler(agentService)
 	agentCredentialHandler := handler.NewAgentCredentialHandler(agentCredentialService)
 	visualHandler := handler.NewVisualHandler(visualGenerationService, visualUploadService, visualConversationService)

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -12,11 +13,19 @@ import (
 // AgentWorkflowHandler Agent 工作流处理器
 type AgentWorkflowHandler struct {
 	agentService *service.AgentService
+	// claw：搜索能力下沉到 search-web 模块，注入后 ListSearchProviders 优先转发模块 list_sources
+	moduleRegistry *service.ModuleRegistry
 }
 
 // NewAgentWorkflowHandler 创建处理器
 func NewAgentWorkflowHandler(agentService *service.AgentService) *AgentWorkflowHandler {
 	return &AgentWorkflowHandler{agentService: agentService}
+}
+
+// SetModuleRegistry 注入模块注册表（claw 用：search-providers 转发 search-web 模块）。
+// 不改构造签名以保持向后兼容；未注入时 ListSearchProviders 回退环境变量。
+func (h *AgentWorkflowHandler) SetModuleRegistry(r *service.ModuleRegistry) {
+	h.moduleRegistry = r
 }
 
 // getUserID 从 gin context 获取当前用户 ID
@@ -134,14 +143,66 @@ func (h *AgentWorkflowHandler) DeleteSessions(c *gin.Context) {
 }
 
 // ListSearchProviders 返回当前已配置的可用搜索源列表
-// 前端据此动态渲染搜索源下拉框，未配置 key 的源不展示
+// 前端据此动态渲染搜索源下拉框，未配置 key 的源不展示。
+//
+// claw：搜索能力下沉到 search-web 模块（源配置在模块容器侧），优先转发模块的
+// list_sources 取真实可用源；模块离线或未注入 registry 时回退读 gateway 环境变量。
 func (h *AgentWorkflowHandler) ListSearchProviders(c *gin.Context) {
+	if h.moduleRegistry != nil {
+		if providers, err := h.listSearchWebSources(c); err == nil && len(providers) > 0 {
+			c.JSON(http.StatusOK, gin.H{
+				"code":    0,
+				"message": "success",
+				"data":    providers,
+				"source":  "search-web",
+			})
+			return
+		}
+	}
+	// 回退：模块离线或未配置时，读 gateway 环境变量（云端行为）
 	providers := service.ListAvailableSearchProviders()
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "success",
 		"data":    providers,
+		"source":  "env-fallback",
 	})
+}
+
+// listSearchWebSources 调 search-web 模块的 list_sources，过滤可用源并映射为
+// [{name,label}]（对齐 ListAvailableSearchProviders 契约，前端无需改动）。
+func (h *AgentWorkflowHandler) listSearchWebSources(c *gin.Context) ([]gin.H, error) {
+	userID, _ := h.getUserID(c)
+	result, err := h.moduleRegistry.Execute("search-web", "list_sources", map[string]interface{}{}, userID)
+	if err != nil {
+		return nil, err
+	}
+	sourcesRaw, ok := result["sources"]
+	if !ok {
+		return nil, errors.New("search-web 未返回 sources")
+	}
+	arr, ok := sourcesRaw.([]interface{})
+	if !ok {
+		return nil, errors.New("search-web sources 格式异常")
+	}
+	out := make([]gin.H, 0, len(arr))
+	for _, s := range arr {
+		m, ok := s.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		// 仅返回 available=true 的源（未配置凭据的不展示）
+		if avail, _ := m["available"].(bool); !avail {
+			continue
+		}
+		name, _ := m["name"].(string)
+		label, _ := m["label"].(string)
+		if name == "" {
+			continue
+		}
+		out = append(out, gin.H{"name": name, "label": label})
+	}
+	return out, nil
 }
 
 // GetResource 匿名代理下载 Agent 输出资源

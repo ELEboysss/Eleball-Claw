@@ -6,18 +6,22 @@ Eleball-claw 内置模块：search-web（联网搜索）
 2. 开发者范例：可借鉴本模块源码开发自己的秘技（标准 /health + /execute）。
 
 复用上游 builtin SearchWeb 的搜索逻辑（gateway/internal/service/search_provider.go），
-支持 baidu / bing / searxng / duckduckgo 四个搜索源，按环境变量选择可用源。
+支持 baidu / bing / searxng / duckduckgo 四个搜索源。
+
+**选源契约**（不写死源）：
+上游先调 `action=list_sources`（或读 /health 的 providers 字段）获取可用源列表，
+再选目标源传给 `action=search` 的 `provider` 参数执行。未传 provider 时模块按
+优先级兜底（仅作防御，上游应显式选源）。
 
 标准接口（见 docs/tool-driver-guide.md §9）：
-- GET  /health  上报状态与能力
-- POST /execute 执行 action（search / fetch）
+- GET  /health  上报状态、能力与可用源
+- POST /execute 执行 action（list_sources / search / fetch）
 """
 
 import os
-import re
 import logging
 from typing import Any
-from urllib.parse import quote, parse_qs, urlparse
+from urllib.parse import urlparse, parse_qs
 
 import requests
 from bs4 import BeautifulSoup
@@ -30,7 +34,8 @@ logger = logging.getLogger("search-web-module")
 app = FastAPI(title="Eleball search-web Module", version="1.0.0")
 
 MODULE_ID = "search-web"
-CAPABILITIES = ["search", "fetch"]
+VERSION = "1.0.0"
+CAPABILITIES = ["list_sources", "search", "fetch"]
 
 # 搜索 HTTP 客户端统一超时（与上游 searchHTTPClient 15s 对齐）
 SEARCH_TIMEOUT = 15
@@ -40,10 +45,72 @@ USER_AGENT = (
 )
 
 
+# ====== 搜索源注册表 ======
+# 对齐上游 search_provider.go：available 判断与 IsSearchProviderAvailable 一致；
+# recommended 对齐 ListAvailableSearchProviders（前端只推荐 baidu/bing）。
+
+class SourceMeta(BaseModel):
+    name: str
+    label: str
+    available: bool
+    recommended: bool
+    description: str
+
+
+def _is_available(name: str) -> bool:
+    """判断指定源是否已配置可用（对齐上游 IsSearchProviderAvailable）。"""
+    n = name.lower()
+    if n == "baidu":
+        return bool(os.environ.get("BAIDU_API_KEY"))
+    if n == "bing":
+        return bool(os.environ.get("BING_SEARCH_API_KEY"))
+    if n == "searxng":
+        return bool(os.environ.get("SEARXNG_URL"))
+    if n == "duckduckgo":
+        # 无需 key，国际网络可用；国内服务器不稳定，不作为推荐项但始终 available
+        return True
+    return False
+
+
+# 源定义（顺序即兜底优先级）
+_SOURCES = [
+    {"name": "baidu", "label": "百度", "recommended": True,
+     "description": "百度千帆 AI 搜索，每日 100 次免费额度（需 BAIDU_API_KEY）"},
+    {"name": "bing", "label": "Bing", "recommended": True,
+     "description": "Bing Web Search API（需 BING_SEARCH_API_KEY）"},
+    {"name": "searxng", "label": "SearXNG", "recommended": False,
+     "description": "自建 SearXNG 实例（需 SEARXNG_URL）"},
+    {"name": "duckduckgo", "label": "DuckDuckGo", "recommended": False,
+     "description": "DuckDuckGo Lite，无需 key，国际网络可用"},
+]
+
+
+def list_sources() -> list[SourceMeta]:
+    """返回全部源及其可用/推荐状态（对齐上游 ListAvailableSearchProviders 扩展）。"""
+    return [
+        SourceMeta(
+            name=s["name"],
+            label=s["label"],
+            available=_is_available(s["name"]),
+            recommended=s["recommended"],
+            description=s["description"],
+        )
+        for s in _SOURCES
+    ]
+
+
+def _first_available_provider() -> str:
+    """返回第一个 available 的源名（仅作 provider 未传时的兜底）。"""
+    for s in _SOURCES:
+        if _is_available(s["name"]):
+            return s["name"]
+    return "duckduckgo"  # duckduckgo 始终 available
+
+
 # ====== 请求/响应模型 ======
 
 class ExecuteRequest(BaseModel):
-    action: str = Field(..., description="操作名：search / fetch")
+    action: str = Field(..., description="操作名：list_sources / search / fetch")
     params: dict[str, Any] = Field(default_factory=dict, description="业务参数")
     user_id: str = Field(default="", description="当前用户 ID（本模块不使用）")
 
@@ -53,9 +120,8 @@ class HealthResponse(BaseModel):
     version: str
     status: str
     capabilities: list[str]
+    providers: list[SourceMeta]
 
-
-# ====== 搜索结果项（对齐上游 SearchResult）======
 
 class SearchResult(BaseModel):
     title: str
@@ -63,7 +129,7 @@ class SearchResult(BaseModel):
     snippet: str
 
 
-# ====== 搜索源 ======
+# ====== 各源搜索实现 ======
 
 def _search_baidu(query: str) -> list[SearchResult]:
     api_key = os.environ.get("BAIDU_API_KEY", "")
@@ -140,7 +206,6 @@ def _search_searxng(query: str) -> list[SearchResult]:
 
 
 def _search_duckduckgo(query: str) -> list[SearchResult]:
-    """DuckDuckGo Lite（国际网络可用，国内服务器可能不稳定）。"""
     resp = requests.get(
         "https://html.duckduckgo.com/html/",
         params={"q": query},
@@ -152,7 +217,6 @@ def _search_duckduckgo(query: str) -> list[SearchResult]:
     for a in soup.select("a.result__a"):
         title = a.get_text(strip=True)
         href = a.get("href", "")
-        # DDG 跳转链接：//duckduckgo.com/l/?uddg=<real_url>
         if href.startswith("//duckduckgo.com/l/?uddg="):
             parsed = urlparse("https:" + href)
             real = parse_qs(parsed.query).get("uddg", [""])[0]
@@ -171,19 +235,16 @@ def _search_duckduckgo(query: str) -> list[SearchResult]:
     return results
 
 
-def _first_available_provider() -> str:
-    """返回第一个已配置可用的搜索源名称（对齐上游 GetFirstAvailableSearchProvider）。"""
-    if os.environ.get("BAIDU_API_KEY"):
-        return "baidu"
-    if os.environ.get("BING_SEARCH_API_KEY"):
-        return "bing"
-    if os.environ.get("SEARXNG_URL"):
-        return "searxng"
-    return "duckduckgo"
-
-
 def do_search(query: str, provider: str | None = None) -> list[SearchResult]:
+    """按指定源搜索；provider 为空时兜底选第一个可用源（上游应显式传 provider）。"""
     name = (provider or _first_available_provider()).lower().strip()
+    if not provider:
+        logger.info("search 未传 provider，兜底使用 %s；上游应先调 list_sources 显式选源", name)
+    if not _is_available(name):
+        raise HTTPException(
+            status_code=400,
+            detail=f"搜索源 {name} 不可用（未配置凭据），请先调 list_sources 查看可用源",
+        )
     if name == "baidu":
         return _search_baidu(query)
     if name == "bing":
@@ -200,7 +261,6 @@ def do_fetch(url: str) -> dict[str, Any]:
     resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=SEARCH_TIMEOUT)
     resp.encoding = resp.apparent_encoding
     soup = BeautifulSoup(resp.text, "html.parser")
-    # 去脚本/样式后取文本
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
     title = soup.title.get_text(strip=True) if soup.title else ""
@@ -214,9 +274,10 @@ def do_fetch(url: str) -> dict[str, Any]:
 def health() -> HealthResponse:
     return HealthResponse(
         module_id=MODULE_ID,
-        version="1.0.0",
+        version=VERSION,
         status="ok",
         capabilities=CAPABILITIES,
+        providers=list_sources(),
     )
 
 
@@ -225,13 +286,16 @@ def execute(req: ExecuteRequest) -> dict[str, Any]:
     action = (req.action or "").strip()
     params = req.params or {}
     try:
+        # list_sources：返回可用源列表（上游选源前先调此）
+        if action == "list_sources":
+            return {"sources": [s.model_dump() for s in list_sources()]}
         if action == "search":
             query = params.get("query") or params.get("q")
             if not query:
                 raise HTTPException(status_code=400, detail="search 需要参数 query")
-            provider = params.get("provider")
+            provider = params.get("provider") or params.get("source")
             results = do_search(str(query), provider)
-            return {"results": [r.model_dump() for r in results]}
+            return {"provider": provider or _first_available_provider(), "results": [r.model_dump() for r in results]}
         if action == "fetch":
             url = params.get("url")
             if not url:
