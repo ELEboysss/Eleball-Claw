@@ -1,0 +1,17 @@
+# search-web 模块编排（本地运行 / 第三方拉镜像安装用）
+# 官方预置：claw 扫描 marketplace/search-web/module.json 自动注册，可不拉镜像直接激活。
+# 第三方模块安装：claw 技能页「安装到本地」按 ModuleInstallMeta.image 拉此镜像并校验签名。
+
+services:
+  search-web:
+    build: .
+    image: registry.eleball.cn/eleball/search-web:1.0.0
+    container_name: eleball-search-web
+    ports:
+      - "8091:8091"
+    environment:
+      # 搜索源凭据（按需配置；未配置时回退 DuckDuckGo）
+      BAIDU_API_KEY: ${BAIDU_API_KEY:-}
+      BING_SEARCH_API_KEY: ${BING_SEARCH_API_KEY:-}
+      SEARXNG_URL: ${SEARXNG_URL:-}
+    restart: unless-stopped
