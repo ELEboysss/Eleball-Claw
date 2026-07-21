@@ -156,13 +156,31 @@ func NewClawRouter(
 				auth.POST("/agents/:id/credentials", agentCredentialHandler.Save)
 			}
 
-			// 本地控制台（替代云端 /v1/admin/*）：P1 最小集，P3 扩充 Modules / 模型配置等管理面
+			// 本地控制台（替代云端 /v1/admin/*）：P3 扩充，仅 JWT 用户登录（无 admin gate / admin auth）。
+			// 复用既有 handler，端点挂到 /claw-console/* 下。
 			console := auth.Group("/claw-console")
 			{
 				console.GET("/health", func(c *gin.Context) {
 					c.JSON(200, gin.H{"code": 0, "message": "ok", "data": gin.H{"node": "eleball-claw", "mode": cfg.Server.Mode}})
 				})
-				// P3 在此挂载本地 Modules 管理、模型配置、本地 token 使用统计等控制台端点
+
+				// 本地集市模块管理（扫描本地 + 已安装；提交审核走云端）
+				console.GET("/modules", moduleHandler.ListModules)
+				console.POST("/modules", moduleHandler.RegisterModule)
+				console.DELETE("/modules/:id", moduleHandler.UnregisterModule)
+				console.POST("/modules/:id/refresh", moduleHandler.RefreshModule)
+				console.POST("/modules/rescan", moduleHandler.RescanMarketplace)
+
+				// 本地动态驱动管理
+				console.GET("/drivers", moduleHandler.ListDrivers)
+				console.POST("/drivers", moduleHandler.RegisterDriver)
+				console.DELETE("/drivers/:id", moduleHandler.UnregisterDriver)
+
+				// 本地模型配置（只读列表，复用 EleAgent 模型列表；CRUD 在云端 admin-web）
+				console.GET("/eleagent/models", eleAgentHandler.ListModels)
+
+				// 本地设置（公开配置只读；写设置在云端 admin）
+				console.GET("/settings", publicSettingHandler.GetPublicSettings)
 			}
 		}
 

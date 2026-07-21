@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { authApi } from '../api/client'
 
+// claw 控制台登录：用用户账户（调云端统一登录接口），非管理员专属。
+// 登录后 token 两端通用（claw JWT_SECRET 需与云端一致）。
 export default function Login() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -16,10 +18,8 @@ export default function Login() {
     setError('')
     setLoading(true)
     try {
-      // 管理后台使用独立的 admin 登录接口，或复用现有接口做权限校验
+      // 调云端统一登录（与 web/APP 同账户体系），device_id 标记 claw 控制台
       const res = await authApi.login(username, password)
-      // 响应拦截器已剥离外层 { code, message, data }，res 直接是内层数据
-      // 实际 admin 需校验 user.role === 'admin'
       login(res)
       navigate('/dashboard')
     } catch (err) {
@@ -35,8 +35,8 @@ export default function Login() {
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
           <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-gradient-to-br from-eleball-primary-light via-eleball-primary to-eleball-primary-dark shadow-lg" />
-          <h1 className="text-2xl font-bold tracking-tight">Eleball Admin</h1>
-          <p className="text-eleball-text-secondary mt-1">管理后台登录</p>
+          <h1 className="text-2xl font-bold tracking-tight">Eleball claw</h1>
+          <p className="text-eleball-text-secondary mt-1">本地控制台登录</p>
         </div>
 
         <div className="card">
@@ -53,7 +53,7 @@ export default function Login() {
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 className="input"
-                placeholder="admin"
+                placeholder="你的 Eleball 账户"
                 required
               />
             </div>
@@ -79,7 +79,7 @@ export default function Login() {
         </div>
 
         <p className="text-center text-xs text-eleball-text-secondary mt-6">
-          © 2026 Eleball. 仅限授权管理员访问
+          使用你的 Eleball 账户登录，与云端统一账户
         </p>
       </div>
     </div>

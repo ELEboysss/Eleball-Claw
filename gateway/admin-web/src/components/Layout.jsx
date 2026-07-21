@@ -1,19 +1,13 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 
+// claw 本地控制台导航（裁剪自云端 admin：去用户/订单/提现/审核/充值/VIP/CDK）
 const navItems = [
-  { path: '/dashboard', label: '概览', icon: '📊' },
-  { path: '/users', label: '用户管理', icon: '👥' },
-  { path: '/billing', label: '计费管理', icon: '💰' },
-  { path: '/orders', label: '订单管理', icon: '📦' },
-  { path: '/withdrawals', label: '提现审核', icon: '💳' },
-  { path: '/agents-review', label: '秘技审核', icon: '🧪' },
-  { path: '/eleagent-models', label: 'Ele Agent 模型', icon: '🤖' },
-  { path: '/recharge-packages', label: '充值套餐', icon: '🎁' },
-  { path: '/vip-plans', label: 'VIP 会员', icon: '👑' },
-  { path: '/cdk-management', label: '兑换码管理', icon: '🎟️' },
-  { path: '/modules', label: '集市模块', icon: '🧩' },
-  { path: '/settings', label: '系统设置', icon: '⚙️' },
+  { path: '/dashboard', label: '本地控制台', icon: '📊' },
+  { path: '/billing', label: '我的计费', icon: '💰' },
+  { path: '/eleagent-models', label: '模型配置', icon: '🤖' },
+  { path: '/modules', label: '本地模块', icon: '🧩' },
+  { path: '/settings', label: '设置', icon: '⚙️' },
 ]
 
 export default function Layout() {
@@ -31,7 +25,10 @@ export default function Layout() {
       <aside className="w-64 bg-white border-r border-eleball-outline flex flex-col">
         <div className="h-16 flex items-center gap-3 px-6 border-b border-eleball-outline">
           <div className="w-8 h-8 rounded-full bg-gradient-to-br from-eleball-primary-light via-eleball-primary to-eleball-primary-dark" />
-          <span className="font-bold text-lg tracking-tight">Eleball Admin</span>
+          <div className="leading-tight">
+            <div className="font-bold text-base tracking-tight">Eleball claw</div>
+            <div className="text-[10px] text-eleball-text-secondary">本地控制台</div>
+          </div>
         </div>
 
         <nav className="flex-1 py-4 px-3 space-y-1">
@@ -56,11 +53,11 @@ export default function Layout() {
         <div className="p-4 border-t border-eleball-outline">
           <div className="flex items-center gap-3 mb-3">
             <div className="w-9 h-9 rounded-full bg-eleball-primary/10 flex items-center justify-center text-eleball-primary font-bold text-sm">
-              {user?.username?.[0]?.toUpperCase() || 'A'}
+              {user?.username?.[0]?.toUpperCase() || 'U'}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium truncate">{user?.username || 'Admin'}</p>
-              <p className="text-xs text-eleball-text-secondary">管理员</p>
+              <p className="text-sm font-medium truncate">{user?.username || '用户'}</p>
+              <p className="text-xs text-eleball-text-secondary">本地账户</p>
             </div>
           </div>
           <button
@@ -75,11 +72,11 @@ export default function Layout() {
       {/* 主内容区 */}
       <main className="flex-1 flex flex-col overflow-hidden">
         <header className="h-16 bg-white border-b border-eleball-outline flex items-center justify-between px-8">
-          <h2 className="text-lg font-semibold">管理后台</h2>
+          <h2 className="text-lg font-semibold">Eleball claw 本地控制台</h2>
           <div className="flex items-center gap-4 text-sm text-eleball-text-secondary">
             <span>{new Date().toLocaleDateString('zh-CN')}</span>
             <span className="px-2 py-1 rounded-lg bg-eleball-primary/10 text-eleball-primary-dark text-xs font-semibold">
-              v1.0.0
+              claw
             </span>
           </div>
         </header>
