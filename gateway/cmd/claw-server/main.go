@@ -333,6 +333,19 @@ func main() {
 	)
 
 	// 9. 启动
+	// P5.2：启动 mDNS 广播，供 APP 同局域网 NSD 发现（LAN 直连通道）
+	deviceID := os.Getenv("CLAW_DEVICE_ID")
+	if deviceID == "" {
+		if h, err := os.Hostname(); err == nil {
+			deviceID = h
+		}
+	}
+	if mdnsBroadcaster, mdnsErr := service.NewMdnsBroadcaster(deviceID, cfg.Server.Port, logger); mdnsErr != nil {
+		logger.Warn("mDNS 广播启动失败（LAN 发现不可用，不影响其他功能）", zap.Error(mdnsErr))
+	} else {
+		defer mdnsBroadcaster.Stop()
+	}
+
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	logger.Info("Eleball-claw 启动", zap.String("addr", addr), zap.String("mode", cfg.Server.Mode))
 	if err := r.Run(addr); err != nil {
