@@ -346,6 +346,18 @@ func main() {
 		defer mdnsBroadcaster.Stop()
 	}
 
+	// P5.3：启动 relay 隧道（外网兜底）。缺 RELAY_URL/CLAW_RELAY_TOKEN 时跳过（仅 LAN）。
+	// CLAW_RELAY_TOKEN 为用户在控制台登录后获得的 JWT（统一账户验签，与 gateway JWT_SECRET 一致）。
+	relayURL := os.Getenv("RELAY_URL")
+	relayToken := os.Getenv("CLAW_RELAY_TOKEN")
+	relayTunnel := service.NewRelayTunnel(
+		relayURL, deviceID, relayToken,
+		fmt.Sprintf("http://localhost:%d", cfg.Server.Port),
+		logger,
+	)
+	relayTunnel.Start()
+	defer relayTunnel.Stop()
+
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	logger.Info("Eleball-claw 启动", zap.String("addr", addr), zap.String("mode", cfg.Server.Mode))
 	if err := r.Run(addr); err != nil {
