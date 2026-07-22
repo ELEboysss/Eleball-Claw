@@ -1,6 +1,11 @@
 package router
 
 import (
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+
 	"github.com/eleball/gateway/internal/config"
 	"github.com/eleball/gateway/internal/handler"
 	"github.com/eleball/gateway/internal/middleware"
@@ -212,5 +217,65 @@ func NewClawRouter(
 		})
 	}
 
+	// web / admin-web 静态文件服务（plan §A.3 单文件分发，前端随二进制）。
+	// dist 存在则 serve + SPA fallback；不存在（dev 未 build）时 NoRoute 给友好提示。
+	serveStatic(r, log)
+
 	return r
+}
+
+// serveStatic 服务前端 dist（web 在根路径，admin-web 在 /admin/*）。
+// dist 相对 gateway 工作目录：web/dist、admin-web/dist（dev-run 从 gateway/ 启动）。
+// dist 不存在时，NoRoute 返回提示（dev 应跑 vite dev server :5173，或 build dist）。
+func serveStatic(r *gin.Engine, log *zap.Logger) {
+	webDist := filepath.Join("web", "dist")
+	adminDist := filepath.Join("admin-web", "dist")
+	webExists := dirExists(webDist)
+	adminExists := dirExists(adminDist)
+
+	if webExists {
+		// 静态资源（/assets/*、/logo-icon.png 等）
+		r.Static("/assets", filepath.Join(webDist, "assets"))
+		// 根路径返回 index.html
+		r.GET("/", func(c *gin.Context) {
+			c.File(filepath.Join(webDist, "index.html"))
+		})
+		log.Info("web 静态服务就绪", zap.String("dist", webDist))
+	}
+	if adminExists {
+		r.Static("/admin/assets", filepath.Join(adminDist, "assets"))
+		r.GET("/admin", func(c *gin.Context) {
+			c.File(filepath.Join(adminDist, "index.html"))
+		})
+		r.GET("/admin/*filepath", func(c *gin.Context) {
+			// SPA 路由 fallback 到 index.html（非 /admin/assets 已由上面 Static 处理）
+			c.File(filepath.Join(adminDist, "index.html"))
+		})
+		log.Info("admin-web 静态服务就绪", zap.String("dist", adminDist))
+	}
+
+	// NoRoute：API 路径返回 JSON 404；其余 fallback 到 web index.html（SPA 路由）
+	r.NoRoute(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if strings.HasPrefix(path, "/v1") || strings.HasPrefix(path, "/claw-console") ||
+			strings.HasPrefix(path, "/_internal") || strings.HasPrefix(path, "/health") {
+			c.JSON(http.StatusNotFound, gin.H{"code": 4040, "message": "接口不存在: " + path})
+			return
+		}
+		if webExists {
+			c.File(filepath.Join(webDist, "index.html"))
+			return
+		}
+		// dev 未 build web：提示用 vite dev server 或 build dist
+		c.Data(http.StatusNotFound, "text/html; charset=utf-8", []byte(
+			"<!DOCTYPE html><html><body><h3>claw web 未构建</h3>"+
+				"<p>开发模式请启动前端 dev server：<code>cd web &amp;&amp; npm run dev</code>（访问 http://localhost:5173）</p>"+
+				"<p>或构建后内嵌：<code>cd web &amp;&amp; npm run build</code>（产物 ../web/dist 由 claw-server 服务）</p>"+
+				"<p>API 已就绪：<code>/health</code></p></body></html>"))
+	})
+}
+
+func dirExists(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.IsDir()
 }
