@@ -51,7 +51,12 @@ func getGitSHA() string {
 }
 
 func main() {
-	// --port 覆盖配置端口（对应 eleball-claw serve --port=8080）
+	// 子命令：默认 serve（eleball-claw serve --port=8090）；剥离 serve 让 flag 正常解析。
+	// 兼容无 serve 直接 --port（eleball-claw --port=8090）。
+	if len(os.Args) > 1 && os.Args[1] == "serve" {
+		os.Args = append(os.Args[:1], os.Args[2:]...)
+	}
+	// --port 覆盖配置端口（对应 eleball-claw serve --port=8090）
 	port := flag.Int("port", 0, "本地网关端口（覆盖配置）")
 	flag.Parse()
 
