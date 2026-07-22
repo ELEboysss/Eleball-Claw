@@ -247,19 +247,20 @@ func serveStatic(r *gin.Engine, log *zap.Logger) {
 		r.GET("/admin", func(c *gin.Context) {
 			c.File(filepath.Join(adminDist, "index.html"))
 		})
-		r.GET("/admin/*filepath", func(c *gin.Context) {
-			// SPA 路由 fallback 到 index.html（非 /admin/assets 已由上面 Static 处理）
-			c.File(filepath.Join(adminDist, "index.html"))
-		})
 		log.Info("admin-web 静态服务就绪", zap.String("dist", adminDist))
 	}
 
-	// NoRoute：API 路径返回 JSON 404；其余 fallback 到 web index.html（SPA 路由）
+	// NoRoute：API 路径返回 JSON 404；其余 fallback 到对应 index.html（SPA 路由）
 	r.NoRoute(func(c *gin.Context) {
 		path := c.Request.URL.Path
 		if strings.HasPrefix(path, "/v1") || strings.HasPrefix(path, "/claw-console") ||
 			strings.HasPrefix(path, "/_internal") || strings.HasPrefix(path, "/health") {
 			c.JSON(http.StatusNotFound, gin.H{"code": 4040, "message": "接口不存在: " + path})
+			return
+		}
+		// admin-web SPA fallback
+		if strings.HasPrefix(path, "/admin") && adminExists {
+			c.File(filepath.Join(adminDist, "index.html"))
 			return
 		}
 		if webExists {
