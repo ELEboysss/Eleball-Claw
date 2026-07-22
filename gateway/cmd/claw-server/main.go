@@ -324,12 +324,14 @@ func main() {
 	visualHandler := handler.NewVisualHandler(visualGenerationService, visualUploadService, visualConversationService)
 	publicSettingHandler := handler.NewPublicSettingHandler(settingService)
 	releaseHandler := handler.NewReleaseHandler(releaseService, logger)
+	clawConsoleHandler := handler.NewClawConsoleHandler(db)
 
 	// 8. 路由（claw 裁剪版）
 	r := router.NewClawRouter(cfg, logger, jwtUtil,
 		authHandler, chatHandler, syncHandler, eleAgentHandler, sttHandler,
 		conversationHandler, moduleHandler, agentWorkflowHandler, agentHandler,
 		agentCredentialHandler, visualHandler, publicSettingHandler, releaseHandler,
+		clawConsoleHandler,
 	)
 
 	// 9. 启动

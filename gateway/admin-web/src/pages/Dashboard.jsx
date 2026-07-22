@@ -6,14 +6,18 @@ import { dashboardApi } from '../api/client'
 // 见 docs/marketing/claw-implementation-plan.md §D.2。
 export default function Dashboard() {
   const [modules, setModules] = useState([])
+  const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    dashboardApi.getModules()
-      .then((data) => {
-        const items = data?.items || data || []
-        setModules(items)
+    Promise.all([
+      dashboardApi.getModules().catch(() => null),
+      dashboardApi.getStats().catch(() => null),
+    ])
+      .then(([modData, statsData]) => {
+        setModules(modData?.items || modData || [])
+        setStats(statsData)
       })
       .catch((err) => setError(typeof err === 'string' ? err : (err?.message || '加载失败')))
       .finally(() => setLoading(false))
@@ -21,6 +25,8 @@ export default function Dashboard() {
 
   const onlineCount = modules.filter((m) => m.status === 'online').length
   const totalCapabilities = modules.reduce((acc, m) => acc + (m.capabilities?.length || 0), 0)
+  const usage = stats?.usage || {}
+  const modelStats = stats?.models || []
 
   return (
     <div className="space-y-6">
@@ -50,6 +56,26 @@ export default function Dashboard() {
           <div className="text-xs text-eleball-text-secondary mb-1">计费</div>
           <div className="text-lg font-semibold text-eleball-primary">本地不计费</div>
           <div className="text-xs text-eleball-text-secondary mt-1">Ele Agent 转发云端计费</div>
+        </div>
+      </div>
+
+      {/* 本地 token 用量统计（P3 细化，替代云端 DAU/收入） */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="card p-4">
+          <div className="text-xs text-eleball-text-secondary mb-1">总调用</div>
+          <div className="text-lg font-semibold">{Number(usage.total_calls || 0).toLocaleString()}</div>
+        </div>
+        <div className="card p-4">
+          <div className="text-xs text-eleball-text-secondary mb-1">今日调用</div>
+          <div className="text-lg font-semibold text-emerald-600">{Number(usage.today_calls || 0).toLocaleString()}</div>
+        </div>
+        <div className="card p-4">
+          <div className="text-xs text-eleball-text-secondary mb-1">输入 tokens</div>
+          <div className="text-lg font-semibold">{Number(usage.total_input_tokens || 0).toLocaleString()}</div>
+        </div>
+        <div className="card p-4">
+          <div className="text-xs text-eleball-text-secondary mb-1">输出 tokens</div>
+          <div className="text-lg font-semibold">{Number(usage.total_output_tokens || 0).toLocaleString()}</div>
         </div>
       </div>
 

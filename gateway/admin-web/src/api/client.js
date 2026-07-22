@@ -67,10 +67,12 @@ export const authApi = {
 }
 
 // ====== 本地控制台 API（claw /claw-console）======
-// 本地模块状态 + 在线情况（本地控制台 Dashboard 用）
+// 本地模块状态 + 在线情况 + token 用量（本地控制台 Dashboard 用）
 export const dashboardApi = {
   // 本地已注册模块列表（含在线状态/能力/心跳），替代云端 DAU/收入统计
   getModules: () => client.get('/claw-console/modules'),
+  // 本地 token 用量统计（P3 细化，替代云端 DAU/收入）
+  getStats: () => client.get('/claw-console/stats'),
   // 本地动态（Agent 运行记录等，后端按需实现；当前可复用模块心跳）
   getActivities: () => client.get('/claw-console/modules').then((d) => d?.items || d || []),
 }

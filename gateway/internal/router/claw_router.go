@@ -36,6 +36,7 @@ func NewClawRouter(
 	visualHandler *handler.VisualHandler,
 	publicSettingHandler *handler.PublicSettingHandler,
 	releaseHandler *handler.ReleaseHandler,
+	clawConsoleHandler *handler.ClawConsoleHandler,
 ) *gin.Engine {
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
@@ -163,6 +164,9 @@ func NewClawRouter(
 				console.GET("/health", func(c *gin.Context) {
 					c.JSON(200, gin.H{"code": 0, "message": "ok", "data": gin.H{"node": "eleball-claw", "mode": cfg.Server.Mode}})
 				})
+
+				// 本地 token 用量统计（P3 细化，替代云端 DAU/收入）
+				console.GET("/stats", clawConsoleHandler.GetStats)
 
 				// 本地集市模块管理（扫描本地 + 已安装；提交审核走云端）
 				console.GET("/modules", moduleHandler.ListModules)
