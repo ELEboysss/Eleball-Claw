@@ -1,0 +1,97 @@
+name: Build & Release Claw
+
+# Eleball-claw 跨架构二进制发布流水线（自包含于 eleball-claw 仓库）
+#
+#   1. 编译 linux/amd64 + linux/arm64 + windows/amd64 单文件二进制（CGO_ENABLED=0，纯静态）
+#   2. 计算 SHA256 + size，生成版本 entry.json
+#   3. 上传到 GitHub Release（本仓库公开）
+#
+# 服务器侧：主仓库 prod-deploy.sh 拉取本仓库 latest claw-v* release 的二进制 + entry.json，
+# jq 合并到服务器 releases/claw/manifest.json，网关 /v1/releases/claw 即时对外提供下载。
+# 因此本 workflow 不需要 SSH 推送权限，CI 与部署解耦。
+#
+# 触发方式：
+#   - 打 tag：git tag claw-v0.1.0 && git push origin claw-v0.1.0
+#   - 手动：Actions -> Build & Release Claw -> Run workflow（输入版本号）
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'claw 版本号（如 0.1.0，不含 v 前缀）'
+        required: true
+        default: '0.1.0'
+  push:
+    tags:
+      - 'claw-v*'
+
+concurrency:
+  group: claw-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 解析版本号
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF##*/}"          # claw-v0.1.0
+            VERSION="${TAG#claw-v}"           # 0.1.0
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "发布版本: ${VERSION}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: gateway/go.sum
+
+      - name: 交叉编译三架构
+        working-directory: gateway
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o dist/eleball-claw-linux-amd64     ./cmd/claw-server
+          CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o dist/eleball-claw-linux-arm64     ./cmd/claw-server
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o dist/eleball-claw-windows-amd64.exe ./cmd/claw-server
+          ls -la dist/
+
+      - name: 计算 SHA256 + size 并生成版本 entry
+        working-directory: gateway/dist
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          sha256sum eleball-claw-* > checksums.txt
+          cat checksums.txt
+          LNX64_SHA=$(sha256sum eleball-claw-linux-amd64       | awk '{print $1}')
+          LNX64_SIZE=$(stat -c%s eleball-claw-linux-amd64)
+          LNA64_SHA=$(sha256sum eleball-claw-linux-arm64       | awk '{print $1}')
+          LNA64_SIZE=$(stat -c%s eleball-claw-linux-arm64)
+          WIN64_SHA=$(sha256sum eleball-claw-windows-amd64.exe | awk '{print $1}')
+          WIN64_SIZE=$(stat -c%s eleball-claw-windows-amd64.exe)
+          DATE=$(date +%F)
+          cat > entry.json <<EOF
+          {"version":"${VERSION}","channel":"stable","releaseDate":"${DATE}","changelog":"claw ${VERSION}","artifacts":{"linux-amd64":{"path":"${VERSION}/eleball-claw-linux-amd64","size":${LNX64_SIZE},"checksumSha256":"${LNX64_SHA}"},"linux-arm64":{"path":"${VERSION}/eleball-claw-linux-arm64","size":${LNA64_SIZE},"checksumSha256":"${LNA64_SHA}"},"windows-amd64":{"path":"${VERSION}/eleball-claw-windows-amd64.exe","size":${WIN64_SIZE},"checksumSha256":"${WIN64_SHA}"}}}
+          EOF
+          sed -i 's/^[[:space:]]*//' entry.json
+          cat entry.json
+
+      - name: 发布 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'push' && github.ref_name || format('claw-v{0}', steps.meta.outputs.version) }}
+          name: Eleball-claw ${{ steps.meta.outputs.version }}
+          generate_release_notes: true
+          files: |
+            gateway/dist/eleball-claw-*
+            gateway/dist/checksums.txt
+            gateway/dist/entry.json

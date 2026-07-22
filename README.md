@@ -1,6 +1,6 @@
 # Eleball-claw
 
-> 设备端本地化网关组件 ｜ 状态：🚧 P1 脚手架已落地（可编译可启动），P2-P6 推进中
+> 设备端本地化网关组件 ｜ 状态：✅ P1-P6 完成（本地网关 + 双轨通道 + 秘技安装 + 一键安装脚本，详见主仓库 claw-implementation-plan.md / claw-e2e-checklist.md）
 > 规划：主仓库 `docs/marketing/claw-implementation-plan.md` ｜ 产品定位：主仓库 `docs/marketing/product-matrix.md` §5
 > 本仓库是主项目的 submodule。
 
@@ -23,14 +23,15 @@ Eleball-claw 把 AI agent 能力运行到本地设备（Windows / Linux 优先�
 - **预置模块范例**：`gateway/marketplace/search-web/`（P4 接入扫描）。
 - 编译验证：`go build ./cmd/claw-server` 通过；冒烟测试 `/health` 返回 claw 节点、无 panic 启动。
 
-### ⏳ 待实现（P2-P6，见规划 §I）
-| 阶段 | 目标 |
+### ✅ 已落地（P1-P6，见主仓库 claw-implementation-plan.md §I / claw-e2e-checklist.md）
+| 阶段 | 状态 |
 |------|------|
-| P2 | web 本地化：baseURL 双通道、技能页登录态拉云端、claw-guide 页 |
-| P3 | admin-web 本地化：本地控制台、Modules 管理、模型配置改造 |
-| P4 | SearchWeb 抽出为本地秘技 + 第三方拉镜像安装 + 提交审核流程 |
-| P5 | APP 端双轨通道（云端 / 本地 claw） |
-| P6 | install 脚本发布 + 文档 + 端到端验证 |
+| P1 | ✅ 脚手架：claw-server 编译启动，`/v1/admin/*` 与支付路由 404（裁剪生效） |
+| P2 | ✅ web 本地化：baseURL 双通道、技能页登录态拉云端、claw-guide、官网内嵌 + 登录态双向同步 |
+| P3 | ✅ admin-web 本地化：本地控制台、Modules 安装/提交审核、模型配置只读 |
+| P4 | ✅ SearchWeb 本地秘技 + 第三方拉镜像安装（cosign 签名校验）+ 提交审核转发云端 |
+| P5 | ✅ 双轨通道：LAN mDNS + E2E 加密中继 + auto 选择（P2P 打洞评估后暂不做） |
+| P6 | ✅ install 脚本（对接云端网关 release 端点）+ 文档 + E2E 验证 |
 
 ## 目录结构
 
@@ -80,13 +81,15 @@ git submodule update --init eleball-claw   # 首次拉取
 cd eleball-claw/gateway && ../../.tools/go/bin/go build ./cmd/claw-server
 ```
 
-### 一键安装（用户侧，待 P6 发布二进制后可用）
+### 一键安装
+
+安装脚本从云端网关 release 端点按架构下载二进制（含 SHA256 校验），生成配置并提示启动命令。下载页与说明见 <https://eleball.cn/claw>。
 
 ```bash
 # Linux / macOS
 curl -fsSL https://eleball.cn/install.sh | sh
 
-# Windows
+# Windows（PowerShell）
 irm https://eleball.cn/install.ps1 | iex
 ```
 

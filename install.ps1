@@ -1,4 +1,4 @@
-# Eleball-claw 一键安装（Windows PowerShell）
+﻿# Eleball-claw 一键安装（Windows PowerShell）
 #
 # 用法：
 #   irm https://eleball.cn/install.ps1 | iex
@@ -19,16 +19,35 @@ $Binary = Join-Path $BinDir "eleball-claw.exe"
 
 # 探测架构
 $Arch = if ([Environment]::Is64BitOperatingSystem) { "amd64" } else { "386" }
-$Url = if ($env:CLAW_DOWNLOAD_URL) { $env:CLAW_DOWNLOAD_URL } `
-  else { "https://eleball.cn/downloads/claw/$Version/eleball-claw-windows-$Arch.exe" }
+$ArchTag = "windows-$Arch"
+if ($env:CLAW_DOWNLOAD_URL) {
+    $Url = $env:CLAW_DOWNLOAD_URL
+} else {
+    $Url = "https://api.eleball.cn/v1/releases/claw/download?arch=$ArchTag"
+    if ($Version -ne "latest") {
+        $Url += "&version=$Version"
+    }
+}
 
 Write-Host "==> 下载 claw (windows/$Arch) from $Url" -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 try {
-    Invoke-WebRequest -Uri $Url -OutFile $Binary -UseBasicParsing
+    $resp = Invoke-WebRequest -Uri $Url -OutFile $Binary -UseBasicParsing -PassThru
 } catch {
     Write-Error "下载失败: $Url`n$_"
     exit 1
+}
+
+# 可选完整性校验：响应头 X-Content-SHA256
+$expectedSha = $resp.Headers["X-Content-SHA256"]
+if ($expectedSha) {
+    $actualSha = (Get-FileHash -Algorithm SHA256 -Path $Binary).Hash.ToLower()
+    if ($expectedSha.ToLower() -ne $actualSha) {
+        Write-Error "校验失败：SHA256 不匹配（期望 $expectedSha，实际 $actualSha）"
+        Remove-Item $Binary -Force
+        exit 1
+    }
+    Write-Host "==> SHA256 校验通过" -ForegroundColor Cyan
 }
 
 # 初始化配置

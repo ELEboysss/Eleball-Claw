@@ -32,17 +32,37 @@ case "$ARCH" in
   *) echo "不支持的架构: $ARCH"; exit 1 ;;
 esac
 
-# 下载地址（按需替换为实际分发源）
-URL="${CLAW_DOWNLOAD_URL:-https://eleball.cn/downloads/claw/${VERSION}/eleball-claw-${OS}-${ARCH}}"
+# 下载地址：默认走云端网关 release 端点，按架构下载（CLAW_DOWNLOAD_URL 可覆盖为镜像/内网）
+ARCH_TAG="${OS}-${ARCH}"
+BASE_URL="${CLAW_DOWNLOAD_URL:-https://api.eleball.cn/v1/releases/claw/download}"
+URL="${BASE_URL}?arch=${ARCH_TAG}"
+# 指定非 latest 版本时附加 version 参数（走网关版本路由）
+if [ -n "$VERSION" ] && [ "$VERSION" != "latest" ]; then
+  URL="${URL}&version=${VERSION}"
+fi
 
 echo "==> 下载 claw ($OS/$ARCH) from $URL"
 TMP_BIN="$(mktemp)"
+HEADER_FILE="$(mktemp)"
 if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$URL" -o "$TMP_BIN"
+  curl -fsSL -D "$HEADER_FILE" "$URL" -o "$TMP_BIN"
 else
   wget -qO "$TMP_BIN" "$URL"
 fi
 chmod +x "$TMP_BIN"
+
+# 可选完整性校验：从响应头取 X-Content-SHA256，与本地 sha256 比对（无则跳过）
+EXPECTED_SHA="$(grep -i 'X-Content-SHA256:' "$HEADER_FILE" | tr -d '\r' | sed 's/.*: *//')"
+if [ -n "$EXPECTED_SHA" ] && command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL_SHA="$(sha256sum "$TMP_BIN" | awk '{print $1}')"
+  if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+    echo "✗ 校验失败：SHA256 不匹配（期望 $EXPECTED_SHA，实际 $ACTUAL_SHA）"
+    rm -f "$TMP_BIN" "$HEADER_FILE"
+    exit 1
+  fi
+  echo "==> SHA256 校验通过"
+fi
+rm -f "$HEADER_FILE"
 
 # 安装二进制
 if [ -w "$INSTALL_DIR" ] || sudo -n true 2>/dev/null; then
