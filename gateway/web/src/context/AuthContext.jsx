@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useCallback, useEffect } from 'react'
 import { getItem, setItem, removeItem, getJSON } from '../utils/storage'
 import { authApi } from '../api/client'
+import { broadcastAuthToCloud, startCloudAuthListener } from '../utils/authSync'
 
 const AuthContext = createContext(null)
 
@@ -32,6 +33,26 @@ export function AuthProvider({ children }) {
     return () => { cancelled = true }
   }, [token])
 
+  // 收云端 iframe 回传的登录态（iframe 内登录/登出后同步回 claw）。
+  // ts 新旧判断在 authSync 内完成；此处只写本地 storage + state，不 rebroadcast，防死循环。
+  useEffect(() => {
+    return startCloudAuthListener((data) => {
+      if (data.token) {
+        setItem('token', data.token)
+        setItem('refresh_token', data.refresh_token || '')
+        if (data.user) setItem('user', JSON.stringify(data.user))
+        setToken(data.token)
+        setUser(data.user || null)
+      } else {
+        removeItem('token')
+        removeItem('refresh_token')
+        removeItem('user')
+        setToken(null)
+        setUser(null)
+      }
+    })
+  }, [])
+
   const login = useCallback((data) => {
     const accessToken = data?.access_token || ''
     const refreshToken = data?.refresh_token || ''
@@ -44,6 +65,8 @@ export function AuthProvider({ children }) {
     }
     setToken(accessToken)
     setUser(userData)
+    // 同步到内嵌云端官网 iframe
+    broadcastAuthToCloud({ token: accessToken, refresh_token: refreshToken, user: userData })
   }, [])
 
   const logout = useCallback(() => {
@@ -52,6 +75,22 @@ export function AuthProvider({ children }) {
     removeItem('user')
     setToken(null)
     setUser(null)
+    // 同步登出到内嵌云端官网 iframe
+    broadcastAuthToCloud({ token: null, refresh_token: null, user: null })
+  }, [])
+
+  // token 刷新后（client.js 拦截器 dispatch 事件）同步新 token 到 iframe；
+  // refresh_token 会轮换，必须同步，否则 iframe 持旧 refresh_token 刷新会失败登出。
+  useEffect(() => {
+    function onRefresh(e) {
+      const { access_token, refresh_token } = e.detail || {}
+      if (!access_token) return
+      setToken(access_token)
+      if (refresh_token) setItem('refresh_token', refresh_token)
+      broadcastAuthToCloud({ token: access_token, refresh_token, user: getJSON('user') })
+    }
+    window.addEventListener('eleball:auth-refreshed', onRefresh)
+    return () => window.removeEventListener('eleball:auth-refreshed', onRefresh)
   }, [])
 
   const updateUser = useCallback((userData) => {

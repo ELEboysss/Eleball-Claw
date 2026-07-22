@@ -13,11 +13,9 @@ export default function Footer() {
           </div>
 
           <div className="flex items-center gap-6 text-sm text-eleball-text-secondary">
-            <Link to="/" className="hover:text-eleball-primary transition-colors">首页</Link>
+            <Link to="/" className="hover:text-eleball-primary transition-colors">官网</Link>
             <Link to="/chat" className="hover:text-eleball-primary transition-colors">对话</Link>
-            <Link to="/docs" className="hover:text-eleball-primary transition-colors">文档</Link>
-            <Link to="/privacy" className="hover:text-eleball-primary transition-colors">隐私政策</Link>
-            <Link to="/terms" className="hover:text-eleball-primary transition-colors">服务条款</Link>
+            <Link to="/claw-guide" className="hover:text-eleball-primary transition-colors">claw 指南</Link>
           </div>
         </div>
 

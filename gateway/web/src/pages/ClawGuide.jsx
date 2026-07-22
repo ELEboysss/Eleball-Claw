@@ -1,17 +1,13 @@
 import { useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import useSEO from '../hooks/useSEO'
-import { CLOUD_BASE } from '../api/client'
 import { Monitor, Terminal, Shield, Cloud, HardDrive, Boxes, ArrowRight, BookOpen, CreditCard } from 'lucide-react'
 
 // claw-guide：Eleball-claw 本地使用指南。
 // claw 是部署在设备端的本地化组件，本页说明它是什么、如何安装运行、本地/云端双通道如何工作、
-// 秘技如何安装。云端首页/文档/充值通过本页链接跳转 eleball.cn。
+// 秘技如何安装。云端官网/充值已改为本地内嵌页（/、/recharge）；文档等内容在官网 iframe 内导航到达。
 export default function ClawGuide() {
   useSEO('Eleball-claw 使用指南', '本地化 Eleball：安装、运行、双通道、秘技安装指南。', true)
-
-  // 提供给"前往云端"按钮的便捷跳转
-  const goCloud = (path) => () => { window.open(`${CLOUD_BASE}${path}`, '_blank', 'noopener') }
 
   useEffect(() => { document.title = 'claw 使用指南 - Eleball' }, [])
 
@@ -32,9 +28,9 @@ export default function ClawGuide() {
             <Link to="/chat" className="btn-primary text-sm px-5 py-2 inline-flex items-center gap-2">
               开始对话 <ArrowRight className="w-4 h-4" />
             </Link>
-            <button onClick={goCloud('/')} className="text-sm px-5 py-2 inline-flex items-center gap-2 rounded-full border border-eleball-outline-variant text-eleball-text-secondary hover:text-eleball-text">
-              <Cloud className="w-4 h-4" /> 前往云端首页
-            </button>
+            <Link to="/" className="text-sm px-5 py-2 inline-flex items-center gap-2 rounded-full border border-eleball-outline-variant text-eleball-text-secondary hover:text-eleball-text">
+              <Cloud className="w-4 h-4" /> 前往官网
+            </Link>
           </div>
         </div>
       </section>
@@ -70,7 +66,7 @@ export default function ClawGuide() {
                 <li>账户登录 / 注册（统一账户）</li>
                 <li>充值 / 支付 / VIP / 兑换码</li>
                 <li>秘技购买与已购拉取</li>
-                <li>首页 / 文档 / 充值页内容</li>
+                <li>官网 / 文档 / 充值页内容</li>
                 <li>Ele Agent 模型计费（经 BaseURL 转发）</li>
               </ul>
             </div>
@@ -152,22 +148,17 @@ export default function ClawGuide() {
         </section>
 
         {/* 云端入口 */}
-        <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <button onClick={goCloud('/')} className="card p-5 text-left hover:shadow-md transition-shadow">
+        <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <Link to="/" className="card p-5 text-left hover:shadow-md transition-shadow">
             <BookOpen className="w-5 h-5 text-eleball-primary mb-2" />
-            <div className="font-semibold text-eleball-text text-sm mb-1">云端首页</div>
-            <div className="text-xs text-eleball-text-secondary">产品介绍与功能展示</div>
-          </button>
-          <button onClick={goCloud('/docs')} className="card p-5 text-left hover:shadow-md transition-shadow">
-            <BookOpen className="w-5 h-5 text-eleball-primary mb-2" />
-            <div className="font-semibold text-eleball-text text-sm mb-1">使用文档</div>
-            <div className="text-xs text-eleball-text-secondary">API 接入与开发者指南</div>
-          </button>
-          <button onClick={goCloud('/recharge')} className="card p-5 text-left hover:shadow-md transition-shadow">
+            <div className="font-semibold text-eleball-text text-sm mb-1">官网</div>
+            <div className="text-xs text-eleball-text-secondary">产品介绍 / 文档 / 充值等</div>
+          </Link>
+          <Link to="/recharge" className="card p-5 text-left hover:shadow-md transition-shadow">
             <CreditCard className="w-5 h-5 text-eleball-primary mb-2" />
             <div className="font-semibold text-eleball-text text-sm mb-1">充值</div>
             <div className="text-xs text-eleball-text-secondary">弹丸 / VIP / 兑换码</div>
-          </button>
+          </Link>
         </section>
       </div>
     </div>

@@ -7,20 +7,20 @@ import Recharge from './pages/Recharge'
 import Models from './pages/Models'
 import AgentMarket from './pages/AgentMarket'
 import VisualStudio from './pages/VisualStudio'
-import Docs from './pages/Docs'
-import Privacy from './pages/Privacy'
-import Terms from './pages/Terms'
 import ClawGuide from './pages/ClawGuide'
 
 function App() {
   const location = useLocation()
   const isChat = location.pathname === '/chat'
   const isVisual = location.pathname === '/visual'
+  // 内嵌云端内容的页面：iframe 撑满视口，隐藏 Footer，与 Chat/Visual 同为全屏视图。
+  const isEmbed = ['/', '/recharge'].includes(location.pathname)
+  const isFullView = isChat || isVisual || isEmbed
 
   return (
     <div className="min-h-screen flex flex-col bg-eleball-bg text-eleball-text">
       <Navbar />
-      <main className={`flex-1 pt-16 flex flex-col min-h-0 ${isChat || isVisual ? 'overflow-hidden' : ''}`}>
+      <main className={`flex-1 pt-16 flex flex-col min-h-0 ${isFullView ? 'overflow-hidden' : ''}`}>
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/chat" element={<Chat />} />
@@ -29,13 +29,10 @@ function App() {
           <Route path="/agents" element={<AgentMarket />} />
           <Route path="/visual" element={<VisualStudio />} />
           <Route path="/video" element={<Navigate to="/visual?tab=video" replace />} />
-          <Route path="/docs" element={<Docs />} />
           <Route path="/claw-guide" element={<ClawGuide />} />
-          <Route path="/privacy" element={<Privacy />} />
-          <Route path="/terms" element={<Terms />} />
         </Routes>
       </main>
-      {!isChat && !isVisual && <Footer />}
+      {!isFullView && <Footer />}
     </div>
   )
 }
