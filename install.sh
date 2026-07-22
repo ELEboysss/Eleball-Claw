@@ -33,7 +33,7 @@ case "$ARCH" in
 esac
 
 # 下载地址（按需替换为实际分发源）
-URL="${CLAW_DOWNLOAD_URL:-https://eleball.cn/downloads/claw/${VERSION}/eleball-claw-${OS}-${ARCH}"
+URL="${CLAW_DOWNLOAD_URL:-https://eleball.cn/downloads/claw/${VERSION}/eleball-claw-${OS}-${ARCH}}"
 
 echo "==> 下载 claw ($OS/$ARCH) from $URL"
 TMP_BIN="$(mktemp)"
@@ -56,37 +56,47 @@ else
 fi
 chmod +x "$BINARY"
 
+# 生成 JWT secret（heredoc 外预计算，避免命令替换嵌套）
+CLAW_JWT_SECRET="$(openssl rand -hex 32 2>/dev/null || echo change-me-claw-secret)"
+
 # 初始化配置
 mkdir -p "$CONFIG_DIR/data"
 if [ ! -f "$CONFIG_DIR/claw.yaml" ]; then
   cat > "$CONFIG_DIR/claw.yaml" <<YAML
 server:
-  port: $PORT
+  port: ${PORT}
   mode: release
   eleagent_base_url: "https://api.eleball.cn/v1"
 database:
   driver: sqlite
-  dsn: "$CONFIG_DIR/data/claw.db"
+  dsn: "${CONFIG_DIR}/data/claw.db"
 jwt:
-  secret: "$(openssl rand -hex 32 2>/dev/null || echo change-me)"
+  secret: "${CLAW_JWT_SECRET}"
   access_expire_hours: 2
   refresh_expire_hours: 720
 agent:
   enabled: true
-  base_path: "$CONFIG_DIR/data/sessions"
-  knowledge_base: "$CONFIG_DIR/data/knowledge_base"
+  base_path: "${CONFIG_DIR}/data/sessions"
+  knowledge_base: "${CONFIG_DIR}/data/knowledge_base"
   model: "gpt-4o-mini"
   max_steps: 500
-admin: { enabled: false }
-admin_gate: { enabled: false }
-payment: { order_expire_minutes: 30, alipay: { enabled: false } }
-mail: { enabled: false, port: 465 }
+admin:
+  enabled: false
+admin_gate:
+  enabled: false
+payment:
+  order_expire_minutes: 30
+  alipay:
+    enabled: false
+mail:
+  enabled: false
+  port: 465
 YAML
-  echo "==> 已生成配置 $CONFIG_DIR/claw.yaml"
+  echo "==> 已生成配置 ${CONFIG_DIR}/claw.yaml"
 fi
 
 echo ""
 echo "✅ Eleball-claw 安装完成"
-echo "   启动: CONFIG_PATH=$CONFIG_DIR/claw.yaml eleball-claw serve --port=$PORT"
-echo "   首页: http://localhost:$PORT"
-echo "   配置: $CONFIG_DIR/claw.yaml"
+echo "   启动: CONFIG_PATH=${CONFIG_DIR}/claw.yaml eleball-claw serve --port=${PORT}"
+echo "   首页: http://localhost:${PORT}"
+echo "   配置: ${CONFIG_DIR}/claw.yaml"
