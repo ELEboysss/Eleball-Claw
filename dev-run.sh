@@ -2,9 +2,9 @@
 # claw 本地开发一键启动（从源码编译运行，无需 CDN 下载）
 #
 # 用法：
-#   ./dev-run.sh                       # 默认端口 8090，仅 API（无 web 页面）
-#   ./dev-run.sh --build-web           # 先 build web+admin-web dist 再启动（访问 :8090 见页面）
-#   ./dev-run.sh --build-web --port=18090
+#   ./dev-run.sh                       # 默认端口 8090，构建前端+启动（访问 :8090 见页面）
+#   ./dev-run.sh --no-build-web        # 跳过前端构建（仅 API，dev 跑 vite :5173）
+#   ./dev-run.sh --port=18090
 #   ./dev-run.sh 18090                  # 端口简写
 #
 # 启动后自动验证 /health，Ctrl-C 停止 claw。
@@ -16,13 +16,14 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"          # 主仓库根（.tools/go �
 GATEWAY="$SCRIPT_DIR/gateway"
 GO="$REPO_ROOT/.tools/go/bin/go"
 
-# 参数解析
+# 参数解析：默认构建前端，--no-build-web 跳过
 PORT=8090
-BUILD_WEB=0
+BUILD_WEB=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --port=*) PORT="${1#--port=}";;
     --build-web) BUILD_WEB=1;;
+    --no-build-web) BUILD_WEB=0;;
     [0-9]*) PORT="$1";;
   esac
   shift
@@ -68,6 +69,8 @@ if [[ "$BUILD_WEB" == 1 ]]; then
   build_dist "$GATEWAY/web" "web" "$REPO_ROOT/gateway/web/node_modules" || exit 1
   build_dist "$GATEWAY/admin-web" "admin-web" "$REPO_ROOT/gateway/admin-web/node_modules" || exit 1
   echo "✓ 前端 dist 构建完成，claw-server 将 serve 页面"
+else
+  echo "ℹ 跳过前端构建（--no-build-web）；访问 :5173 跑 vite dev 或无 dist 时 / 返回构建提示"
 fi
 
 mkdir -p "$GATEWAY/data"

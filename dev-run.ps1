@@ -1,17 +1,21 @@
 # claw local dev one-click launcher (build from source, no CDN needed)
 #
 # Usage:
-#   .\dev-run.ps1                       # default port 8090, API only (no web pages)
-#   .\dev-run.ps1 -BuildWeb             # build web+admin-web dist first, then start
-#   .\dev-run.ps1 -BuildWeb -Port 18090
+#   .\dev-run.ps1                       # default port 8090, build web+start (pages at :8090)
+#   .\dev-run.ps1 -NoBuildWeb           # skip frontend build (API only, run vite dev :5173)
+#   .\dev-run.ps1 -Port 18090
 #
 # Auto-verifies /health; Ctrl-C stops claw.
 # Optional env (set before launch): $env:JWT_SECRET / $env:RELAY_URL / $env:CLAW_RELAY_TOKEN / $env:CLAW_DEVICE_ID
 param(
     [int]$Port = 8090,
-    [switch]$BuildWeb
+    [switch]$BuildWeb,
+    [switch]$NoBuildWeb
 )
 $ErrorActionPreference = "Stop"
+
+# 默认构建前端；-BuildWeb 显式开，-NoBuildWeb 关
+$doBuild = if ($NoBuildWeb) { $false } else { $true }
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptDir
@@ -52,10 +56,12 @@ function Build-Dist([string]$Dir, [string]$Name, [string]$MainNode) {
     if ($code -ne 0) { Write-Host "ERROR: $Name build failed" -ForegroundColor Red; exit 1 }
 }
 
-if ($BuildWeb) {
+if ($doBuild) {
     Build-Dist (Join-Path $Gateway "web") "web" (Join-Path $RepoRoot "gateway\web\node_modules")
     Build-Dist (Join-Path $Gateway "admin-web") "admin-web" (Join-Path $RepoRoot "gateway\admin-web\node_modules")
     Write-Host ">> Frontend dist built, claw-server will serve pages" -ForegroundColor Green
+} else {
+    Write-Host ">> Skipped frontend build (-NoBuildWeb); run vite dev at :5173 or / returns build hint if no dist" -ForegroundColor Yellow
 }
 
 New-Item -ItemType Directory -Force -Path (Join-Path $Gateway "data") | Out-Null
@@ -64,7 +70,7 @@ Set-Location $Gateway
 $LogPath = Join-Path $env:TEMP "claw-dev.log"
 Write-Host ">> Building and starting claw-server (port $Port)..." -ForegroundColor Cyan
 Write-Host "   /health: http://localhost:$Port/health"
-if ($BuildWeb) {
+if ($doBuild) {
     Write-Host "   pages: http://localhost:$Port (web) / http://localhost:$Port/admin (console)"
 }
 Write-Host "   log: $LogPath"
