@@ -1,6 +1,6 @@
 # Eleball-claw 构建/打包
 #
-# claw 仓库自带 gateway/（上游 Eleball gateway 的裁剪 fork），cmd/claw-server 为本地网关入口。
+# claw 仓库自带 gateway/（本地网关），cmd/claw-server 为本地网关入口。
 # 详见本仓库 README 或主仓库 docs/marketing/claw-implementation-plan.md。
 #
 # 用法：

@@ -9,7 +9,7 @@
 
 ## 实现
 
-复用上游 builtin SearchWeb 的搜索逻辑（`gateway/internal/service/search_provider.go`），支持四个搜索源，按环境变量选择可用源：
+复用 gateway 内置 SearchWeb 的搜索逻辑（`gateway/internal/service/search_provider.go`），支持四个搜索源，按环境变量选择可用源：
 
 | 搜索源 | 环境变量 | 说明 |
 |--------|---------|------|

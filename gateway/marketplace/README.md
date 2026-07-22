@@ -1,4 +1,4 @@
-# Eleball 集市秘技模块目录
+# 集市秘技模块目录
 
 本目录存放独立的「集市秘技」Docker 模块。每个子目录对应一个可插拔的能力模块，满足以下标准接口。
 
@@ -100,7 +100,7 @@ cd gateway/marketplace
    - 推荐每个 SKU 只包含一个 `action`；单 action SKU 的 `parameters` 直接声明业务参数，不要嵌套 `params`
    - 多 action SKU 的 `parameters` 保留 `action` 字段，业务参数与 `action` 平级
 6. 在创作者后台提交 SKU 审批申请，其中 `driver` 填写申请的驱动别名。
-7. 管理员在管理后台 `POST /v1/admin/drivers` 创建驱动别名，并设置 `auth_token`（当前手动发放，后续将通过 `agent_market@eleball.cn` 邮箱自动发送）。`auth_token` 绑定在驱动别名上。
+7. 驱动别名与 `auth_token` 由云端发放并绑定（`auth_token` 绑定在驱动别名上）。
 8. 部署模块服务后，开发者使用 `auth_token` 调用 `POST /v1/market/modules/register` 自助注册到网关：
    - `module_id` 可留空，由网关自动生成；
    - 网关会自动将该模块绑定到对应驱动别名（回填 `drivers.module_id`）。
@@ -109,4 +109,4 @@ cd gateway/marketplace
 11. 更新 `docs/tool-driver-guide.md` 与 `docs/agent-market-creator-guide.md` 中相关说明。
 12. 网关启动时会通过 `ModuleRegistry` 自动探测 `/health` 并检测健康状态。
 
-> 对于官方模块（如 `agent-reach`、`firecrawl`），可直接运行 `go run ./cmd/seed` 或 `./server --seed` 预置模块、驱动别名与示例 SKU，跳过开发者自助注册步骤。
+> 对于官方模块（如 `agent-reach`、`firecrawl`），随仓库预置，无需开发者自助注册。

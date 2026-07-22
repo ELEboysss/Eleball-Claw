@@ -1,6 +1,6 @@
 # Firecrawl 集市模块
 
-Eleball 弹丸集市中的网页抓取秘技模块，将 [Firecrawl](https://www.firecrawl.dev/) 包装为标准 Eleball Marketplace Module，供 Agent 工作流动态调用。
+claw 集市中的网页抓取秘技模块，将 [Firecrawl](https://www.firecrawl.dev/) 包装为标准 Marketplace Module，供 Agent 工作流动态调用。
 
 > 完整 Firecrawl API 参数、响应格式与错误码说明见 [`docs/firecrawl-api-guide.md`](docs/firecrawl-api-guide.md)。
 
@@ -68,13 +68,13 @@ Firecrawl 的三个 action 已拆分为独立 SKU，每个 SKU 只包含一个 a
 | `firecrawl-crawl` | `crawl` | `skus/crawl.json` |
 | `firecrawl-extract` | `extract` | `skus/extract.json` |
 
-网关启动时会通过 `seedFirecrawlSKUs` 自动预置这三个 SKU。
+网关启动时会自动预置这三个 SKU。
 
 ## 与网关集成
 
 1. 确保模块容器服务名为 `firecrawl`，并加入 `eleball-net` 网络。
 2. 网关启动时会通过 `ModuleRegistry` 探测 `http://firecrawl:8080/health`。
-3. 通过 `POST /v1/admin/modules` 或 `POST /v1/market/modules/register` 注册模块（`firecrawl` 已作为内置模块预置）。
+3. 模块已作为内置模块预置，无需额外注册（第三方模块可通过 `POST /v1/market/modules/register` 注册）。
 4. 在 SKU 的 `manifest_json` 中设置：
    - `driver`: `firecrawl`（已注册的驱动别名，不要写具体 module_id）
 5. 模块离线时，网关不会在 Agent 工作流中加载该工具。

@@ -1,20 +1,17 @@
 # Eleball-claw 本地网关配置
-# 与云端 configs/config.yaml 的差异：
-#   - server.eleagent_base_url 指向云端 api.eleball.cn/v1（Ele Agent 模型经此转发，由云端账户计费）
-#   - admin / admin_gate / payment 全 disabled（claw 无管理后台、无前置闸门、无支付）
-#   - mail 默认 disabled（本地 OTP 走控制台打印；启用见 MAIL_* 环境变量）
-#   - 本地不计费：claw-server 注入 nil billing，chat/agent/visual 流程跳过扣费
+# claw 本地运行：本地 SQLite、不启用管理后台 / 支付 / 邮件、本地不计费。
+# server.eleagent_base_url 指向云端 api.eleball.cn/v1（Ele Agent 模型转发至云端）。
 # 云端地址（cloud_base / cloud_api）供 web 双通道与 auth 转发用，P2 实现，gateway 侧暂不需要。
 
 server:
   port: 8090
   mode: debug
-  # Ele Agent 模型经此 BaseURL 转发至云端，由云端账户计费（claw 本地不计费）
+  # Ele Agent 模型经此 BaseURL 转发至云端
   eleagent_base_url: "https://api.eleball.cn/v1"
 
 database:
   driver: sqlite
-  # 本地 SQLite，与云端开发环境一致；claw 数据自主可控
+  # 本地 SQLite，claw 数据自主可控
   dsn: "data/claw.db"
 
 cdk_database:
