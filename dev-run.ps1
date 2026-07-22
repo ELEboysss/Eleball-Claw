@@ -5,17 +5,18 @@
 #   .\dev-run.ps1 -NoBuildWeb           # skip frontend build (API only, run vite dev :5173)
 #   .\dev-run.ps1 -Port 18090
 #
+# 默认构建前端并启动；仅 -NoBuildWeb 跳过构建。
 # Auto-verifies /health; Ctrl-C stops claw.
 # Optional env (set before launch): $env:JWT_SECRET / $env:RELAY_URL / $env:CLAW_RELAY_TOKEN / $env:CLAW_DEVICE_ID
 param(
     [int]$Port = 8090,
-    [switch]$BuildWeb,
     [switch]$NoBuildWeb
 )
 $ErrorActionPreference = "Stop"
 
-# 默认构建前端；-BuildWeb 显式开，-NoBuildWeb 关
-$doBuild = if ($NoBuildWeb) { $false } else { $true }
+# 默认构建前端；-NoBuildWeb 关闭
+$doBuild = -not $NoBuildWeb
+Write-Host ">> build_web=$doBuild (NoBuildWeb switch=$NoBuildWeb)" -ForegroundColor DarkGray
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptDir
