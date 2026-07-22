@@ -49,6 +49,7 @@ type RelayTunnel struct {
 	localBase   string // 本地 claw gateway BaseURL，如 http://localhost:8090/v1
 	logger      *zap.Logger
 	httpClient  *http.Client
+	cipher      *E2ECipher // P5.4 E2E 加密器（nil 时明文，向后兼容）
 
 	conn  *websocket.Conn
 	mu    sync.Mutex // 保护 conn 写
@@ -57,7 +58,8 @@ type RelayTunnel struct {
 }
 
 // NewRelayTunnel 创建隧道。relayURL/deviceID/jwtToken 任一为空时 Start 跳过（relay 不可用，仅 LAN）。
-func NewRelayTunnel(relayURL, deviceID, jwtToken, localBase string, logger *zap.Logger) *RelayTunnel {
+// cipher 非 nil 时启用 E2E 加密（P5.4）；nil 时明文（P5.3 兼容）。
+func NewRelayTunnel(relayURL, deviceID, jwtToken, localBase string, logger *zap.Logger, cipher *E2ECipher) *RelayTunnel {
 	return &RelayTunnel{
 		relayURL:   relayURL,
 		deviceID:   deviceID,
@@ -65,6 +67,7 @@ func NewRelayTunnel(relayURL, deviceID, jwtToken, localBase string, logger *zap.
 		localBase:  localBase,
 		logger:     logger,
 		httpClient: &http.Client{Timeout: 120 * time.Second},
+		cipher:     cipher,
 		stop:        make(chan struct{}),
 		done:        make(chan struct{}),
 	}
@@ -164,14 +167,35 @@ func (t *RelayTunnel) heartbeat(conn *websocket.Conn) {
 }
 
 // handleRequest 把 app 请求帧还原为本地 claw gateway HTTP 请求，响应帧回写 relay。
+// P5.4：cipher 非 nil 时 payload 为 E2E 密文，先解密还原为 relayRequest；响应加密回传。
 func (t *RelayTunnel) handleRequest(conn *websocket.Conn, seq int64, payload string) {
+	// P5.4 E2E 解密：cipher 非 nil 时 payload 是 encryptedPayload JSON
+	plainPayload := payload
+	var ephPubForResp string
+	if t.cipher != nil {
+		decrypted, err := t.cipher.Decrypt(payload)
+		if err != nil {
+			t.logger.Warn("E2E 解密失败", zap.Int64("seq", seq), zap.Error(err))
+			t.sendResponse(conn, seq, relayResponse{Status: 400, Body: json.RawMessage(`{"error":"解密失败"}`)}, "")
+			return
+		}
+		plainPayload = string(decrypted)
+		// 从加密载荷提取 eph_pub 供响应加密复用同一会话密钥
+		var ep struct {
+			EphPub string `json:"eph_pub"`
+		}
+		if json.Unmarshal([]byte(payload), &ep) == nil {
+			ephPubForResp = ep.EphPub
+		}
+	}
+
 	var req relayRequest
-	if err := json.Unmarshal([]byte(payload), &req); err != nil {
+	if err := json.Unmarshal([]byte(plainPayload), &req); err != nil {
 		t.logger.Warn("relay 请求解析失败", zap.Int64("seq", seq), zap.Error(err))
-		t.sendResponse(conn, seq, relayResponse{Status: 400, Body: json.RawMessage(`{"error":"请求格式错误"}`)})
+		t.sendResponse(conn, seq, relayResponse{Status: 400, Body: json.RawMessage(`{"error":"请求格式错误"}`)}, ephPubForResp)
 		return
 	}
-	t.logger.Info("relay 处理请求", zap.Int64("seq", seq), zap.String("method", req.Method), zap.String("path", req.Path))
+	t.logger.Info("relay 处理请求", zap.Int64("seq", seq), zap.String("method", req.Method), zap.String("path", req.Path), zap.Bool("e2e", t.cipher != nil))
 
 	// 本地 HTTP 请求
 	url := t.localBase + req.Path
@@ -181,7 +205,7 @@ func (t *RelayTunnel) handleRequest(conn *websocket.Conn, seq int64, payload str
 	}
 	httpReq, err := http.NewRequestWithContext(context.Background(), req.Method, url, body)
 	if err != nil {
-		t.sendResponse(conn, seq, relayResponse{Status: 400, Body: json.RawMessage(`{"error":"` + err.Error() + `"}`)})
+		t.sendResponse(conn, seq, relayResponse{Status: 400, Body: json.RawMessage(`{"error":"` + err.Error() + `"}`)}, ephPubForResp)
 		return
 	}
 	for k, v := range req.Headers {
@@ -193,7 +217,7 @@ func (t *RelayTunnel) handleRequest(conn *websocket.Conn, seq int64, payload str
 
 	resp, err := t.httpClient.Do(httpReq)
 	if err != nil {
-		t.sendResponse(conn, seq, relayResponse{Status: 502, Body: json.RawMessage(`{"error":"本地网关不可达: ` + err.Error() + `"}`)})
+		t.sendResponse(conn, seq, relayResponse{Status: 502, Body: json.RawMessage(`{"error":"本地网关不可达: ` + err.Error() + `"}`)}, ephPubForResp)
 		return
 	}
 	defer resp.Body.Close()
@@ -202,13 +226,22 @@ func (t *RelayTunnel) handleRequest(conn *websocket.Conn, seq int64, payload str
 	t.sendResponse(conn, seq, relayResponse{
 		Status: resp.StatusCode,
 		Body:   json.RawMessage(respBody),
-	})
+	}, ephPubForResp)
 }
 
-// sendResponse 回写响应帧到 relay（经 relay 转发给 app）
-func (t *RelayTunnel) sendResponse(conn *websocket.Conn, seq int64, resp relayResponse) {
+// sendResponse 回写响应帧到 relay（经 relay 转发给 app）。
+// P5.4：cipher 非 nil 且 ephPubForResp 非空时，响应加密为 encryptedPayload。
+func (t *RelayTunnel) sendResponse(conn *websocket.Conn, seq int64, resp relayResponse, ephPubForResp string) {
 	payload, _ := json.Marshal(resp)
-	msg := relayMsg{Type: "data", Seq: seq, Payload: string(payload)}
+	payloadStr := string(payload)
+	if t.cipher != nil && ephPubForResp != "" {
+		if encrypted, err := t.cipher.EncryptResponse(ephPubForResp, payload); err == nil {
+			payloadStr = encrypted
+		} else {
+			t.logger.Warn("E2E 加密响应失败，回退明文", zap.Error(err))
+		}
+	}
+	msg := relayMsg{Type: "data", Seq: seq, Payload: payloadStr}
 	data, _ := json.Marshal(msg)
 	t.mu.Lock()
 	defer t.mu.Unlock()

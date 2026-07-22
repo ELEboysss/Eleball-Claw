@@ -352,10 +352,18 @@ func main() {
 	// CLAW_RELAY_TOKEN 为用户在控制台登录后获得的 JWT（统一账户验签，与 gateway JWT_SECRET 一致）。
 	relayURL := os.Getenv("RELAY_URL")
 	relayToken := os.Getenv("CLAW_RELAY_TOKEN")
+	// P5.4 E2E 加密器（claw 静态 X25519 密钥对；公钥应注册云端设备列表供 APP 协商）
+	e2eCipher, err := service.NewE2ECipher()
+	if err != nil {
+		logger.Warn("E2E 加密器初始化失败（relay 将走明文）", zap.Error(err))
+		e2eCipher = nil
+	} else {
+		logger.Info("E2E 加密就绪", zap.String("claw_pubkey", e2eCipher.PublicKeyBase64()))
+	}
 	relayTunnel := service.NewRelayTunnel(
 		relayURL, deviceID, relayToken,
 		fmt.Sprintf("http://localhost:%d", cfg.Server.Port),
-		logger,
+		logger, e2eCipher,
 	)
 	relayTunnel.Start()
 	defer relayTunnel.Stop()
