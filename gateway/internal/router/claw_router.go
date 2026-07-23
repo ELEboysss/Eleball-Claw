@@ -235,15 +235,16 @@ func serveStatic(r *gin.Engine, log *zap.Logger) {
 	r.StaticFS("/assets", http.FS(webAssets))
 	r.StaticFS("/admin/assets", http.FS(adminAssets))
 
-	// 根路径 / -> web index.html；/admin -> admin-web index.html
-	webFS := http.FS(web.DistFS)
-	adminFS := http.FS(adminweb.DistFS)
-	r.GET("/", func(c *gin.Context) { c.FileFromFS("/index.html", webFS) })
-	r.GET("/admin", func(c *gin.Context) { c.FileFromFS("/index.html", adminFS) })
+	// index.html 直接读 embed 内容返回，避免 http.FileServer 对 "/index.html" 的 301 重定向（会死循环 /）
+	webIndex, _ := web.DistFS.ReadFile("index.html")
+	adminIndex, _ := adminweb.DistFS.ReadFile("index.html")
+
+	r.GET("/", func(c *gin.Context) { c.Data(http.StatusOK, "text/html; charset=utf-8", webIndex) })
+	r.GET("/admin", func(c *gin.Context) { c.Data(http.StatusOK, "text/html; charset=utf-8", adminIndex) })
 
 	log.Info("web 静态服务就绪（embed）")
 
-	// NoRoute：API 路径返回 JSON 404；其余 fallback 到对应 index.html（SPA 路由）
+	// NoRoute：API 路径返回 JSON 404；其余 fallback 到 index.html（SPA 路由）
 	r.NoRoute(func(c *gin.Context) {
 		path := c.Request.URL.Path
 		if strings.HasPrefix(path, "/v1") || strings.HasPrefix(path, "/claw-console") ||
@@ -253,10 +254,10 @@ func serveStatic(r *gin.Engine, log *zap.Logger) {
 		}
 		// admin-web SPA fallback
 		if strings.HasPrefix(path, "/admin") {
-			c.FileFromFS("/index.html", adminFS)
+			c.Data(http.StatusOK, "text/html; charset=utf-8", adminIndex)
 			return
 		}
 		// web SPA fallback
-		c.FileFromFS("/index.html", webFS)
+		c.Data(http.StatusOK, "text/html; charset=utf-8", webIndex)
 	})
 }
