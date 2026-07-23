@@ -22,7 +22,7 @@ CGO ?= 0
 
 .PHONY: build build-web package run clean test
 
-build:
+build: build-web
 	@mkdir -p $(DIST)
 	cd $(GATEWAY) && CGO_ENABLED=$(CGO) GOOS=$(GOOS) GOARCH=$(GOARCH) \
 		$(GO) build -trimpath -ldflags "-s -w" -o ../$(BINARY) ./cmd/claw-server

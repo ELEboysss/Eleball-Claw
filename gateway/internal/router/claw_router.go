@@ -1,15 +1,16 @@
 package router
 
 import (
+	"io/fs"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 
+	"github.com/eleball/gateway/admin-web"
 	"github.com/eleball/gateway/internal/config"
 	"github.com/eleball/gateway/internal/handler"
 	"github.com/eleball/gateway/internal/middleware"
 	"github.com/eleball/gateway/pkg/util"
+	"github.com/eleball/gateway/web"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -225,30 +226,22 @@ func NewClawRouter(
 }
 
 // serveStatic 服务前端 dist（web 在根路径，admin-web 在 /admin/*）。
-// dist 相对 gateway 工作目录：web/dist、admin-web/dist（dev-run 从 gateway/ 启动）。
-// dist 不存在时，NoRoute 返回提示（dev 应跑 vite dev server :5173，或 build dist）。
+// dist 经 go:embed 内嵌进二进制（web.DistFS / adminweb.DistFS），单文件分发（plan §A.3）。
+// 编译期 dist 必须存在（make build 依赖 build-web），故无需磁盘回退。
 func serveStatic(r *gin.Engine, log *zap.Logger) {
-	webDist := filepath.Join("web", "dist")
-	adminDist := filepath.Join("admin-web", "dist")
-	webExists := dirExists(webDist)
-	adminExists := dirExists(adminDist)
+	// /assets/* -> dist/assets/*（gin StaticFS 自动 StripPrefix）
+	webAssets, _ := fs.Sub(web.DistFS, "assets")
+	adminAssets, _ := fs.Sub(adminweb.DistFS, "assets")
+	r.StaticFS("/assets", http.FS(webAssets))
+	r.StaticFS("/admin/assets", http.FS(adminAssets))
 
-	if webExists {
-		// 静态资源（/assets/*、/logo-icon.png 等）
-		r.Static("/assets", filepath.Join(webDist, "assets"))
-		// 根路径返回 index.html
-		r.GET("/", func(c *gin.Context) {
-			c.File(filepath.Join(webDist, "index.html"))
-		})
-		log.Info("web 静态服务就绪", zap.String("dist", webDist))
-	}
-	if adminExists {
-		r.Static("/admin/assets", filepath.Join(adminDist, "assets"))
-		r.GET("/admin", func(c *gin.Context) {
-			c.File(filepath.Join(adminDist, "index.html"))
-		})
-		log.Info("admin-web 静态服务就绪", zap.String("dist", adminDist))
-	}
+	// 根路径 / -> web index.html；/admin -> admin-web index.html
+	webFS := http.FS(web.DistFS)
+	adminFS := http.FS(adminweb.DistFS)
+	r.GET("/", func(c *gin.Context) { c.FileFromFS("/index.html", webFS) })
+	r.GET("/admin", func(c *gin.Context) { c.FileFromFS("/index.html", adminFS) })
+
+	log.Info("web 静态服务就绪（embed）")
 
 	// NoRoute：API 路径返回 JSON 404；其余 fallback 到对应 index.html（SPA 路由）
 	r.NoRoute(func(c *gin.Context) {
@@ -259,24 +252,11 @@ func serveStatic(r *gin.Engine, log *zap.Logger) {
 			return
 		}
 		// admin-web SPA fallback
-		if strings.HasPrefix(path, "/admin") && adminExists {
-			c.File(filepath.Join(adminDist, "index.html"))
+		if strings.HasPrefix(path, "/admin") {
+			c.FileFromFS("/index.html", adminFS)
 			return
 		}
-		if webExists {
-			c.File(filepath.Join(webDist, "index.html"))
-			return
-		}
-		// dev 未 build web：提示用 vite dev server 或 build dist
-		c.Data(http.StatusNotFound, "text/html; charset=utf-8", []byte(
-			"<!DOCTYPE html><html><body><h3>claw web 未构建</h3>"+
-				"<p>开发模式请启动前端 dev server：<code>cd web &amp;&amp; npm run dev</code>（访问 http://localhost:5173）</p>"+
-				"<p>或构建后内嵌：<code>cd web &amp;&amp; npm run build</code>（产物 ../web/dist 由 claw-server 服务）</p>"+
-				"<p>API 已就绪：<code>/health</code></p></body></html>"))
+		// web SPA fallback
+		c.FileFromFS("/index.html", webFS)
 	})
-}
-
-func dirExists(p string) bool {
-	info, err := os.Stat(p)
-	return err == nil && info.IsDir()
 }
