@@ -35,6 +35,18 @@ if (-not (Test-Path $Go)) {
     exit 1
 }
 
+# Port pre-check: if another instance is already LISTENING (e.g. the exe installed by
+# install.ps1 at ~/.eleball-claw/bin), the health probe would hit that old process during
+# the build window and falsely report "self-test passed". Fail fast and suggest -Port.
+# NOTE: keep output English-only (PS5.1 reads BOM-less ps1 as ANSI; CJK strings break parsing).
+$listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+if ($listener) {
+    Write-Host "ERROR: port $Port already LISTENING (PID $($listener[0].OwningProcess))." -ForegroundColor Red
+    Write-Host "       Likely the installed instance (~/.eleball-claw/bin/eleball-claw.exe) is running." -ForegroundColor Yellow
+    Write-Host "       Re-run self-test on another port: .\dev-run.ps1 -Port 18090" -ForegroundColor Yellow
+    exit 1
+}
+
 # build_dist: build one frontend dist (web or admin-web)
 function Build-Dist([string]$Dir, [string]$Name, [string]$MainNode) {
     Write-Host ">> Building $Name dist..." -ForegroundColor Cyan
