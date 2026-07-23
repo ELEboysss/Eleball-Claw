@@ -239,12 +239,18 @@ func serveStatic(r *gin.Engine, log *zap.Logger) {
 	r.StaticFS("/assets", http.FS(webAssets))
 	r.StaticFS("/admin/assets", http.FS(adminAssets))
 
-	// index.html 直接读 embed 内容返回，避免 http.FileServer 对 "/index.html" 的 301 重定向（会死循环 /）
+	// index.html 直接读 embed 内容返回，避免 http.FileServer 对 "/index.html" 的 301 重定向（会死循环 /）。
+	// index 必须禁缓存： assets 带内容哈希可长缓存，但 index 引用具体哈希文件；
+	// 若浏览器缓存了旧 index（尤其旧版本异常时的空响应），升级后仍会引用不存在的旧 assets 导致白屏。
 	webIndex, _ := fs.ReadFile(webDist, "index.html")
 	adminIndex, _ := fs.ReadFile(adminDist, "index.html")
+	serveIndex := func(c *gin.Context, body []byte) {
+		c.Header("Cache-Control", "no-cache")
+		c.Data(http.StatusOK, "text/html; charset=utf-8", body)
+	}
 
-	r.GET("/", func(c *gin.Context) { c.Data(http.StatusOK, "text/html; charset=utf-8", webIndex) })
-	r.GET("/admin", func(c *gin.Context) { c.Data(http.StatusOK, "text/html; charset=utf-8", adminIndex) })
+	r.GET("/", func(c *gin.Context) { serveIndex(c, webIndex) })
+	r.GET("/admin", func(c *gin.Context) { serveIndex(c, adminIndex) })
 
 	log.Info("web 静态服务就绪（embed）")
 
@@ -258,10 +264,10 @@ func serveStatic(r *gin.Engine, log *zap.Logger) {
 		}
 		// admin-web SPA fallback
 		if strings.HasPrefix(path, "/admin") {
-			c.Data(http.StatusOK, "text/html; charset=utf-8", adminIndex)
+			serveIndex(c, adminIndex)
 			return
 		}
 		// web SPA fallback
-		c.Data(http.StatusOK, "text/html; charset=utf-8", webIndex)
+		serveIndex(c, webIndex)
 	})
 }
