@@ -1,4 +1,4 @@
-﻿# Eleball-claw 一键安装（Windows PowerShell）
+# Eleball-claw 一键安装（Windows PowerShell）
 #
 # 用法：
 #   irm https://eleball.cn/install.ps1 | iex
