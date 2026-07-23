@@ -67,8 +67,10 @@ func main() {
 		if err != nil {
 			log.Fatalf("获取执行路径失败: %v", err)
 		}
-		configPath = filepath.Join(filepath.Dir(execPath), "..", "..", "configs", "claw.yaml")
+		// install 把 claw.yaml 放在 ~/.eleball-claw/claw.yaml，exe 在 bin/，故默认找上级 ../claw.yaml
+		configPath = filepath.Join(filepath.Dir(execPath), "..", "claw.yaml")
 		if _, err := os.Stat(configPath); os.IsNotExist(err) {
+			// 开发期兜底：configs/claw.yaml
 			configPath = "configs/claw.yaml"
 		}
 	}
