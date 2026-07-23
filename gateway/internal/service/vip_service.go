@@ -24,6 +24,15 @@ type VIPService struct {
 	billRepo  *repository.BillingRepo
 	orderRepo *repository.OrderRepo
 	logger    *zap.Logger
+	// unrestricted=true（claw 本地）：跳过所有本地 user 依赖的读门控，返回不限值。
+	// claw 本地不限对话/Agent Session/ASR 配额/功能开关（云端 VIP 仅用于云端秘技下载/激活门控，
+	// 由 CloudAccountService 直接校验，不经 VIPService）。置 true 后不查本地 users 表。
+	unrestricted bool
+}
+
+// SetUnrestricted 设置为不限模式（claw 本地用；云端 cmd/server 保持 false）。
+func (s *VIPService) SetUnrestricted(b bool) {
+	s.unrestricted = b
 }
 
 // NewVIPService 创建会员服务
@@ -161,6 +170,9 @@ func (s *VIPService) resetAgentTrialIfNewDay(user *model.User) {
 
 // ConsumeAgentTrial 消耗一次 VIP0 的 Agent 模式试用次数
 func (s *VIPService) ConsumeAgentTrial(userID string) error {
+	if s.unrestricted {
+		return nil // claw 本地不限 Agent 模式，无试用计数
+	}
 	user, err := s.userRepo.GetByID(userID)
 	if err != nil {
 		return err
@@ -796,6 +808,9 @@ func (s *VIPService) ApplyDiscount(userID string, cost int64) (int64, error) {
 
 // HasFeature 判断用户是否拥有某项 VIP 权益
 func (s *VIPService) HasFeature(userID string, feature string) (bool, error) {
+	if s.unrestricted {
+		return true, nil // claw 本地不限功能开关
+	}
 	user, err := s.userRepo.GetByID(userID)
 	if err != nil {
 		return false, err
@@ -812,6 +827,9 @@ func (s *VIPService) HasFeature(userID string, feature string) (bool, error) {
 
 // GetMaxConversations 获取用户最大历史会话配额
 func (s *VIPService) GetMaxConversations(userID string) (int, error) {
+	if s.unrestricted {
+		return math.MaxInt32, nil // claw 本地不限对话数
+	}
 	status, err := s.GetEffectiveVIP(userID)
 	if err != nil {
 		return 0, err
@@ -821,6 +839,9 @@ func (s *VIPService) GetMaxConversations(userID string) (int, error) {
 
 // GetMaxAgentSessions 获取用户最大 Agent Session 配额
 func (s *VIPService) GetMaxAgentSessions(userID string) (int, error) {
+	if s.unrestricted {
+		return math.MaxInt32, nil // claw 本地不限 Agent Session 数
+	}
 	status, err := s.GetEffectiveVIP(userID)
 	if err != nil {
 		return 0, err
@@ -835,6 +856,9 @@ func (s *VIPService) ListSubscriptions(page, pageSize int, userID string) ([]*mo
 
 // GetAsrQuotaMonthly 获取用户 ASR 月度额度
 func (s *VIPService) GetAsrQuotaMonthly(userID string) (int64, error) {
+	if s.unrestricted {
+		return math.MaxInt64, nil // claw STT 走集市模块（用户自带 key），本地不限 ASR 配额
+	}
 	status, err := s.GetEffectiveVIP(userID)
 	if err != nil {
 		return 0, err

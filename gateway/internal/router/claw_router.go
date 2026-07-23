@@ -29,11 +29,9 @@ func NewClawRouter(
 	cfg *config.AppConfig,
 	log *zap.Logger,
 	jwtUtil *util.JWTUtil,
-	authHandler *handler.AuthHandler,
 	chatHandler *handler.ChatHandler,
 	syncHandler *handler.SyncHandler,
 	eleAgentHandler *handler.EleAgentHandler,
-	sttHandler *handler.SttHandler,
 	conversationHandler *handler.ConversationHandler,
 	moduleHandler *handler.ModuleHandler,
 	agentWorkflowHandler *handler.AgentWorkflowHandler,
@@ -70,12 +68,9 @@ func NewClawRouter(
 
 	v1 := r.Group("/v1")
 	{
-		// 公开接口：登录/注册。P1 走本地用户表；P2 改为转发云端统一账户（见 claw-implementation-plan §J）。
-		v1.POST("/auth/register", authHandler.Register)
-		v1.POST("/auth/login", authHandler.Login)
-		v1.POST("/auth/refresh", authHandler.Refresh)
-		v1.POST("/auth/email/otp/send", authHandler.SendEmailOTP)
-		v1.POST("/auth/email/login", authHandler.EmailLogin)
+		// 认证（登录/注册/刷新/邮箱OTP/me）统一走云端 eleball.cn 账户（claw web 的 authApi 直连云端）；
+		// claw 本地不再提供 /v1/auth/* 路由与本地 users 账户体系（见 claw-cloud-auth-unify 计划）。
+		// 本地接口的 JWTAuth 接受云端签发的 JWT（部署时 JWT_SECRET 与云端一致）。
 
 		// 版本发布与下载（无需登录）
 		v1.GET("/releases/android", releaseHandler.GetAndroidManifest)
@@ -87,13 +82,12 @@ func NewClawRouter(
 		// 需要认证
 		auth := v1.Group("", middleware.JWTAuth(jwtUtil))
 		{
-			auth.GET("/auth/me", authHandler.Me)
 			auth.POST("/chat/completions", chatHandler.ChatCompletion) // billing=nil，本地不计费
 			auth.POST("/sync/push", syncHandler.Push)
 			auth.POST("/sync/pull", syncHandler.Pull)
 
 			auth.GET("/eleagent/credentials", eleAgentHandler.GetCredentials)
-			auth.POST("/stt", sttHandler.Transcribe)
+			// STT 已下沉为 marketplace/stt 模块（百度 ASR key 作模块凭证），不再暴露内置 /stt 端点。
 
 			// 视觉生成（图片/视频）独立限流
 			visualReadLimiter := middleware.NewRateLimiter(180)

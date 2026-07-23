@@ -123,11 +123,20 @@ const cloudClient = createClient(CLOUD_API)
 
 // ====== 认证 API（云端统一账户）======
 export const authApi = {
-  login: (username, password, deviceId) => cloudClient.post('/auth/login', { username, password, device_id: deviceId }),
-  register: (username, password, deviceId) => cloudClient.post('/auth/register', { username, password, device_id: deviceId }),
+  // 登录：identifier 含 @ 走邮箱登录，否则用户名登录
+  login: (identifier, password, deviceId) =>
+    cloudClient.post(
+      '/auth/login',
+      identifier.includes('@')
+        ? { email: identifier, password, device_id: deviceId }
+        : { username: identifier, password, device_id: deviceId }
+    ),
+  // 注册：用户名 + 密码 + 邮箱 + 邮箱验证码
+  register: (username, password, email, code, deviceId) =>
+    cloudClient.post('/auth/register', { username, password, email, code, device_id: deviceId }),
   refresh: (refreshToken) => cloudClient.post('/auth/refresh', { refresh_token: refreshToken }),
+  // 发送邮箱验证码（注册邮箱验证 / 密码找回）
   sendEmailOTP: (email) => cloudClient.post('/auth/email/otp/send', { email }),
-  emailLogin: (email, code, deviceId) => cloudClient.post('/auth/email/login', { email, code, device_id: deviceId }),
   me: () => cloudClient.get('/auth/me')
 }
 

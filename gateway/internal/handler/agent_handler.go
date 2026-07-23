@@ -12,11 +12,18 @@ import (
 // AgentHandler Agent 市场处理器
 type AgentHandler struct {
 	agentService *service.AgentMarketService
+	// claw 云端秘技门控：激活云端来源秘技需 VIP1+；nil（云端 cmd/server）时不校验
+	cloudAccount *service.CloudAccountService
 }
 
 // NewAgentHandler 创建处理器
 func NewAgentHandler(agentService *service.AgentMarketService) *AgentHandler {
 	return &AgentHandler{agentService: agentService}
+}
+
+// SetCloudAccountService 注入云端账户缓存（claw 用：云端秘技激活 VIP1+ 门控）。
+func (h *AgentHandler) SetCloudAccountService(svc *service.CloudAccountService) {
+	h.cloudAccount = svc
 }
 
 // ListAgents 秘技列表
@@ -102,6 +109,12 @@ func (h *AgentHandler) ToggleAgentActive(c *gin.Context) {
 	userIDVal, _ := c.Get("user_id")
 	userID, _ := userIDVal.(string)
 	agentID := c.Param("id")
+	// 云端来源秘技（cloud-purchased）激活需 VIP1+；本地扫描/official 免门控
+	if h.agentService.IsCloudPurchasedAgent(agentID) {
+		if !requireCloudVIP1(c, h.cloudAccount) {
+			return
+		}
+	}
 	active, err := h.agentService.ToggleAgentActive(userID, agentID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 3001, "message": err.Error()})

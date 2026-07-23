@@ -196,6 +196,9 @@ func Load(path string) (*AppConfig, error) {
 	viper.SetDefault("admin_gate.fail_lock_minutes", 30)
 
 	// 允许通过环境变量覆盖关键配置，便于 Docker/脚本部署
+	// jwt.secret 绑定 JWT_SECRET：claw 与云端共享 JWT 密钥，部署时注入云端 JWT_SECRET，
+	// 即可让 claw-server 直验云端签发的 JWT（统一账户，无需 introspection）。
+	_ = viper.BindEnv("jwt.secret", "JWT_SECRET")
 	_ = viper.BindEnv("server.eleagent_base_url", "ELEAGENT_BASE_URL")
 	_ = viper.BindEnv("server.port", "PORT")
 	_ = viper.BindEnv("server.mode", "MODE")

@@ -17,6 +17,8 @@ type ModuleHandler struct {
 	logger        *zap.Logger
 	// P4：claw 转发云端秘技审核提交的 BaseURL（https://api.eleball.cn/v1）
 	cloudAPIBase string
+	// claw 云端秘技门控：第三方云端模块拉取需 VIP1+；nil（云端 cmd/server）时不校验
+	cloudAccount *service.CloudAccountService
 }
 
 // NewModuleHandler 创建模块处理器
@@ -27,6 +29,11 @@ func NewModuleHandler(moduleService *service.ModuleService, logger *zap.Logger) 
 // SetCloudAPIBase 注入云端 API Base（claw 用：SubmitForReview 转发云端秘技审核提交）。
 func (h *ModuleHandler) SetCloudAPIBase(base string) {
 	h.cloudAPIBase = base
+}
+
+// SetCloudAccountService 注入云端账户缓存（claw 用：云端秘技 VIP1+ 门控）。
+func (h *ModuleHandler) SetCloudAccountService(svc *service.CloudAccountService) {
+	h.cloudAccount = svc
 }
 
 // RescanMarketplace 运行时重新扫描 marketplace/ 目录并补齐内置模块与驱动别名
@@ -183,6 +190,13 @@ func (h *ModuleHandler) InstallModule(c *gin.Context) {
 	if meta.ModuleID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "module_id 不能为空"})
 		return
+	}
+
+	// 云端第三方模块（official=false）拉取安装需 VIP1+；official=true 与本地预置合并免门控。
+	if !meta.Official {
+		if !requireCloudVIP1(c, h.cloudAccount) {
+			return
+		}
 	}
 
 	record, err := h.moduleService.InstallFromCloudMeta(meta)

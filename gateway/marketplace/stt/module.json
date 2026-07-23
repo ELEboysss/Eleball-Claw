@@ -1,0 +1,15 @@
+{
+  "module_id": "stt",
+  "name": "语音识别（百度 ASR）",
+  "description": "本地运行的语音转文本模块，对接百度短语音识别 REST API。百度 ASR app_id/api_key/secret_key 经模块凭证配置（web 字段或环境变量）。",
+  "url": "http://localhost:8092",
+  "transport_type": "module",
+  "capabilities": [
+    "transcribe"
+  ],
+  "driver": {
+    "driver_id": "stt",
+    "name": "语音识别（百度 ASR）",
+    "description": "上传音频返回文本，激活后供 claw 对话/Agent 调用"
+  }
+}

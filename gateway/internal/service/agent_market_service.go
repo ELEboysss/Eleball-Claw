@@ -15,12 +15,13 @@ import (
 
 // AgentMarketService Agent 市场服务
 type AgentMarketService struct {
-	agentRepo      *repository.AgentRepo
-	userRepo       *repository.UserRepo
-	vipService     *VIPService
-	moduleRegistry *ModuleRegistry
-	moduleService  *ModuleService
-	db             *gorm.DB
+	agentRepo       *repository.AgentRepo
+	userRepo        *repository.UserRepo
+	vipService      *VIPService
+	moduleRegistry  *ModuleRegistry
+	moduleService   *ModuleService
+	moduleRepo      *repository.ModuleRepo
+	db              *gorm.DB
 	agentToolLoader *AgentToolLoader
 }
 
@@ -43,6 +44,33 @@ func (s *AgentMarketService) SetAgentToolLoader(loader *AgentToolLoader) {
 // SetModuleService 设置模块服务，用于审批时自动创建/更新驱动别名。
 func (s *AgentMarketService) SetModuleService(svc *ModuleService) {
 	s.moduleService = svc
+}
+
+// SetModuleRepo 设置模块仓库（claw 用：判定云端秘技 provenance）。
+func (s *AgentMarketService) SetModuleRepo(repo *repository.ModuleRepo) {
+	s.moduleRepo = repo
+}
+
+// IsCloudPurchasedAgent 判定某秘技是否为云端第三方拉取来源（provenance）。
+// 用于 claw 云端秘技激活门控：InstallSource=="cloud-purchased" 的需 VIP1+；
+// 本地扫描 / preset / official 合并的免门控。
+func (s *AgentMarketService) IsCloudPurchasedAgent(agentID string) bool {
+	if s.moduleRepo == nil {
+		return false
+	}
+	item, err := s.agentRepo.GetByID(agentID)
+	if err != nil || item == nil {
+		return false
+	}
+	moduleID := s.resolveModuleID(item)
+	if moduleID == "" {
+		return false // 内置驱动 / 无模块依赖 -> 本地，免门控
+	}
+	rec, err := s.moduleRepo.GetByID(moduleID)
+	if err != nil || rec == nil {
+		return false
+	}
+	return rec.InstallSource == "cloud-purchased"
 }
 
 // ====== 秘技管理 ======

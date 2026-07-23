@@ -40,6 +40,14 @@ type AgentService struct {
 	model                string
 	maxSteps             int
 	logger               *zap.Logger
+	// unrestricted=true 时跳过 VIP 门控（Agent 模式/文件工具/试用次数），并容忍本地 user 未命中。
+	// claw 本地不限 Agent 模式（云端账户统一后，本地无 users 行），置 true；云端 cmd/server 保持 false。
+	unrestricted bool
+}
+
+// SetUnrestricted 设置是否跳过 VIP 门控（claw 本地不限 Agent 模式）。
+func (s *AgentService) SetUnrestricted(b bool) {
+	s.unrestricted = b
 }
 
 // NewAgentService 创建服务
@@ -128,14 +136,28 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		s.writeEvent(w, "done", nil)
 		return nil
 	}
-	user, err := s.userRepo.GetByID(userID)
-	if err != nil {
-		s.writeEvent(w, "error", map[string]string{"message": "获取用户信息失败"})
-		s.writeEvent(w, "done", nil)
-		return nil
+	// unrestricted（claw）：容忍本地 user 未命中（云端账户统一后本地无 users 行），跳过 VIP 门控。
+	var user *model.User
+	var err error
+	if s.unrestricted {
+		user, err = s.userRepo.GetByID(userID)
+		if user == nil {
+			user = &model.User{ID: userID, Role: model.UserRoleUser} // 兜底：非 admin、VIP0（门控已跳过）
+		}
+	} else {
+		user, err = s.userRepo.GetByID(userID)
+		if err != nil {
+			s.writeEvent(w, "error", map[string]string{"message": "获取用户信息失败"})
+			s.writeEvent(w, "done", nil)
+			return nil
+		}
 	}
-	hasAgentMode, _ := s.vipService.HasFeature(userID, model.VIPFeatureAgentMode)
-	hasFileTools, _ := s.vipService.HasFeature(userID, model.VIPFeatureFileTools)
+	hasAgentMode := true
+	hasFileTools := true
+	if !s.unrestricted {
+		hasAgentMode, _ = s.vipService.HasFeature(userID, model.VIPFeatureAgentMode)
+		hasFileTools, _ = s.vipService.HasFeature(userID, model.VIPFeatureFileTools)
+	}
 	isAdmin := user.Role == model.UserRoleAdmin
 
 	// 2. 获取或创建 conversation
@@ -231,8 +253,8 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		}
 	}
 
-	// 5.3 VIP0 用户通过试用次数使用 Agent 模式，每次进入消耗一次
-	if !isAdmin && user.VIPLevel == 0 {
+	// 5.3 VIP0 用户通过试用次数使用 Agent 模式，每次进入消耗一次（unrestricted/claw 跳过）
+	if !s.unrestricted && !isAdmin && user.VIPLevel == 0 {
 		if err := s.vipService.ConsumeAgentTrial(userID); err != nil {
 			s.writeEvent(w, "error", map[string]string{
 				"message": "Agent 模式试用次数已用完，请升级弹丸VIP",

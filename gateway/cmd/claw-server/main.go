@@ -108,9 +108,9 @@ func main() {
 	migrator := db.Migrator()
 
 	// 自动迁移：保留云端全表（claw 复用既有模型；裁剪在路由层）。
+	// claw 不迁移 users 表：账户统一走云端，本地无 user 行（VIPService.SetUnrestricted + agent SetUnrestricted 均不查本地 user）。
 	// 云端专属表（vip_plans/orders/recharge_packages 等）在 claw 为空表、不暴露路由，无副作用。
 	if err := db.AutoMigrate(
-		&model.User{},
 		&model.Device{},
 		&model.Conversation{},
 		&model.ChatConversation{},
@@ -174,7 +174,6 @@ func main() {
 	visualTaskRepo := repository.NewVisualTaskRepo(db)
 	visualConversationRepo := repository.NewVisualConversationRepo(db)
 	billingRepo := repository.NewBillingRepo(db)
-	activityRepo := repository.NewActivityRepo(db)
 	orderRepo := repository.NewOrderRepo(db)
 	agentRepo := repository.NewAgentRepo(db)
 	apiKeyRepo := repository.NewApiKeyRepo(db)
@@ -185,7 +184,6 @@ func main() {
 	driverRepo := repository.NewDriverRepo(db)
 
 	// 6. 服务
-	activityService := service.NewActivityService(activityRepo)
 
 	// API Key 加密主密钥：未配置时派生默认（与云端一致）
 	masterKey := os.Getenv("ENCRYPTION_MASTER_KEY")
@@ -210,13 +208,14 @@ func main() {
 		logger.Fatal("初始化 Ele Agent 模型配置服务失败", zap.Error(err))
 	}
 
-	// 邮件 + OTP（邮箱验证码登录）；mail.enabled=false 时 OTP 返回「未开通」
-	mailService := service.NewMailService(cfg.Mail)
-	otpService := service.NewOTPService(mailService)
+	// 认证统一走云端 eleball.cn 账户（claw web authApi 直连云端），claw 本地不再装配
+	// authService/mailService/otpService，也不再提供 /v1/auth/* 路由与本地 users 账户。
+	// 本地接口 JWTAuth 接受云端签发的 JWT（部署时 JWT_SECRET 与云端一致，见 config.go BindEnv）。
 
-	authService := service.NewAuthService(userRepo, jwtUtil, activityService, cfg.Server.EleagentBaseURL, eleAgentModelService, otpService)
 	// VIP 服务保留真实实例（对话配额检查依赖它；claw 不暴露 VIP 套餐/订阅路由）
 	vipService := service.NewVIPService(db, vipRepo, userRepo, billingRepo, orderRepo, logger)
+	// claw 本地不限对话/Agent/ASR 配额（云端 VIP 仅用于云端秘技门控，由 CloudAccountService 校验）
+	vipService.SetUnrestricted(true)
 
 	if cfg.Server.Mode != "release" {
 		if err := eleAgentModelService.EnsureDefaultConfigs(); err != nil {
@@ -225,7 +224,7 @@ func main() {
 	}
 
 	chatService := service.NewChatProxyService(keyManagerService, clientFactory, eleAgentModelService, logger)
-	chatService.SetUserRepo(userRepo)
+	// claw 不依赖本地 users 表（userRepo 留空 -> TouchActive 跳过；本地无 DAU 统计需求）
 	chatService.SetMaxRetries(cfg.LLM.MaxRetries)
 
 	// BYOK fallback（环境变量兜底）
@@ -298,11 +297,17 @@ func main() {
 	visualGenerationService := service.NewVisualGenerationService(visualTaskRepo, visualConversationService, billingService, eleAgentModelService, settingService, chatService, visualUploadService, logger)
 	agentWorkflowService := service.NewAgentService(conversationService, agentSessionRepo, userRepo, vipService, billingService, eleAgentModelService, agentSandbox, agentRegistry, agentSchemaBuilder, agentTrigger, agentClientResolver, cfg.Agent.Model, cfg.Agent.MaxSteps, logger)
 	agentWorkflowService.SetMaxRetries(cfg.LLM.MaxRetries)
+	// claw 本地不限 Agent 模式（云端账户统一后跳过 VIP 门控，容忍无本地 user）
+	agentWorkflowService.SetUnrestricted(true)
 	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry(), moduleRegistry)
 	agentToolLoader.SetModuleService(moduleService)
 	agentWorkflowService.SetAgentToolLoader(agentToolLoader)
 	agentService.SetAgentToolLoader(agentToolLoader)
 	agentService.SetModuleService(moduleService)
+	// claw 云端秘技 provenance 判定（激活云端来源秘技需 VIP1+）
+	agentService.SetModuleRepo(moduleRepo)
+	// 云端账户/VIP 缓存（claw 仅从云端取 VIP 一项用于门控）
+	cloudAccountService := service.NewCloudAccountService(cfg.Server.EleagentBaseURL)
 
 	releaseRootPath := cfg.Release.RootPath
 	if releaseRootPath == "" {
@@ -311,22 +316,25 @@ func main() {
 	releaseService := service.NewReleaseService(releaseRootPath)
 
 	eleAgentService := service.NewEleAgentService(chatService, eleAgentModelService, billingService, cfg.Server.EleagentBaseURL)
-	sttService := service.NewSttService(cfg.ASR.Provider, cfg.ASR.AppID, cfg.ASR.APIKey, cfg.ASR.SecretKey, cfg.ASR.BaseURL, cfg.ASR.Timeout, cfg.ASR.MaxAudioMB, logger)
+	// STT 已下沉为 marketplace/stt 模块（百度 ASR key 作模块凭证经 web 配置），claw 不再内置 /stt 端点。
+	// 云端 cmd/server 的 /stt 内置服务保持不动（internal/service/stt_service.go 底座两端共用）。
 
 	// 7. 处理器（仅保留 claw 所需；billing=nil 注入 chat/eleagent）
-	authHandler := handler.NewAuthHandler(authService, vipService)
 	chatHandler := handler.NewChatHandler(chatService, billingService, logger)
 	syncHandler := handler.NewSyncHandler(conversationRepo)
 	eleAgentHandler := handler.NewEleAgentHandler(eleAgentService, eleAgentModelService)
-	sttHandler := handler.NewSttHandler(sttService, userRepo, vipService, logger)
 	conversationHandler := handler.NewConversationHandler(conversationService, agentWorkflowService)
 	moduleHandler := handler.NewModuleHandler(moduleService, logger)
 	// P4：提交审核转发云端 register 接口
 	moduleHandler.SetCloudAPIBase(cfg.Server.EleagentBaseURL)
+	// claw 云端第三方模块拉取安装需 VIP1+
+	moduleHandler.SetCloudAccountService(cloudAccountService)
 	agentWorkflowHandler := handler.NewAgentWorkflowHandler(agentWorkflowService)
 	// claw：search-providers 优先转发 search-web 模块的 list_sources（搜索源配置在模块侧）
 	agentWorkflowHandler.SetModuleRegistry(moduleRegistry)
 	agentHandler := handler.NewAgentHandler(agentService)
+	// claw 云端来源秘技激活需 VIP1+
+	agentHandler.SetCloudAccountService(cloudAccountService)
 	agentCredentialHandler := handler.NewAgentCredentialHandler(agentCredentialService)
 	visualHandler := handler.NewVisualHandler(visualGenerationService, visualUploadService, visualConversationService)
 	publicSettingHandler := handler.NewPublicSettingHandler(settingService)
@@ -335,7 +343,7 @@ func main() {
 
 	// 8. 路由（claw 裁剪版）
 	r := router.NewClawRouter(cfg, logger, jwtUtil,
-		authHandler, chatHandler, syncHandler, eleAgentHandler, sttHandler,
+		chatHandler, syncHandler, eleAgentHandler,
 		conversationHandler, moduleHandler, agentWorkflowHandler, agentHandler,
 		agentCredentialHandler, visualHandler, publicSettingHandler, releaseHandler,
 		clawConsoleHandler,

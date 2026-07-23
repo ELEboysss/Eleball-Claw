@@ -1,0 +1,18 @@
+# stt 模块编排（本地运行 / 第三方拉镜像安装用）
+# 官方预置：claw 扫描 marketplace/stt/module.json 自动注册，可不拉镜像直接激活。
+# 百度 ASR 凭证可经 web 字段配置（moduleDriver 注入 params.credentials）；
+# 也可在此处用环境变量配置（便于 docker-compose 直接配置）。
+
+services:
+  stt:
+    build: .
+    image: registry.eleball.cn/eleball/stt:1.0.0
+    container_name: eleball-stt
+    ports:
+      - "8092:8092"
+    environment:
+      # 百度 ASR 凭证（与 web 字段配置二选一；web 字段优先）
+      BAIDU_APP_ID: ${BAIDU_APP_ID:-}
+      BAIDU_API_KEY: ${BAIDU_API_KEY:-}
+      BAIDU_SECRET_KEY: ${BAIDU_SECRET_KEY:-}
+    restart: unless-stopped
