@@ -7,9 +7,9 @@ import { Monitor, Terminal, Shield, Cloud, HardDrive, Boxes, ArrowRight, BookOpe
 // claw 是部署在设备端的本地化组件，本页说明它是什么、如何安装运行、本地/云端双通道如何工作、
 // 秘技如何安装。云端官网/充值已改为本地内嵌页（/、/recharge）；文档等内容在官网 iframe 内导航到达。
 export default function ClawGuide() {
-  useSEO('Eleball-claw 使用指南', '本地化 Eleball：安装、运行、双通道、秘技安装指南。', true)
+  useSEO('Eleball-Claw 使用指南', '本地化 Eleball：安装、运行、双通道、秘技安装指南。', true)
 
-  useEffect(() => { document.title = 'claw 使用指南 - Eleball' }, [])
+  useEffect(() => { document.title = 'Claw 使用指南 - Eleball' }, [])
 
   return (
     <div className="flex-1 bg-eleball-bg">
@@ -20,9 +20,9 @@ export default function ClawGuide() {
             <Monitor className="w-4 h-4" />
             设备端本地化
           </div>
-          <h1 className="text-4xl font-bold text-eleball-text mb-4">Eleball-claw 使用指南</h1>
+          <h1 className="text-4xl font-bold text-eleball-text mb-4">Eleball-Claw 使用指南</h1>
           <p className="text-lg text-eleball-text-secondary leading-relaxed max-w-2xl mx-auto">
-            claw 把云端 Eleball 的 agent 能力搬到你的设备本地：数据与编排自主可控，同时与云端账户、秘技、文档、充值互通。
+            Claw 把云端 Eleball 的 agent 能力搬到你的设备本地：数据与编排自主可控，同时与云端账户、秘技、文档、充值互通。
           </p>
           <div className="flex flex-wrap items-center justify-center gap-3 mt-6">
             <Link to="/chat" className="btn-primary text-sm px-5 py-2 inline-flex items-center gap-2">
@@ -43,12 +43,12 @@ export default function ClawGuide() {
             <h2 className="text-xl font-bold text-eleball-text">本地与云端的分工</h2>
           </div>
           <p className="text-sm text-eleball-text-secondary mb-4">
-            claw 网关处理本地能力，云端 eleball 处理账户与交易。前端按接口自动分流：
+            Claw 网关处理本地能力，云端 eleball 处理账户与交易。前端按接口自动分流：
           </p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="rounded-xl border border-eleball-outline-variant p-4">
               <div className="flex items-center gap-2 mb-2 text-eleball-primary font-semibold text-sm">
-                <HardDrive className="w-4 h-4" /> 本地 claw gateway
+                <HardDrive className="w-4 h-4" /> 本地 Claw gateway
               </div>
               <ul className="text-sm text-eleball-text-secondary space-y-1 list-disc list-inside">
                 <li>对话 / Agent 工作流（数据本地存储）</li>
@@ -108,9 +108,9 @@ export default function ClawGuide() {
             <h2 className="text-xl font-bold text-eleball-text">统一账户</h2>
           </div>
           <p className="text-sm text-eleball-text-secondary leading-relaxed">
-            claw 与云端共享同一套账户：登录走云端，一个 Token 两端通用。
-            为此需将 claw 的 <code className="text-xs bg-eleball-surface-variant px-1.5 py-0.5 rounded">JWT_SECRET</code>
-            配置为与云端一致（环境变量注入），使云端签发的 Token 在 claw 本地校验通过。
+            Claw 与云端共享同一套账户：登录走云端，一个 Token 两端通用。
+            为此需将 Claw 的 <code className="text-xs bg-eleball-surface-variant px-1.5 py-0.5 rounded">JWT_SECRET</code>
+            配置为与云端一致（环境变量注入），使云端签发的 Token 在 Claw 本地校验通过。
             本地对话不计费；使用 Ele Agent 模型时，请求经 BaseURL 转发至云端
             <code className="text-xs bg-eleball-surface-variant px-1.5 py-0.5 rounded mx-1">api.eleball.cn/v1</code>
             由云端账户扣费。
@@ -125,7 +125,7 @@ export default function ClawGuide() {
           </div>
           <p className="text-sm text-eleball-text-secondary mb-3">技能页合并三个来源，统一展示：</p>
           <ul className="text-sm text-eleball-text-secondary space-y-2 list-disc list-inside">
-            <li><strong className="text-eleball-text">官方预置</strong>：随 claw 分发的模块（如联网搜索），开箱即用，无需拉镜像。</li>
+            <li><strong className="text-eleball-text">官方预置</strong>：随 Claw 分发的模块（如联网搜索），开箱即用，无需拉镜像。</li>
             <li><strong className="text-eleball-text">云端已购</strong>：登录后从云端拉取已购秘技元数据，点「安装到本地」激活。官方模块直接激活，第三方模块拉取容器镜像并校验签名后激活。</li>
             <li><strong className="text-eleball-text">本地自部署</strong>：开发者本地实现的模块，可「提交审核」转云端上架。</li>
           </ul>
