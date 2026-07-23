@@ -229,15 +229,19 @@ func NewClawRouter(
 // dist 经 go:embed 内嵌进二进制（web.DistFS / adminweb.DistFS），单文件分发（plan §A.3）。
 // 编译期 dist 必须存在（make build 依赖 build-web），故无需磁盘回退。
 func serveStatic(r *gin.Engine, log *zap.Logger) {
-	// /assets/* -> dist/assets/*（gin StaticFS 自动 StripPrefix）
-	webAssets, _ := fs.Sub(web.DistFS, "assets")
-	adminAssets, _ := fs.Sub(adminweb.DistFS, "assets")
+	// embed //go:embed all:dist 让 DistFS 文件路径带 "dist/" 前缀，先 Sub 到 dist 根
+	webDist, _ := fs.Sub(web.DistFS, "dist")
+	adminDist, _ := fs.Sub(adminweb.DistFS, "dist")
+
+	// /assets/* -> dist/assets/*
+	webAssets, _ := fs.Sub(webDist, "assets")
+	adminAssets, _ := fs.Sub(adminDist, "assets")
 	r.StaticFS("/assets", http.FS(webAssets))
 	r.StaticFS("/admin/assets", http.FS(adminAssets))
 
 	// index.html 直接读 embed 内容返回，避免 http.FileServer 对 "/index.html" 的 301 重定向（会死循环 /）
-	webIndex, _ := web.DistFS.ReadFile("index.html")
-	adminIndex, _ := adminweb.DistFS.ReadFile("index.html")
+	webIndex, _ := fs.ReadFile(webDist, "index.html")
+	adminIndex, _ := fs.ReadFile(adminDist, "index.html")
 
 	r.GET("/", func(c *gin.Context) { c.Data(http.StatusOK, "text/html; charset=utf-8", webIndex) })
 	r.GET("/admin", func(c *gin.Context) { c.Data(http.StatusOK, "text/html; charset=utf-8", adminIndex) })
