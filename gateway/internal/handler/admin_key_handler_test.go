@@ -60,7 +60,7 @@ func setupAdminKeyTest(t *testing.T) (*gin.Engine, *util.JWTUtil, string) {
 
 	authService := service.NewAuthService(userRepo, jwtUtil, nil, "http://localhost:8080/v1", newTestEleAgentModelService(), nil)
 	billingService := service.NewBillingService(userRepo, repository.NewBillingRepo(db), newTestEleAgentModelService(), nil, vipService)
-	chatService := service.NewChatProxyService(nil, nil, newTestEleAgentModelService())
+	chatService := service.NewChatProxyService(nil, nil, newTestEleAgentModelService(), zap.NewNop())
 
 	authHandler := handler.NewAuthHandler(authService, vipService)
 	billingHandler := handler.NewBillingHandler(billingService)

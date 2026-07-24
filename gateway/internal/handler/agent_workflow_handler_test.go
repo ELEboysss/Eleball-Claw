@@ -49,7 +49,7 @@ func setupAgentWorkflowTest(t *testing.T) (*gin.Engine, string) {
 	conversationService := service.NewConversationService(conversationRepo, vipService, "")
 
 	authHandler := handler.NewAuthHandler(service.NewAuthService(userRepo, jwtUtil, nil, "", newTestEleAgentModelService(), nil), vipService)
-	chatHandler := handler.NewChatHandler(service.NewChatProxyService(nil, nil, newTestEleAgentModelService()), nil, nil)
+	chatHandler := handler.NewChatHandler(service.NewChatProxyService(nil, nil, newTestEleAgentModelService(), zap.NewNop()), nil, nil)
 	// 显式传入 nil LLM 客户端，模拟未配置 API Key 场景
 	agentWorkflowService := service.NewAgentService(conversationService, repository.NewAgentSessionRepo(db), userRepo, vipService, nil, service.NewNoOpEleAgentModelService(), service.NewFileSandbox("", ""), service.NewToolRegistry(), service.NewToolSchemaBuilder(service.NewToolRegistry()), service.NewAgentTrigger(), nil, "", 10, logger)
 	conversationHandler := handler.NewConversationHandler(conversationService, agentWorkflowService)

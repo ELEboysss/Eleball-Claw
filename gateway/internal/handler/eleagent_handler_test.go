@@ -54,7 +54,7 @@ func setupEleAgentHandlerTest(t *testing.T) (*gin.Engine, string) {
 
 	authService := service.NewAuthService(userRepo, jwtUtil, nil, "http://localhost:8080/v1", newTestEleAgentModelService(), nil)
 	billingService := service.NewBillingService(userRepo, billRepo, newTestEleAgentModelService(), nil, vipService)
-	chatService := service.NewChatProxyService(nil, nil, newTestEleAgentModelService())
+	chatService := service.NewChatProxyService(nil, nil, newTestEleAgentModelService(), zap.NewNop())
 	// 注册 openai 子平台客户端，使凭证接口能校验通过
 	chatService.RegisterFallbackClient(llm.ProviderOpenAI, &mockLLMClient{})
 

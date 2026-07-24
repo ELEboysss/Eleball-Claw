@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -121,15 +122,29 @@ func (s *CloudAccountService) RequireVIP1(ctx context.Context, userID, token str
 	return nil
 }
 
+// CloudTransientError 云端暂时性故障（网络错误、超时、429、5xx）。
+// 与「token 确实无效」（云端明确 401）区分：暂时性故障不应把用户当退出登录处理。
+type CloudTransientError struct {
+	Err error
+}
+
+func (e *CloudTransientError) Error() string { return e.Err.Error() }
+
+// Transient 标记暂时性故障。中间件经此接口识别（避免 middleware -> service 导入环）
+func (e *CloudTransientError) Transient() bool { return true }
+
 // ValidateToken 用云端 /auth/me 校验 token 有效性，返回用户 ID 与角色。
 //
 // 用于 claw 本地 JWT 密钥与云端不一致时的回退验证：安装脚本为本地生成随机密钥
 // （不可能也不应与每个用户设备共享云端签名密钥），云端签发的 token 本地验签必然失败。
 // 结果按 token 缓存（TTL 同账户缓存），避免每个本地 API 请求都打到云端。
 // token 不含 "Bearer " 前缀。
+//
+// 错误语义：云端明确拒绝（401）返回普通 error（调用方按登录失效处理）；
+// 网络/超时/429/5xx 等暂时性故障返回 *CloudTransientError（调用方应提示稍后重试而非登出）。
 func (s *CloudAccountService) ValidateToken(ctx context.Context, token string) (string, string, error) {
 	if s.cloudBase == "" {
-		return "", "", errors.New("云端 API Base 未配置")
+		return "", "", &CloudTransientError{Err: errors.New("云端 API Base 未配置")}
 	}
 	if token == "" {
 		return "", "", errors.New("未提供云端 token")
@@ -146,11 +161,19 @@ func (s *CloudAccountService) ValidateToken(ctx context.Context, token string) (
 
 	resp, err := s.http.Do(req)
 	if err != nil {
-		return "", "", err
+		// 网络错误/超时：暂时性故障
+		return "", "", &CloudTransientError{Err: err}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		// 云端明确拒绝：token 无效或已过期
 		return "", "", errors.New("云端 token 校验未通过")
+	}
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		return "", "", &CloudTransientError{Err: fmt.Errorf("云端响应异常（HTTP %d）", resp.StatusCode)}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", "", &CloudTransientError{Err: fmt.Errorf("云端响应异常（HTTP %d）", resp.StatusCode)}
 	}
 
 	var wrapper struct {
@@ -158,7 +181,7 @@ func (s *CloudAccountService) ValidateToken(ctx context.Context, token string) (
 		Data cloudMeResponse `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&wrapper); err != nil {
-		return "", "", err
+		return "", "", &CloudTransientError{Err: err}
 	}
 	if wrapper.Code != 0 || wrapper.Data.UserID == "" {
 		return "", "", errors.New("云端 token 校验业务错误")

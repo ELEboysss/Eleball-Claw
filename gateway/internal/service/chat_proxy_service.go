@@ -316,7 +316,7 @@ func (s *ChatProxyService) ResolveAgentClient(ctx context.Context, provider, mod
 		if err != nil {
 			return nil, fmt.Errorf("创建 Ele Agent 上游客户端失败: %w", err)
 		}
-		return client, nil
+		return wrapCloudEnvelopeCompat(credential, client), nil
 	}
 
 	// 非 Ele Agent：优先从 KeyManager 获取；无可用 Key 时使用环境变量兜底客户端。
@@ -343,6 +343,7 @@ func (s *ChatProxyService) chatEleAgent(ctx context.Context, req ChatRequest) (*
 	if err != nil {
 		return nil, fmt.Errorf("创建 Ele Agent 上游客户端失败: %w", err)
 	}
+	client = wrapCloudEnvelopeCompat(credential, client)
 
 	// 将 Ele Agent 模型名替换为真实子模型名，同时透传温度、top_p、thinking 等扩展字段
 	req.Model = subModel
@@ -404,6 +405,7 @@ func (s *ChatProxyService) chatEleAgentStream(ctx context.Context, req ChatReque
 		s.logger.Error("创建 Ele Agent 上游客户端失败", zap.String("subProvider", subProvider), zap.String("subModel", subModel), zap.String("protocol", credential.Protocol), zap.Error(err))
 		return nil, fmt.Errorf("创建 Ele Agent 上游客户端失败: %w", err)
 	}
+	client = wrapCloudEnvelopeCompat(credential, client)
 
 	// 将 Ele Agent 模型名替换为真实子模型名，同时透传温度、top_p、thinking 等扩展字段
 	req.Model = subModel

@@ -54,7 +54,7 @@ func setupAgentTest(t *testing.T) *agentTestFixture {
 	authService := service.NewAuthService(userRepo, jwtUtil, nil, "http://localhost:8080/v1", newTestEleAgentModelService(), nil)
 	authHandler := handler.NewAuthHandler(authService, vipService)
 
-	chatService := service.NewChatProxyService(nil, nil, newTestEleAgentModelService())
+	chatService := service.NewChatProxyService(nil, nil, newTestEleAgentModelService(), zap.NewNop())
 	billRepo := repository.NewBillingRepo(db)
 	orderRepo := repository.NewOrderRepo(db)
 	rechargePackageRepo := repository.NewRechargePackageRepo(db)

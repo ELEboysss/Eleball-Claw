@@ -74,7 +74,7 @@ func setupVIPTest(t *testing.T) (*gin.Engine, *util.JWTUtil, string, string) {
 
 	authService := service.NewAuthService(userRepo, jwtUtil, nil, "http://localhost:8080/v1", newTestEleAgentModelService(), nil)
 	billingService := service.NewBillingService(userRepo, billRepo, newTestEleAgentModelService(), nil, vipService)
-	chatService := service.NewChatProxyService(nil, nil, newTestEleAgentModelService())
+	chatService := service.NewChatProxyService(nil, nil, newTestEleAgentModelService(), zap.NewNop())
 	paymentService := service.NewPaymentService(db, userRepo, rechargePackageRepo, orderRepo, billRepo, vipService, nil)
 	cdkService := service.NewCDKService(cdkRepo, userRepo, billRepo, vipService)
 

@@ -56,7 +56,7 @@ func setupAdminTest(t *testing.T) (*gin.Engine, *util.JWTUtil, string) {
 
 	// 服务
 	authService := service.NewAuthService(userRepo, jwtUtil, nil, "http://localhost:8080/v1", newTestEleAgentModelService(), nil)
-	chatService := service.NewChatProxyService(nil, nil, newTestEleAgentModelService())
+	chatService := service.NewChatProxyService(nil, nil, newTestEleAgentModelService(), zap.NewNop())
 	billingService := service.NewBillingService(userRepo, billRepo, newTestEleAgentModelService(), nil, vipService)
 	paymentService := service.NewPaymentService(db, userRepo, rechargePackageRepo, orderRepo, billRepo, vipService, nil)
 	adminService := service.NewAdminService(db, userRepo, billRepo, orderRepo, nil, vipService)

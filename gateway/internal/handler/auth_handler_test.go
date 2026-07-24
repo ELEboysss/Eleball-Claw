@@ -51,7 +51,7 @@ func setupAuthTest(t *testing.T) (*gin.Engine, *util.JWTUtil) {
 	r.POST("/v1/auth/refresh", authHandler.Refresh)
 
 	// billing 等 handler 需要完整路由，这里直接用完整路由
-	chatService := service.NewChatProxyService(nil, nil, newTestEleAgentModelService())
+	chatService := service.NewChatProxyService(nil, nil, newTestEleAgentModelService(), zap.NewNop())
 	billingService := service.NewBillingService(userRepo, billRepo, newTestEleAgentModelService(), nil, vipService)
 	billingHandler := handler.NewBillingHandler(billingService)
 	chatHandler := handler.NewChatHandler(chatService, billingService, zap.NewNop())

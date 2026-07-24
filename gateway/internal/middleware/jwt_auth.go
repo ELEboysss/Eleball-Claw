@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -55,12 +56,22 @@ func JWTAuthCloudFallback(jwtUtil *util.JWTUtil, validate func(ctx context.Conte
 
 		// 回退：云端 /auth/me 验证（本地随机密钥的安装方式）
 		if validate != nil {
-			if userID, role, err := validate(c.Request.Context(), token); err == nil {
+			userID, role, err := validate(c.Request.Context(), token)
+			if err == nil {
 				c.Set("user_id", userID)
 				c.Set("role", role)
 				// 注入调用方 token，供云端代理配置自动凭证使用
 				c.Request = c.Request.WithContext(util.WithAuthToken(c.Request.Context(), token))
 				c.Next()
+				return
+			}
+			// 云端暂时性故障（网络/429/5xx/超时）：不当作登录失效，
+			// 返回 503 让前端提示稍后重试，避免误清用户会话（「重登也无效」的根源之一）。
+			// 经接口识别暂时性错误（service.CloudTransientError），避免 middleware -> service 导入环
+			var transient interface{ Transient() bool }
+			if errors.As(err, &transient) && transient.Transient() {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"code": 5003, "message": "云端登录校验暂不可用，请稍后重试"})
+				c.Abort()
 				return
 			}
 		}
