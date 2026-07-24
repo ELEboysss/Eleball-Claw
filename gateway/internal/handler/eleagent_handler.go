@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/eleball/gateway/internal/service"
 	"github.com/gin-gonic/gin"
@@ -46,8 +47,39 @@ func (h *EleAgentHandler) GetCredentials(c *gin.Context) {
 }
 
 // ListModels 列出 Ele Agent 可用的平台-模型选项
+// 不带分页参数时返回完整数组（对话页模型选择器依赖该行为）；
+// 带 page/page_size 时返回 {items,total,page,page_size} 分页结构（claw-console 模型配置页使用）。
 func (h *EleAgentHandler) ListModels(c *gin.Context) {
 	options := h.eleAgentModelService.ListOptions()
+
+	// 可选分页：仅在显式传 page_size 时启用，保持旧调用方拿到完整数组
+	if pageSize, err := strconv.Atoi(c.DefaultQuery("page_size", "0")); err == nil && pageSize > 0 {
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		if page < 1 {
+			page = 1
+		}
+		total := len(options)
+		start := (page - 1) * pageSize
+		if start > total {
+			start = total
+		}
+		end := start + pageSize
+		if end > total {
+			end = total
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"code":    0,
+			"message": "success",
+			"data": gin.H{
+				"items":     options[start:end],
+				"total":     total,
+				"page":      page,
+				"page_size": pageSize,
+			},
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "success",

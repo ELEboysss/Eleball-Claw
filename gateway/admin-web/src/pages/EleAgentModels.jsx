@@ -12,17 +12,30 @@ export default function EleAgentModels() {
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const pageSize = 20
 
   useEffect(() => {
-    eleAgentModelApi.list(1, 100)
+    setLoading(true)
+    setError('')
+    eleAgentModelApi.list(page, pageSize)
       .then((data) => {
         // 后端可能返回 {items,total} 或数组
         const list = data?.items || data || []
         setItems(list)
+        setTotal(data?.total ?? list.length)
+        // 删除等操作后当前页可能越界，回退到末页
+        const totalPages = Math.max(1, Math.ceil((data?.total ?? list.length) / pageSize))
+        if (page > totalPages) {
+          setPage(totalPages)
+        }
       })
       .catch((err) => setError(typeof err === 'string' ? err : (err?.message || '加载失败')))
       .finally(() => setLoading(false))
-  }, [])
+  }, [page])
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
 
   return (
     <div className="space-y-6">
@@ -87,6 +100,34 @@ export default function EleAgentModels() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* 分页 */}
+        {!loading && total > 0 && (
+          <div className="flex items-center justify-between mt-4">
+            <span className="text-sm text-eleball-text-secondary">
+              共 {total} 条记录
+            </span>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={page === 1}
+                className="px-3 py-1.5 rounded-lg border border-eleball-outline text-sm disabled:opacity-40"
+              >
+                上一页
+              </button>
+              <span className="px-3 py-1.5 rounded-lg bg-eleball-primary text-white text-sm font-medium">
+                {page} / {totalPages}
+              </span>
+              <button
+                onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                disabled={page >= totalPages}
+                className="px-3 py-1.5 rounded-lg border border-eleball-outline text-sm disabled:opacity-40"
+              >
+                下一页
+              </button>
+            </div>
           </div>
         )}
       </div>
