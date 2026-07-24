@@ -937,7 +937,9 @@ export default function Chat() {
         <div className="max-w-md mx-auto card">
           <Bot className="w-12 h-12 text-eleball-primary mx-auto mb-4" />
           <h2 className="text-xl font-bold text-eleball-text mb-2">登录后体验完整对话</h2>
-          <p className="text-sm text-eleball-text-secondary mb-6">Eleball 在线对话需要登录账号，与 App 端共享同一套账户体系。</p>
+          <p className="text-sm text-eleball-text-secondary mb-6">
+            与云端共享同一账户；登录后对话历史保存在本机，可在各浏览器间同步。
+          </p>
           <button onClick={() => setLoginOpen(true)} className="btn-primary w-full justify-center">
             登录 / 注册
           </button>
@@ -1596,20 +1598,20 @@ const markdownComponents = {
   ol: ({ children }) => <ol className="list-decimal pl-5 mb-2 space-y-1">{children}</ol>,
   li: ({ children }) => <li>{children}</li>,
   table: ({ children }) => (
-    <div className="overflow-x-auto rounded-lg border border-eleball-text-tertiary/40 my-2">
+    <div className="overflow-x-auto rounded-lg border border-eleball-outline my-2">
       <table className="min-w-full text-sm border-collapse">{children}</table>
     </div>
   ),
   thead: ({ children }) => (
     <thead className="bg-eleball-surface-variant text-eleball-text font-semibold">{children}</thead>
   ),
-  tbody: ({ children }) => <tbody className="divide-y divide-eleball-text-tertiary/30">{children}</tbody>,
-  tr: ({ children }) => <tr className="border-b border-eleball-text-tertiary/30 last:border-0">{children}</tr>,
+  tbody: ({ children }) => <tbody className="divide-y divide-eleball-outline-variant">{children}</tbody>,
+  tr: ({ children }) => <tr className="border-b border-eleball-outline-variant last:border-0">{children}</tr>,
   th: ({ children }) => (
-    <th className="px-3 py-2 text-left border-b border-eleball-text-tertiary/50 whitespace-pre-wrap">{children}</th>
+    <th className="px-3 py-2 text-left border-b border-eleball-outline whitespace-pre-wrap">{children}</th>
   ),
   td: ({ children }) => (
-    <td className="px-3 py-2 border-b border-eleball-text-tertiary/30 last:border-0 whitespace-pre-wrap">{children}</td>
+    <td className="px-3 py-2 border-b border-eleball-outline-variant last:border-0 whitespace-pre-wrap">{children}</td>
   ),
   strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
   em: ({ children }) => <em className="italic">{children}</em>,

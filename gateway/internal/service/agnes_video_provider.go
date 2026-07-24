@@ -20,6 +20,15 @@ const (
 	AgnesVideoQueryEndpoint = "https://apihub.agnes-ai.com/agnesapi"
 )
 
+// normalizeAgnesNumFrames Agnes Video 要求 num_frames 满足 8*n+1（如 81/121），
+// 将由 duration×fps 得到的任意帧数规整到最近的合法值；下限 9 帧（1 帧不成视频）。
+func normalizeAgnesNumFrames(frames int) int {
+	if frames <= 9 {
+		return 9
+	}
+	return 8*((frames-1+4)/8) + 1
+}
+
 // AgnesVideoProvider Agnes Video 视频生成 Provider
 type AgnesVideoProvider struct {
 	createEndpoint string
@@ -140,6 +149,10 @@ func (p *AgnesVideoProvider) Create(ctx context.Context, req *VisualCreateReques
 		}
 		if v, ok := req.Params["num_frames"].(float64); ok {
 			body.NumFrames = int(v)
+		}
+		// Agnes Video 要求 num_frames 满足 8*n+1，规整到最近的合法值
+		if body.NumFrames > 0 {
+			body.NumFrames = normalizeAgnesNumFrames(body.NumFrames)
 		}
 		if v, ok := req.Params["frame_rate"].(float64); ok {
 			body.FrameRate = v
