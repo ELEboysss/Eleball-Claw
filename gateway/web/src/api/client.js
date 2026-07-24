@@ -3,7 +3,8 @@ import { getItem, setItem, removeItem, getJSON } from '../utils/storage'
 
 // ====== claw 双通道 baseURL ======
 // 本地 claw gateway：对话/视觉/模型/技能/Agent 工作流/对话历史/同步/STT/本地模块
-const API_BASE = import.meta.env.VITE_API_BASE || '/api'
+// 单文件二进制无反向代理，API 直连 /v1（/api 是云端 nginx 反代前缀，claw 本地不存在）
+const API_BASE = import.meta.env.VITE_API_BASE || '/v1'
 // 云端 eleball：账户（登录/注册/邮箱OTP/刷新/我的）/充值/支付/VIP/CDK/秘技购买/已购秘技拉取
 const CLOUD_API = import.meta.env.VITE_CLOUD_API || 'https://api.eleball.cn/v1'
 // 云端 web：官网/充值内嵌用（CLOUD_BASE，作为 CloudFrame 的 iframe src）

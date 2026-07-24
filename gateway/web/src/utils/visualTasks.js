@@ -39,12 +39,13 @@ export function formatDuration(seconds) {
   return s ? `${m}分${s}秒` : `${m}分`
 }
 
-const API_BASE = import.meta.env.VITE_API_BASE || '/api'
+// claw 单文件二进制无反代，API 直连 /v1
+const API_BASE = import.meta.env.VITE_API_BASE || '/v1'
 
 /**
  * 将后端返回的视觉资源 URL 解析为前端可直接访问的地址。
- * 后端统一返回相对路径 /v1/visual/files/{id}，本地开发时代理由 /api 承接，
- * 因此需要把该前缀替换为 /api/visual/files/{id}；若是上游直链则保持不变。
+ * 后端统一返回相对路径 /v1/visual/files/{id}，与 API_BASE 一致时原样拼接；
+ * 若是上游直链则保持不变。
  */
 export function resolveVisualUrl(url) {
   if (!url) return url

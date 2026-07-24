@@ -308,7 +308,7 @@ func (s *ChatProxyService) ResolveAgentClient(ctx context.Context, provider, mod
 		if err != nil {
 			return nil, err
 		}
-		credential, err := s.eleAgentModelService.GetCredential(subProvider, subModel)
+		credential, err := s.eleAgentModelService.GetCredentialForRequest(ctx, subProvider, subModel)
 		if err != nil {
 			return nil, fmt.Errorf("Ele Agent 模型未配置: %w", err)
 		}
@@ -334,7 +334,7 @@ func (s *ChatProxyService) chatEleAgent(ctx context.Context, req ChatRequest) (*
 		return nil, err
 	}
 
-	credential, err := s.eleAgentModelService.GetCredential(subProvider, subModel)
+	credential, err := s.eleAgentModelService.GetCredentialForRequest(ctx, subProvider, subModel)
 	if err != nil {
 		return nil, fmt.Errorf("Ele Agent 模型未配置: %w", err)
 	}
@@ -387,7 +387,7 @@ func (s *ChatProxyService) chatEleAgentStream(ctx context.Context, req ChatReque
 		zap.Int("messages", len(req.Messages)),
 	)
 
-	credential, err := s.eleAgentModelService.GetCredential(subProvider, subModel)
+	credential, err := s.eleAgentModelService.GetCredentialForRequest(ctx, subProvider, subModel)
 	if err != nil {
 		s.logger.Error("获取 Ele Agent 模型凭据失败", zap.String("subProvider", subProvider), zap.String("subModel", subModel), zap.Error(err))
 		return nil, fmt.Errorf("Ele Agent 模型未配置: %w", err)

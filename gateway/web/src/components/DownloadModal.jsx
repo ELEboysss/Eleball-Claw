@@ -16,7 +16,7 @@ export default function DownloadModal({ open, onClose }) {
     async function loadManifest() {
       try {
         // 公开接口，无需 JWT；/api 为网关 API 前缀
-        const res = await fetch('/api/releases/android', { cache: 'no-cache' })
+        const res = await fetch('/v1/releases/android', { cache: 'no-cache' })
         const body = await res.json()
         if (body.code !== 0 || !body.data) {
           throw new Error(body.message || '版本清单加载失败')

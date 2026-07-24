@@ -61,7 +61,7 @@ build_dist() {
       return 1
     fi
   fi
-  ( cd "$dir" && VITE_API_BASE=/api VITE_CLOUD_BASE=https://www.eleball.cn VITE_CLOUD_API=https://api.eleball.cn/v1 \
+  ( cd "$dir" && MSYS_NO_PATHCONV=1 VITE_API_BASE=/v1 VITE_CLOUD_BASE=https://www.eleball.cn VITE_CLOUD_API=https://api.eleball.cn/v1 \
       node ./node_modules/vite/bin/vite.js build ) || { echo "✗ $name build 失败" >&2; return 1; }
 }
 

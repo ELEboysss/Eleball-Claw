@@ -1,6 +1,20 @@
 import { useEffect, useState } from 'react'
 import { moduleApi, clawMarketApi } from '../api/client'
 
+// capabilities 后端以 JSON 字符串存储/返回，解析为数组（兼容已为数组的形态）
+function parseCapabilities(raw) {
+  if (Array.isArray(raw)) return raw
+  if (typeof raw === 'string' && raw) {
+    try {
+      const v = JSON.parse(raw)
+      return Array.isArray(v) ? v : []
+    } catch {
+      return []
+    }
+  }
+  return []
+}
+
 export default function Modules() {
   const [modules, setModules] = useState([])
   const [drivers, setDrivers] = useState([])
@@ -78,7 +92,7 @@ export default function Modules() {
         description: m.description,
         url: m.url,
         transport_type: m.transport_type,
-        capabilities: m.capabilities_list || [],
+        capabilities: parseCapabilities(m.capabilities),
         version: m.version,
         auth_token: authToken,
       }, authToken)

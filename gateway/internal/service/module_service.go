@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
+	"github.com/eleball/gateway/marketplace"
 	"go.uber.org/zap"
 )
 
@@ -149,11 +151,17 @@ type marketplaceModuleManifest struct {
 	} `json:"driver"`
 }
 
-// RescanMarketplace 运行时重新扫描 marketplace/ 目录，根据 module.json
+// RescanMarketplace 运行时重新扫描 marketplace 目录，根据 module.json
 // 自动补齐官方内置模块记录与驱动别名。新增官方模块时无需重启 gateway，
 // 也无需走后台手动注册。
 func (s *ModuleService) RescanMarketplace(logger *zap.Logger) error {
-	root := findMarketplaceRoot()
+	root, err := EnsureMarketplaceRoot()
+	if err != nil {
+		if logger != nil {
+			logger.Warn("初始化 marketplace 目录失败，跳过内置模块自动补齐", zap.Error(err))
+		}
+		return nil
+	}
 	if root == "" {
 		if logger != nil {
 			logger.Warn("未找到 marketplace 目录，跳过内置模块自动补齐")
@@ -163,14 +171,37 @@ func (s *ModuleService) RescanMarketplace(logger *zap.Logger) error {
 	return s.ensureMarketplaceModules(root, logger)
 }
 
-// findMarketplaceRoot 查找 marketplace 根目录，支持从 gateway/ 或项目根目录启动。
-func findMarketplaceRoot() string {
+// ResolveMarketplaceRoot 解析 marketplace 根目录：
+//  1. CLAW_MARKETPLACE_DIR 环境变量（显式指定，优先级最高）；
+//  2. 当前目录下的 marketplace / gateway/marketplace（开发模式，从仓库内启动）；
+//  3. ~/.eleball-claw/marketplace（安装版默认 home，首次使用时播种官方模块）。
+func ResolveMarketplaceRoot() string {
+	if dir := strings.TrimSpace(os.Getenv("CLAW_MARKETPLACE_DIR")); dir != "" {
+		return dir
+	}
 	for _, p := range []string{"marketplace", "gateway/marketplace"} {
 		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
 			return p
 		}
 	}
-	return ""
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".eleball-claw", "marketplace")
+}
+
+// EnsureMarketplaceRoot 解析 marketplace 根目录，并把内嵌官方模块播种进去
+// （只补缺失文件，不覆盖用户修改）。返回根目录；无法确定根目录时返回空串。
+func EnsureMarketplaceRoot() (string, error) {
+	root := ResolveMarketplaceRoot()
+	if root == "" {
+		return "", nil
+	}
+	if _, err := marketplace.SeedOfficial(root); err != nil {
+		return "", err
+	}
+	return root, nil
 }
 
 // ensureMarketplaceModules 从指定根目录扫描内置模块并补齐到 registry/DB。
@@ -205,7 +236,8 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 			continue
 		}
 
-		// 确保模块记录存在
+		// 确保模块记录存在；已存在时同步 module.json 的 url/名称/描述/能力
+		//（官方模块以 marketplace 文件为准，兼容旧版本登记的 URL 变更，如 docker 内网名改宿主机端口）
 		existingModule, err := s.GetModule(m.ModuleID)
 		if err != nil || existingModule == nil {
 			rec := &model.ModuleRecord{
@@ -225,6 +257,17 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 			} else {
 				if logger != nil {
 					logger.Info("已自动补齐内置模块", zap.String("module_id", m.ModuleID))
+				}
+			}
+		} else {
+			caps := model.ModuleRecord{}
+			caps.SetCapabilities(m.Capabilities)
+			if existingModule.URL != m.URL || existingModule.Name != m.Name ||
+				existingModule.Description != m.Description || existingModule.Capabilities != caps.Capabilities {
+				if s.moduleRepo != nil {
+					if err := s.moduleRepo.SyncManifest(m.ModuleID, m.URL, m.Name, m.Description, caps.Capabilities); err != nil && logger != nil {
+						logger.Warn("同步内置模块清单失败", zap.String("module_id", m.ModuleID), zap.Error(err))
+					}
 				}
 			}
 		}

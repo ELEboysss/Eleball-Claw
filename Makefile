@@ -29,8 +29,8 @@ build: build-web
 	@echo "==> $(BINARY)"
 
 build-web:
-	cd $(GATEWAY)/web && VITE_API_BASE=/api VITE_CLOUD_BASE=https://www.eleball.cn VITE_CLOUD_API=https://api.eleball.cn/v1 npm run build
-	cd $(GATEWAY)/admin-web && VITE_API_BASE=/api VITE_CLAW_CONSOLE=true npm run build
+	cd $(GATEWAY)/web && VITE_API_BASE=/v1 VITE_CLOUD_BASE=https://www.eleball.cn VITE_CLOUD_API=https://api.eleball.cn/v1 npm run build
+	cd $(GATEWAY)/admin-web && VITE_API_BASE=/v1 VITE_CLAW_CONSOLE=true npm run build
 
 package: build build-web
 	@mkdir -p $(DIST)/pkg

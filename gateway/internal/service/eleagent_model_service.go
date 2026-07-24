@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
 	"github.com/eleball/gateway/pkg/crypto"
+	"github.com/eleball/gateway/pkg/util"
 	"github.com/google/uuid"
 )
 
@@ -22,8 +24,18 @@ type EleAgentModelService struct {
 	repo    *repository.EleAgentModelRepo
 	encrypt *crypto.KeyEncryption
 
+	// cloudAPIBase 云端 API Base（如 https://api.eleball.cn/v1）。
+	// 指向该地址的配置视为「云端代理」：调用时自动使用请求方的当前云端登录态作为凭证，
+	// 存储的 API Key 仅作无请求上下文场景（如后台任务恢复）的兜底，免于登录态过期后手动换 Key。
+	cloudAPIBase string
+
 	mu   sync.RWMutex
 	items []*model.EleAgentModelConfig // 内存缓存，按 provider/model 分组
+}
+
+// SetCloudAPIBase 设置云端 API Base（用于识别云端代理配置）
+func (s *EleAgentModelService) SetCloudAPIBase(base string) {
+	s.cloudAPIBase = strings.TrimSuffix(strings.TrimSpace(base), "/")
 }
 
 // EleAgentModelCredential Ele Agent 后端调用凭据
@@ -565,6 +577,23 @@ func (s *EleAgentModelService) ListConfigs(provider string, page, pageSize int) 
 		result[i] = toEleAgentModelListItem(item)
 	}
 	return result, total, nil
+}
+
+// GetCredentialForRequest 按请求上下文获取调用凭据。
+// 若配置指向云端（cloudAPIBase），且请求携带了有效的调用方 token（统一云端账户登录态），
+// 则用该 token 覆盖存储的 API Key —— 登录态由前端自动续期，代理调用不再因存储 token 过期而失效。
+// 无上下文 token（后台任务、CLI 静态密钥调用）时回退到存储的 API Key。
+func (s *EleAgentModelService) GetCredentialForRequest(ctx context.Context, provider, modelName string) (*EleAgentModelCredential, error) {
+	cred, err := s.GetCredential(provider, modelName)
+	if err != nil {
+		return nil, err
+	}
+	if s.cloudAPIBase != "" && strings.TrimSuffix(cred.BaseURL, "/") == s.cloudAPIBase {
+		if token := util.AuthTokenFrom(ctx); token != "" {
+			cred.APIKey = token
+		}
+	}
+	return cred, nil
 }
 
 // decryptKey 解密单个 Key

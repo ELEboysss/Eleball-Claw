@@ -147,7 +147,7 @@ func (s *VisualGenerationService) CreateTask(ctx context.Context, userID string,
 	}
 
 	// 2. 获取模型凭证（含协议类型、API Key、BaseURL）
-	cred, err := s.resolveCredential(req.Provider, req.Model)
+	cred, err := s.resolveCredential(ctx, req.Provider, req.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -601,7 +601,7 @@ func (s *VisualGenerationService) recoverImageTasks() {
 
 	for i := range tasks {
 		t := &tasks[i]
-		cred, err := s.resolveCredential(string(t.Provider), t.Model)
+		cred, err := s.resolveCredential(context.Background(), string(t.Provider), t.Model)
 		if err != nil {
 			s.logger.Warn("恢复图片任务时获取凭证失败",
 				zap.String("task_id", t.ID),
@@ -641,7 +641,7 @@ func (s *VisualGenerationService) QueryTask(ctx context.Context, taskID, userID 
 	}
 
 	// 获取模型凭证（含协议类型）
-	cred, err := s.resolveCredential(string(task.Provider), task.Model)
+	cred, err := s.resolveCredential(ctx, string(task.Provider), task.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -718,7 +718,7 @@ func (s *VisualGenerationService) CancelTask(ctx context.Context, taskID, userID
 		return nil, errors.New("任务不在可取消状态")
 	}
 
-	cred, err := s.resolveCredential(string(task.Provider), task.Model)
+	cred, err := s.resolveCredential(ctx, string(task.Provider), task.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -744,11 +744,13 @@ func (s *VisualGenerationService) CancelTask(ctx context.Context, taskID, userID
 }
 
 // resolveCredential 从 EleAgentModelService 获取模型的 API Key、BaseURL 与协议类型。
-func (s *VisualGenerationService) resolveCredential(provider, modelName string) (*EleAgentModelCredential, error) {
+// ctx 携带调用方 token 时，云端代理配置自动使用当前登录态（见 GetCredentialForRequest）；
+// 无请求上下文（如启动时恢复任务）传 context.Background()，回退到存储的 API Key。
+func (s *VisualGenerationService) resolveCredential(ctx context.Context, provider, modelName string) (*EleAgentModelCredential, error) {
 	if s.eleAgentModelService == nil {
 		return nil, errors.New("EleAgentModelService 未初始化")
 	}
-	return s.eleAgentModelService.GetCredential(provider, modelName)
+	return s.eleAgentModelService.GetCredentialForRequest(ctx, provider, modelName)
 }
 
 // mirrorImageResult 将图片生成结果中的上游 URL 转存到本地。

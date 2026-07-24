@@ -93,6 +93,26 @@ curl -fsSL https://eleball.cn/install.sh | sh
 irm https://eleball.cn/install.ps1 | iex
 ```
 
+### 模块开发与启动（marketplace）
+
+安装版 claw 的模块目录（marketplace home）默认在 `~/.eleball-claw/marketplace`
+（Windows 为 `%USERPROFILE%\.eleball-claw\marketplace`，`CLAW_MARKETPLACE_DIR` 环境变量可覆盖）。
+首次启动或执行 `module` 命令时，官方模块（stt / search-web / firecrawl / agent-reach）会自动播种到该目录——
+**这里就是开发和管理模块的地方**：自定义模块放入一个含 `module.json` 的子目录即可被网关扫描登记。
+
+模块以 docker 容器运行，通过二进制内置命令一键管理（无需 clone 仓库、无需 bash，Windows 可用）：
+
+```bash
+eleball-claw module ls              # 列出模块与状态
+eleball-claw module up              # 构建并启动全部模块（首次构建需几分钟）
+eleball-claw module up stt          # 只启动指定模块
+eleball-claw module ps / down       # 查看状态 / 停止
+eleball-claw module logs stt -f     # 跟踪日志
+```
+
+模块端口固定发布到宿主机（stt 8092 / search-web 8091 / firecrawl 8093 / agent-reach 8094），
+claw（宿主机进程）经 `http://localhost:<端口>` 调用；启动后约 1 分钟内控制台「本地模块」自动转在线。
+
 ## 与云端 eleball 的关系
 
 claw 定位为设备端本地化组件，与云端 `eleball.cn` 互补：

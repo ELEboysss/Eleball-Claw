@@ -123,19 +123,6 @@ export default function Settings() {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium mb-1.5">默认模型</label>
-            <select
-              value={settings.defaultModel}
-              onChange={(e) => handleChange('defaultModel', e.target.value)}
-              className="input"
-            >
-              <option value="qwen/Qwen/Qwen3-8B">通义千问 Qwen3-8B</option>
-              <option value="deepseek-chat">DeepSeek Chat</option>
-              <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
-              <option value="gpt-4">GPT-4</option>
-            </select>
-          </div>
-          <div>
             <label className="block text-sm font-medium mb-1.5">视觉 Prompt 融合模型</label>
             <select
               value={settings.promptFusionModel}
@@ -165,80 +152,6 @@ export default function Settings() {
               className="input"
             />
           </div>
-          <div>
-            <label className="block text-sm font-medium mb-1.5">新用户免费额度（Token）</label>
-            <input
-              type="number"
-              value={settings.freeQuota}
-              onChange={(e) => handleChange('freeQuota', parseInt(e.target.value) || 0)}
-              className="input"
-            />
-          </div>
-        </div>
-      </div>
-
-      <div className="card space-y-6">
-        <h3 className="text-base font-semibold">运营链接</h3>
-
-        <div className="grid grid-cols-1 gap-6">
-          <div>
-            <label className="block text-sm font-medium mb-1.5">闲鱼商品链接</label>
-            <input
-              type="url"
-              value={settings.xianyuProductUrl}
-              onChange={(e) => handleChange('xianyuProductUrl', e.target.value)}
-              placeholder="https://www.goofish.com/item?id=xxx"
-              className="input"
-            />
-            <p className="text-xs text-eleball-text-secondary mt-1.5">
-              配置后，用户端充值页面会在兑换码充值下方展示闲鱼入口图标。
-            </p>
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-1.5">淘宝商品链接</label>
-            <input
-              type="url"
-              value={settings.taobaoProductUrl}
-              onChange={(e) => handleChange('taobaoProductUrl', e.target.value)}
-              placeholder="https://item.taobao.com/item.htm?id=xxx"
-              className="input"
-            />
-            <p className="text-xs text-eleball-text-secondary mt-1.5">
-              配置后，用户端充值页面会在兑换码充值下方展示淘宝入口图标。
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <div className="card space-y-6">
-        <h3 className="text-base font-semibold">功能开关</h3>
-
-        <div className="space-y-4">
-          <label className="flex items-center justify-between py-3 border-b border-eleball-outline last:border-0 cursor-pointer">
-            <div>
-              <p className="font-medium">开放注册</p>
-              <p className="text-sm text-eleball-text-secondary">关闭后仅支持管理员手动创建账号</p>
-            </div>
-            <input
-              type="checkbox"
-              checked={settings.registerOpen}
-              onChange={(e) => handleChange('registerOpen', e.target.checked)}
-              className="w-5 h-5 rounded border-eleball-outline text-eleball-primary focus:ring-eleball-primary"
-            />
-          </label>
-
-          <label className="flex items-center justify-between py-3 cursor-pointer">
-            <div>
-              <p className="font-medium">维护模式</p>
-              <p className="text-sm text-eleball-text-secondary">开启后仅管理员可登录，普通用户看到维护页面</p>
-            </div>
-            <input
-              type="checkbox"
-              checked={settings.maintenanceMode}
-              onChange={(e) => handleChange('maintenanceMode', e.target.checked)}
-              className="w-5 h-5 rounded border-eleball-outline text-eleball-primary focus:ring-eleball-primary"
-            />
-          </label>
         </div>
       </div>
 

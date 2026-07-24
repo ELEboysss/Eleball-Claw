@@ -2,7 +2,7 @@
   "module_id": "firecrawl",
   "name": "Firecrawl 网页抓取",
   "description": "网页抓取、批量爬取、结构化数据提取",
-  "url": "http://firecrawl:8080",
+  "url": "http://localhost:8093",
   "transport_type": "module",
   "capabilities": [
     "scrape",

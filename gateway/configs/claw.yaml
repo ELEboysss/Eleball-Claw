@@ -19,8 +19,9 @@ cdk_database:
   dsn: "data/cdk.db"
 
 jwt:
-  # 生产由 JWT_SECRET 环境变量注入（= 云端 gateway 的 JWT_SECRET，两端共享密钥，
-  # claw-server 即可直验云端签发的 JWT，统一账户）。占位值仅供本地空跑。
+  # 本地 JWT 密钥。安装脚本会生成随机值；本地验签失败的 token 会自动回退到
+  # 云端 /auth/me 验证（见 middleware.JWTAuthCloudFallback），因此无需与云端一致。
+  # 与云端共享密钥（内网/同部署）时可走本地验签快路径。
   secret: "change-me-in-claw-production"
   access_expire_hours: 2
   refresh_expire_hours: 720

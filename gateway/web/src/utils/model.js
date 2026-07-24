@@ -58,7 +58,8 @@ export function groupEleAgentModelsByProvider(models) {
     }))
 }
 
-export const API_BASE = import.meta.env.VITE_API_BASE || '/api'
+// claw 单文件二进制无反代，API 直连 /v1
+export const API_BASE = import.meta.env.VITE_API_BASE || '/v1'
 
 export function createDefaultEleAgentProfile(defaultModelProfile) {
   return {

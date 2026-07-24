@@ -88,3 +88,5 @@ Write-Host "==> Eleball-claw installed" -ForegroundColor Green
 Write-Host "   Start: `$env:CONFIG_PATH='$ConfigPath'; & '$Binary' serve --port=$Port" -ForegroundColor Yellow
 Write-Host "   URL:   http://localhost:$Port"
 Write-Host "   Conf:  $ConfigPath"
+Write-Host "   Modules: & '$Binary' module ls   # marketplace: $ConfigDir\marketplace (官方模块首次使用自动播种)" -ForegroundColor Yellow
+Write-Host "            & '$Binary' module up   # 经 docker 一键启动全部模块（需已安装 Docker）" -ForegroundColor Yellow

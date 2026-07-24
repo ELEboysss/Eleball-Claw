@@ -51,8 +51,11 @@ func getGitSHA() string {
 }
 
 func main() {
-	// 子命令：默认 serve（eleball-claw serve --port=8090）；剥离 serve 让 flag 正常解析。
+	// 子命令：module（模块管理，不启动网关）；serve 默认（剥离 serve 让 flag 正常解析）。
 	// 兼容无 serve 直接 --port（eleball-claw --port=8090）。
+	if len(os.Args) > 1 && os.Args[1] == "module" {
+		os.Exit(runModuleCommand(os.Args[2:]))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "serve" {
 		os.Args = append(os.Args[:1], os.Args[2:]...)
 	}
@@ -207,6 +210,8 @@ func main() {
 	if err != nil {
 		logger.Fatal("初始化 Ele Agent 模型配置服务失败", zap.Error(err))
 	}
+	// 指向云端的代理配置在调用时自动使用请求方当前登录态，免于存储 token 过期后手动换 Key
+	eleAgentModelService.SetCloudAPIBase(cfg.Server.EleagentBaseURL)
 
 	// 认证统一走云端 eleball.cn 账户（claw web authApi 直连云端），claw 本地不再装配
 	// authService/mailService/otpService，也不再提供 /v1/auth/* 路由与本地 users 账户。
@@ -323,6 +328,8 @@ func main() {
 	chatHandler := handler.NewChatHandler(chatService, billingService, logger)
 	syncHandler := handler.NewSyncHandler(conversationRepo)
 	eleAgentHandler := handler.NewEleAgentHandler(eleAgentService, eleAgentModelService)
+	// 本地模型配置 CRUD（BYOK + Ele Agent 云端代理快捷接入），复用云端管理端 handler
+	adminEleAgentModelHandler := handler.NewAdminEleAgentModelHandler(eleAgentModelService)
 	conversationHandler := handler.NewConversationHandler(conversationService, agentWorkflowService)
 	moduleHandler := handler.NewModuleHandler(moduleService, logger)
 	// P4：提交审核转发云端 register 接口
@@ -338,6 +345,8 @@ func main() {
 	agentCredentialHandler := handler.NewAgentCredentialHandler(agentCredentialService)
 	visualHandler := handler.NewVisualHandler(visualGenerationService, visualUploadService, visualConversationService)
 	publicSettingHandler := handler.NewPublicSettingHandler(settingService)
+	// 本地控制台设置读写（claw 裁剪页：Prompt 融合模型等本地生效项）
+	adminSettingHandler := handler.NewAdminSettingHandler(settingService)
 	releaseHandler := handler.NewReleaseHandler(releaseService, logger)
 	clawConsoleHandler := handler.NewClawConsoleHandler(db)
 
@@ -346,7 +355,7 @@ func main() {
 		chatHandler, syncHandler, eleAgentHandler,
 		conversationHandler, moduleHandler, agentWorkflowHandler, agentHandler,
 		agentCredentialHandler, visualHandler, publicSettingHandler, releaseHandler,
-		clawConsoleHandler,
+		clawConsoleHandler, cloudAccountService, adminEleAgentModelHandler, adminSettingHandler,
 	)
 
 	// 9. 启动

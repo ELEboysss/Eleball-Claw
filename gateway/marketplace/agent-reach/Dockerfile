@@ -1,12 +1,8 @@
-# Eleball Marketplace Skill: Agent-Reach
-# 作为独立容器运行，暴露 HTTP 接口供网关调用，实现集市秘技的模块化部署
+# Eleball Marketplace Skill: Agent-Reach（claw 宿主机模式，build context 为本目录）
+# 作为独立容器运行，暴露 HTTP 接口供网关调用，实现集市秘技的模块化部署。
 #
-# 构建说明：
-# 本 Dockerfile 假设 build context 为项目根目录（即 Eleball 仓库根目录），
-# 这样可以直接使用本地子模块 providers/agent-reach，避免构建时访问 GitHub。
+# Agent-Reach 本体从 atomgit 克隆（安装版 claw 的 marketplace home 不含 providers/ 子模块），
 # 社交 CLI（twitter-cli / rdt-cli / xiaohongshu-cli）从清华 PyPI 镜像安装，无需访问 GitHub。
-# 推荐在项目根目录执行：
-#   docker build -f gateway/marketplace/agent-reach/Dockerfile -t eleball-agent-reach .
 FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/debian:bookworm-slim
 
 # 使用国内镜像加速 apt/pip/npm
@@ -30,15 +26,9 @@ RUN pip3 config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple &&
 
 WORKDIR /app
 
-# 1. 从本地子模块安装 Agent-Reach 本体
-# 使用本地代码避免从 GitHub clone，显著提升构建速度并保证版本一致。
-# 只安装核心依赖，避免 [all] 里的 playwright / mcp 以及 [cookies] 里可能引发冲突的 browser-cookie3。
-COPY providers/agent-reach /opt/agent-reach
-RUN if [ ! -f /opt/agent-reach/pyproject.toml ]; then \
-      echo "本地 providers/agent-reach 为空，回退到 atomgit clone..." && \
-      rm -rf /opt/agent-reach && \
-      git clone --depth 1 https://atomgit.com/Panniantong/Agent-Reach.git /opt/agent-reach; \
-    fi && \
+# 1. 安装 Agent-Reach 本体（从 atomgit 浅克隆；只装核心依赖，
+# 避免 [all] 里的 playwright / mcp 以及 [cookies] 里可能引发冲突的 browser-cookie3）
+RUN git clone --depth 1 https://atomgit.com/Panniantong/Agent-Reach.git /opt/agent-reach && \
     pip3 install --break-system-packages --no-cache-dir \
       "agent-reach @ file:///opt/agent-reach" && \
     rm -rf /opt/agent-reach
@@ -55,11 +45,11 @@ RUN pip3 install --break-system-packages --no-cache-dir \
       "twitter-cli" "rdt-cli" "xiaohongshu-cli"
 
 # 4. 安装模块 HTTP 服务依赖
-COPY gateway/marketplace/agent-reach/requirements.txt ./requirements.txt
+COPY requirements.txt ./requirements.txt
 RUN pip3 install --break-system-packages --no-cache-dir -r requirements.txt
 
 # 5. 模块服务代码
-COPY gateway/marketplace/agent-reach/main.py ./main.py
+COPY main.py ./main.py
 
 # Cookie/数据持久化目录（通过 docker-compose volume 挂载到宿主机）
 RUN mkdir -p /data/cookies && chmod 700 /data/cookies

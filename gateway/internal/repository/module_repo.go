@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"time"
+
 	"github.com/eleball/gateway/internal/model"
 	"gorm.io/gorm"
 )
@@ -53,6 +55,20 @@ func (r *ModuleRepo) UpdateStatus(m *model.ModuleRecord) error {
 			"capabilities":    m.Capabilities,
 			"last_heartbeat":  m.LastHeartbeat,
 			"updated_at":      m.UpdatedAt,
+		}).Error
+}
+
+// SyncManifest 仅同步官方 module.json 声明的字段（url/名称/描述/能力），
+// 不触碰状态/心跳/版本等运行时字段（由健康探测维护）。
+func (r *ModuleRepo) SyncManifest(id, url, name, description, capabilities string) error {
+	return r.db.Model(&model.ModuleRecord{}).
+		Where("id = ?", id).
+		Updates(map[string]interface{}{
+			"url":          url,
+			"name":         name,
+			"description":  description,
+			"capabilities": capabilities,
+			"updated_at":   time.Now(),
 		}).Error
 }
 

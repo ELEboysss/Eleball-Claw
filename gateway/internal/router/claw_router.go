@@ -9,6 +9,7 @@ import (
 	"github.com/eleball/gateway/internal/config"
 	"github.com/eleball/gateway/internal/handler"
 	"github.com/eleball/gateway/internal/middleware"
+	"github.com/eleball/gateway/internal/service"
 	"github.com/eleball/gateway/pkg/util"
 	"github.com/eleball/gateway/web"
 	"github.com/gin-gonic/gin"
@@ -41,6 +42,9 @@ func NewClawRouter(
 	publicSettingHandler *handler.PublicSettingHandler,
 	releaseHandler *handler.ReleaseHandler,
 	clawConsoleHandler *handler.ClawConsoleHandler,
+	cloudAccount *service.CloudAccountService,
+	adminEleAgentModelHandler *handler.AdminEleAgentModelHandler,
+	adminSettingHandler *handler.AdminSettingHandler,
 ) *gin.Engine {
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
@@ -79,8 +83,8 @@ func NewClawRouter(
 		// 模型列表公开（claw 模型页展示本地化模型配置）
 		v1.GET("/eleagent/models", eleAgentHandler.ListModels)
 
-		// 需要认证
-		auth := v1.Group("", middleware.JWTAuth(jwtUtil))
+		// 需要认证（本地密钥验签失败时回退云端 /auth/me 验证，兼容安装脚本生成的随机本地密钥）
+		auth := v1.Group("", middleware.JWTAuthCloudFallback(jwtUtil, cloudAccount.ValidateToken))
 		{
 			auth.POST("/chat/completions", chatHandler.ChatCompletion) // billing=nil，本地不计费
 			auth.POST("/sync/push", syncHandler.Push)
@@ -184,11 +188,17 @@ func NewClawRouter(
 				console.POST("/drivers", moduleHandler.RegisterDriver)
 				console.DELETE("/drivers/:id", moduleHandler.UnregisterDriver)
 
-				// 本地模型配置（只读列表，复用 EleAgent 模型列表；CRUD 在云端 admin-web）
-				console.GET("/eleagent/models", eleAgentHandler.ListModels)
+				// 本地模型配置（BYOK 增删改 + Ele Agent 云端代理接入，复用云端管理端 handler）
+				console.GET("/eleagent/models", adminEleAgentModelHandler.ListConfigs)
+				console.POST("/eleagent/models", adminEleAgentModelHandler.CreateConfig)
+				console.GET("/eleagent/models/:id", adminEleAgentModelHandler.GetConfig)
+				console.PATCH("/eleagent/models/:id", adminEleAgentModelHandler.UpdateConfig)
+				console.POST("/eleagent/models/:id/rotate-key", adminEleAgentModelHandler.RotateAPIKey)
+				console.DELETE("/eleagent/models/:id", adminEleAgentModelHandler.DeleteConfig)
 
-				// 本地设置（公开配置只读；写设置在云端 admin）
-				console.GET("/settings", publicSettingHandler.GetPublicSettings)
+				// 本地设置（读写；页面已裁剪为本地生效项，云端运营类设置不在此暴露）
+				console.GET("/settings", adminSettingHandler.GetSettings)
+				console.PUT("/settings", adminSettingHandler.UpdateSettings)
 			}
 		}
 
@@ -251,7 +261,9 @@ func serveStatic(r *gin.Engine, log *zap.Logger) {
 	// NoRoute：API 路径返回 JSON 404；其余 fallback 到 index.html（SPA 路由）
 	r.NoRoute(func(c *gin.Context) {
 		path := c.Request.URL.Path
-		if strings.HasPrefix(path, "/v1") || strings.HasPrefix(path, "/claw-console") ||
+		// /api 是云端 nginx 反代前缀，claw 本地无此前缀；命中说明前端用了错误的 baseURL，
+		// 返回 JSON 404 而非 SPA HTML，避免前端把 HTML 当数据解析出现难以排查的白屏
+		if strings.HasPrefix(path, "/v1") || strings.HasPrefix(path, "/api") || strings.HasPrefix(path, "/claw-console") ||
 			strings.HasPrefix(path, "/_internal") || strings.HasPrefix(path, "/health") {
 			c.JSON(http.StatusNotFound, gin.H{"code": 4040, "message": "接口不存在: " + path})
 			return

@@ -60,7 +60,7 @@ function Build-Dist([string]$Dir, [string]$Name, [string]$MainNode) {
         }
     }
     Push-Location $Dir
-    $env:VITE_API_BASE = "/api"
+    $env:VITE_API_BASE = "/v1"
     $env:VITE_CLOUD_BASE = "https://www.eleball.cn"
     $env:VITE_CLOUD_API = "https://api.eleball.cn/v1"
     & node ./node_modules/vite/bin/vite.js build

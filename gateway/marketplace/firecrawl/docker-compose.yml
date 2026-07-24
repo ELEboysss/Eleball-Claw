@@ -1,17 +1,14 @@
-version: "3.8"
+# firecrawl 模块编排（claw 宿主机模式）
+# 官方预置：claw 扫描 marketplace/firecrawl/module.json 自动注册。
+# 经 `eleball-claw module up firecrawl` 或 docker compose up -d 启动；
+# 端口发布到宿主机 8093，claw（宿主机进程）经 http://localhost:8093 调用。
 
 services:
   firecrawl:
-    build:
-      # 使用项目根目录作为 build context，便于后续扩展引入 providers/firecrawl 子模块
-      context: ../../..
-      dockerfile: gateway/marketplace/firecrawl/Dockerfile
-      args:
-        # 允许通过环境变量覆盖 Python 基础镜像，解决国内拉取 Docker Hub 超时问题
-        - PYTHON_BASE_IMAGE=${PYTHON_BASE_IMAGE:-swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.12-slim}
+    build: .
     container_name: eleball-firecrawl
-    networks:
-      - eleball-net
+    ports:
+      - "8093:8080"
     environment:
       - PORT=8080
       # 默认使用 Firecrawl Cloud API（推荐，最轻量）。
@@ -26,8 +23,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-
-networks:
-  eleball-net:
-    external: true
-    name: eleball-net

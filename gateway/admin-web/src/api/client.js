@@ -2,7 +2,8 @@ import axios from 'axios'
 
 // ====== claw 控制台双通道 baseURL ======
 // 本地 claw gateway：模块管理 / 模型配置 / 本地统计（走 /claw-console）
-const API_BASE = import.meta.env.VITE_API_BASE || '/api'
+// 单文件二进制无反向代理，API 直连 /v1（/api 是云端 nginx 反代前缀，claw 本地不存在）
+const API_BASE = import.meta.env.VITE_API_BASE || '/v1'
 // 云端 eleball：账户登录 / 当前用户计费（统一账户，与 web/APP 同体系）
 const CLOUD_API = import.meta.env.VITE_CLOUD_API || 'https://api.eleball.cn/v1'
 
@@ -46,11 +47,15 @@ function responseInterceptor(instance) {
       return body
     },
     (error) => {
-      if (error.response?.status === 401) {
+      // 认证接口自身的 401（如账密错误）不做跳转，让页面就地展示错误信息；
+      // 其余接口的 401 视为会话失效，清理 token 后回登录页
+      const isAuthRequest = error.config?.url?.includes('/auth/')
+      if (error.response?.status === 401 && !isAuthRequest) {
         localStorage.removeItem('admin_token')
         localStorage.removeItem('admin_refresh_token')
         localStorage.removeItem('admin_user')
-        window.location.href = '/login'
+        // 控制台 SPA basename 为 /admin，跳服务端路径 /login 会落到 web 应用
+        window.location.href = '/admin/login'
       }
       return Promise.reject(error.response?.data?.message || error.message)
     }
@@ -101,9 +106,15 @@ export const clawMarketApi = {
     cloudClient.get('/market/modules/installed', { params: since ? { since } : {} }),
 }
 
-// ====== 本地模型配置 API（claw 本地，改名"模型配置"，无调用价格）======
+// ====== 本地模型配置 API（claw 本地 CRUD：BYOK + Ele Agent 云端代理，本地不计费无价格字段）======
 export const eleAgentModelApi = {
-  list: (page = 1, pageSize = 100) => client.get(`/claw-console/eleagent/models?page=${page}&page_size=${pageSize}`)
+  list: (page = 1, pageSize = 20) => client.get(`/claw-console/eleagent/models?page=${page}&page_size=${pageSize}`),
+  create: (data) => client.post('/claw-console/eleagent/models', data),
+  update: (id, data) => client.patch(`/claw-console/eleagent/models/${id}`, data),
+  rotateKey: (id, apiKey) => client.post(`/claw-console/eleagent/models/${id}/rotate-key`, { api_key: apiKey }),
+  remove: (id) => client.delete(`/claw-console/eleagent/models/${id}`),
+  // 云端 Ele Agent 可选模型列表（快捷添加云端代理时选择 model_name；云端公开接口）
+  listCloudOptions: () => cloudClient.get('/eleagent/models'),
 }
 
 // ====== 本地系统设置 API ======

@@ -1,6 +1,20 @@
 import { useEffect, useState } from 'react'
 import { dashboardApi } from '../api/client'
 
+// capabilities 后端以 JSON 字符串存储/返回（如 "[\"scrape\",\"crawl\"]")，兼容数组与字符串两种形态
+function parseCapabilities(raw) {
+  if (Array.isArray(raw)) return raw
+  if (typeof raw === 'string' && raw) {
+    try {
+      const v = JSON.parse(raw)
+      return Array.isArray(v) ? v : []
+    } catch {
+      return []
+    }
+  }
+  return []
+}
+
 // claw 本地控制台（替代云端 Dashboard）。
 // 不展示 DAU/总收入/总用户等平台级数据，只展示本地节点信息与本地模块状态。
 // 见 docs/marketing/claw-implementation-plan.md §D.2。
@@ -16,7 +30,9 @@ export default function Dashboard() {
       dashboardApi.getStats().catch(() => null),
     ])
       .then(([modData, statsData]) => {
-        setModules(modData?.items || modData || [])
+        // 兼容 {items:[...]} / 直接数组两种返回，异常形态兜底为空数组，避免渲染期崩溃白屏
+        const list = modData?.items ?? modData
+        setModules(Array.isArray(list) ? list : [])
         setStats(statsData)
       })
       .catch((err) => setError(typeof err === 'string' ? err : (err?.message || '加载失败')))
@@ -24,7 +40,7 @@ export default function Dashboard() {
   }, [])
 
   const onlineCount = modules.filter((m) => m.status === 'online').length
-  const totalCapabilities = modules.reduce((acc, m) => acc + (m.capabilities?.length || 0), 0)
+  const totalCapabilities = modules.reduce((acc, m) => acc + parseCapabilities(m.capabilities).length, 0)
   const usage = stats?.usage || {}
   const modelStats = stats?.models || []
 
@@ -85,6 +101,9 @@ export default function Dashboard() {
           <h2 className="text-lg font-semibold">本地模块状态</h2>
           <span className="text-xs text-eleball-text-secondary">来源：本地扫描 + 已安装</span>
         </div>
+        <p className="text-xs text-eleball-text-tertiary mb-3">
+          模块是独立进程，claw 只负责探测与调用；离线通常表示模块未启动（可用 marketplace/start.sh 以 docker 拉起，或按各模块 README 部署）。
+        </p>
 
         {loading ? (
           <div className="text-center py-8 text-sm text-eleball-text-secondary">加载中…</div>
@@ -108,7 +127,9 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-eleball-outline-variant">
-                {modules.map((m) => (
+                {modules.map((m) => {
+                  const caps = parseCapabilities(m.capabilities)
+                  return (
                   <tr key={m.module_id}>
                     <td className="px-3 py-2.5">
                       <div className="font-medium">{m.name || m.module_id}</div>
@@ -117,16 +138,22 @@ export default function Dashboard() {
                     <td className="px-3 py-2.5 text-xs text-eleball-text-secondary">{m.transport_type || '-'}</td>
                     <td className="px-3 py-2.5">
                       <StatusBadge status={m.status} />
+                      {/* 离线时展示探测错误原因（如模块进程未启动），帮助用户自查 */}
+                      {m.status !== 'online' && m.error && (
+                        <div className="text-[10px] text-eleball-text-tertiary mt-1 max-w-[200px] truncate" title={m.error}>
+                          {m.error}
+                        </div>
+                      )}
                     </td>
                     <td className="px-3 py-2.5">
                       <div className="flex flex-wrap gap-1">
-                        {(m.capabilities || []).slice(0, 4).map((c) => (
+                        {caps.slice(0, 4).map((c) => (
                           <span key={c} className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-eleball-text-secondary">
                             {c}
                           </span>
                         ))}
-                        {(m.capabilities?.length || 0) > 4 && (
-                          <span className="text-[10px] text-eleball-text-secondary">+{m.capabilities.length - 4}</span>
+                        {caps.length > 4 && (
+                          <span className="text-[10px] text-eleball-text-secondary">+{caps.length - 4}</span>
                         )}
                       </div>
                     </td>
@@ -135,7 +162,8 @@ export default function Dashboard() {
                       {m.last_heartbeat ? new Date(m.last_heartbeat).toLocaleString('zh-CN') : '-'}
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>
