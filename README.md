@@ -110,6 +110,9 @@ eleball-claw module ps / down       # 查看状态 / 停止
 eleball-claw module logs stt -f     # 跟踪日志
 ```
 
+`serve` 启动成功后会自动用系统默认浏览器打开 `http://localhost:<port>`；
+远程/服务化部署时可用 `CLAW_NO_BROWSER=1` 关闭（Linux 无桌面环境自动跳过）。
+
 模块端口固定发布到宿主机（stt 8092 / search-web 8091 / firecrawl 8093 / agent-reach 8094），
 claw（宿主机进程）经 `http://localhost:<端口>` 调用；启动后约 1 分钟内控制台「本地模块」自动转在线。
 

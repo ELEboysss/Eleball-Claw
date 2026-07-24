@@ -6,6 +6,7 @@ import { modelApi } from '../api/client'
 export default function Models() {
   useSEO('大模型中心', '支持 OpenAI/Claude/Gemini/DeepSeek 等，自带 Key 或 Ele Agent 代调用。')
   const [models, setModels] = useState([])
+  const [cloudPrices, setCloudPrices] = useState({}) // model_name -> 云端价格（Ele Agent 代理模型用）
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [selectedProvider, setSelectedProvider] = useState('全部')
@@ -27,12 +28,53 @@ export default function Models() {
       .finally(() => {
         if (!cancelled) setLoading(false)
       })
+    // 云端价格仅用于 Ele Agent 代理模型展示，拉取失败不影响本地列表
+    modelApi
+      .listCloud()
+      .then((data) => {
+        if (cancelled) return
+        const list = Array.isArray(data) ? data : (data?.items || [])
+        const map = {}
+        for (const m of list) {
+          map[m.model_name] = {
+            input: m.input_price_per_call || 0,
+            output: m.price_per_call || 0,
+            perGen: m.price_per_generation || 0,
+          }
+        }
+        setCloudPrices(map)
+      })
+      .catch(() => {})
     return () => { cancelled = true }
   }, [])
 
   const PriceNumber = ({ value }) => (
     <span className="text-sm font-bold text-[#2563EB]">{value}</span>
   )
+
+  // 价格徽标：Ele Agent 代理模型展示云端价格；BYOK 标 Local 不标价格
+  const PriceBadge = ({ m }) => {
+    if (!m.cloud_proxy) {
+      return <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">Local</span>
+    }
+    const price = cloudPrices[m.model_name]
+    if (!price) {
+      return <span className="text-xs text-eleball-text-secondary">云端计费</span>
+    }
+    const hasPrice = price.input > 0 || price.output > 0 || price.perGen > 0
+    if (!hasPrice) {
+      return <span className="text-xs text-eleball-success font-medium">限时免费</span>
+    }
+    return (
+      <span className="text-xs text-eleball-text-secondary">
+        {price.input > 0 && <><PriceNumber value={price.input} /> 弹丸/M input</>}
+        {price.input > 0 && price.output > 0 && ' · '}
+        {price.output > 0 && <><PriceNumber value={price.output} /> 弹丸/M output</>}
+        {price.perGen > 0 && (price.input > 0 || price.output > 0) && ' · '}
+        {price.perGen > 0 && <><PriceNumber value={price.perGen} /> 弹丸/次</>}
+      </span>
+    )
+  }
 
   const providers = useMemo(() => {
     const set = new Set(models.map((m) => m.provider))
@@ -57,7 +99,7 @@ export default function Models() {
       <div className="text-center mb-8">
         <h1 className="text-2xl font-bold text-eleball-text mb-2">模型中心</h1>
         <p className="text-sm text-eleball-text-secondary">
-          Ele Agent目前支持接入的大模型
+          Ele Agent及本地配置的大模型
         </p>
         <p className="text-xs text-eleball-text-tertiary mt-1">
           如您想使用自己的API Key，可在对话窗口添加自定义配置模型
@@ -118,23 +160,7 @@ export default function Models() {
                 <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-eleball-primary-light text-eleball-primary">
                   {m.provider}
                 </span>
-                {(m.price_per_call > 0 || m.input_price_per_call > 0 || m.price_per_generation > 0) ? (
-                  <span className="text-xs text-eleball-text-secondary">
-                    {m.input_price_per_call > 0 && (
-                      <><PriceNumber value={m.input_price_per_call} /> 弹丸/M input</>
-                    )}
-                    {m.input_price_per_call > 0 && m.price_per_call > 0 && ' · '}
-                    {m.price_per_call > 0 && (
-                      <><PriceNumber value={m.price_per_call} /> 弹丸/M output</>
-                    )}
-                    {m.price_per_generation > 0 && (m.input_price_per_call > 0 || m.price_per_call > 0) && ' · '}
-                    {m.price_per_generation > 0 && (
-                      <><PriceNumber value={m.price_per_generation} /> 弹丸/次</>
-                    )}
-                  </span>
-                ) : (
-                  <span className="text-xs text-eleball-success font-medium">限时免费</span>
-                )}
+                <PriceBadge m={m} />
               </div>
               <h3 className="font-semibold text-eleball-text mb-1 truncate" title={m.model_name}>
                 {m.display_name || m.model_name}

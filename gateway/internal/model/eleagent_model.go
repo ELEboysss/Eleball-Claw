@@ -73,6 +73,9 @@ type EleAgentModelOption struct {
 	SupportsImageInput        bool   `json:"supports_image_input"`
 	SupportsContinuousContext bool   `json:"supports_continuous_context"`
 	SupportsTools             bool   `json:"supports_tools"`
+	// CloudProxy 为 true 表示该配置指向云端网关（BaseURL == cloudAPIBase），
+	// 前端据此展示云端计费价格；false 为本地 BYOK（前端标 Local，不标价格）
+	CloudProxy                bool   `json:"cloud_proxy"`
 	InputPricePerCall int64 `json:"input_price_per_call"`
 	PricePerCall     int64  `json:"price_per_call"`
 	PricePerGeneration int64 `json:"price_per_generation"`

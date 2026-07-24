@@ -388,3 +388,43 @@ func TestGetModelChatSupport(t *testing.T) {
 	assert.False(t, svc.GetModelChatSupport("volcengine", "doubao-seedream-4-0-250828"))
 	assert.False(t, svc.GetModelChatSupport("unknown", "m"), "未配置模型返回 false")
 }
+
+func TestListOptionsCloudProxyFlag(t *testing.T) {
+	svc := setupEleAgentModelService(t)
+	svc.SetCloudAPIBase("https://api.eleball.cn/v1")
+
+	// 云端代理配置（BaseURL 指向云端）
+	_, err := svc.CreateConfig(EleAgentModelConfigInput{
+		Provider:     "eleball",
+		Protocol:     string(model.EleAgentUpstreamOpenAICompatible),
+		ModelName:    "k3",
+		BaseURL:      "https://api.eleball.cn/v1",
+		APIKey:       "sk-proxy",
+		SupportsChat: true,
+	})
+	require.NoError(t, err)
+	// 本地 BYOK 配置
+	_, err = svc.CreateConfig(EleAgentModelConfigInput{
+		Provider:     "byok",
+		Protocol:     string(model.EleAgentUpstreamOpenAICompatible),
+		ModelName:    "my-model",
+		BaseURL:      "https://api.example.com/v1",
+		APIKey:       "sk-byok",
+		SupportsChat: true,
+	})
+	require.NoError(t, err)
+
+	var proxyOpt, byokOpt *model.EleAgentModelOption
+	for _, o := range svc.ListOptions() {
+		switch o.ModelName {
+		case "k3":
+			proxyOpt = o
+		case "my-model":
+			byokOpt = o
+		}
+	}
+	require.NotNil(t, proxyOpt)
+	require.NotNil(t, byokOpt)
+	assert.True(t, proxyOpt.CloudProxy, "指向云端的配置应标记 cloud_proxy")
+	assert.False(t, byokOpt.CloudProxy, "BYOK 配置不应标记 cloud_proxy")
+}

@@ -150,7 +150,9 @@ export const billingApi = {
 
 // ====== 模型 API（本地 claw：展示本地化模型配置，非云端获取）======
 export const modelApi = {
-  list: () => client.get('/eleagent/models')
+  list: () => client.get('/eleagent/models'),
+  // 云端 Ele Agent 模型列表（Ele Agent 代理模型的云端计费价格来源；公开接口）
+  listCloud: () => cloudClient.get('/eleagent/models'),
 }
 
 // ====== Ele Agent API（本地 claw 凭证）======

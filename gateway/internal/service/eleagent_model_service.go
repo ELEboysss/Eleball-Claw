@@ -45,6 +45,10 @@ type EleAgentModelCredential struct {
 	ModelName string
 	BaseURL   string
 	APIKey    string
+	// CloudProxy 为 true 表示该配置指向云端网关（cloudAPIBase）：
+	// 云端非流式响应为私有信封格式（{code,data:{delta}}），通用 OpenAI 客户端无法解析，
+	// 调用方应使用 cloudEnvelopeCompatClient 包装（Chat 聚合 SSE，见 cloud_proxy_client.go）。
+	CloudProxy bool
 }
 
 // NewNoOpEleAgentModelService 创建一个不管理任何配置的 EleAgentModelService，用于测试。
@@ -123,6 +127,7 @@ func (s *EleAgentModelService) ListOptions() []*model.EleAgentModelOption {
 			SupportsImageInput:        item.SupportsImageInput,
 			SupportsContinuousContext: item.SupportsContinuousContext,
 			SupportsTools:             item.SupportsTools,
+			CloudProxy:                s.cloudAPIBase != "" && strings.TrimSuffix(item.BaseURL, "/") == s.cloudAPIBase,
 			InputPricePerCall:         item.InputPricePerCall,
 			PricePerCall:              item.PricePerCall,
 			PricePerGeneration:        item.PricePerGeneration,
@@ -589,6 +594,7 @@ func (s *EleAgentModelService) GetCredentialForRequest(ctx context.Context, prov
 		return nil, err
 	}
 	if s.cloudAPIBase != "" && strings.TrimSuffix(cred.BaseURL, "/") == s.cloudAPIBase {
+		cred.CloudProxy = true
 		if token := util.AuthTokenFrom(ctx); token != "" {
 			cred.APIKey = token
 		}

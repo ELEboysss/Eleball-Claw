@@ -394,6 +394,11 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	logger.Info("Eleball-claw 启动", zap.String("addr", addr), zap.String("mode", cfg.Server.Mode))
+
+	// 启动后自动打开浏览器访问本地控制台（双击 exe / 手动部署均生效）。
+	// CLAW_NO_BROWSER=1 可关闭；Linux 无桌面环境（无 DISPLAY）时自动跳过。
+	openBrowserDelayed(fmt.Sprintf("http://localhost:%d", cfg.Server.Port), logger)
+
 	if err := r.Run(addr); err != nil {
 		logger.Fatal("HTTP 服务启动失败", zap.Error(err))
 	}
