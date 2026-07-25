@@ -128,11 +128,19 @@ export default function AgentMarket() {
   }
 
   const loadPurchasedAgents = () => {
+    // 云端已购（/space）+ 本地免费获取（本地 filter=owned）合并判定「已购」
     agentMarketApi
       .getUserSpace()
       .then((space) => {
         const list = space?.purchased_agents || []
-        setPurchasedIds(new Set(list.map((a) => a.id)))
+        setPurchasedIds((prev) => new Set([...prev, ...list.map((a) => a.id)]))
+      })
+      .catch(() => {})
+    agentMarketApi
+      .listAgents(1, 100, '', 'hot', 'owned')
+      .then((data) => {
+        const items = data?.items || data || []
+        setPurchasedIds((prev) => new Set([...prev, ...items.map((a) => a.id)]))
       })
       .catch(() => {})
   }
