@@ -2,3 +2,7 @@
 dist/
 data/
 *.exe
+
+# Python 缓存
+__pycache__/
+*.pyc
