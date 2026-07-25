@@ -167,7 +167,11 @@ type UpdateConversationReq struct {
 	SearchProvider  *string `json:"search_provider,omitempty"`
 	// AssistantID 会话绑定的助手 ID（空字符串 = 清除绑定）
 	AssistantID *string `json:"assistant_id,omitempty"`
-	UpdatedAt   *int64  `json:"updated_at,omitempty"`
+	// Model / Provider 会话绑定的模型配置（profile.modelName + provider）。
+	// 切换对话时按此恢复 currentProfileId；对话中切模型时同步到此。
+	Model    *string `json:"model,omitempty"`
+	Provider *string `json:"provider,omitempty"`
+	UpdatedAt *int64 `json:"updated_at,omitempty"`
 }
 
 // Update 更新对话元数据（带简单冲突检测：客户端 updated_at 小于服务端时拒绝）
@@ -201,6 +205,12 @@ func (s *ConversationService) Update(ctx context.Context, id, userID string, req
 	}
 	if req.AssistantID != nil {
 		updates["assistant_id"] = *req.AssistantID
+	}
+	if req.Model != nil {
+		updates["model"] = *req.Model
+	}
+	if req.Provider != nil {
+		updates["provider"] = *req.Provider
 	}
 	return s.repo.UpdateFields(id, updates)
 }

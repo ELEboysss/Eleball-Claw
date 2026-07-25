@@ -2817,6 +2817,8 @@ func e2eUpdateConversationHandler(w http.ResponseWriter, r *http.Request, id str
 		EnableTools     *bool   `json:"enable_tools,omitempty"`
 		EnableWebSearch *bool   `json:"enable_web_search,omitempty"`
 		SearchProvider  *string `json:"search_provider,omitempty"`
+		Model           *string `json:"model,omitempty"`
+		Provider        *string `json:"provider,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, 1001, "参数错误")
@@ -2833,6 +2835,12 @@ func e2eUpdateConversationHandler(w http.ResponseWriter, r *http.Request, id str
 	}
 	if req.SearchProvider != nil && *req.SearchProvider != "" {
 		conv.SearchProvider = *req.SearchProvider
+	}
+	if req.Model != nil {
+		conv.Model = *req.Model
+	}
+	if req.Provider != nil {
+		conv.Provider = *req.Provider
 	}
 	conv.UpdatedAt = time.Now().Unix()
 	respondSuccess(w, nil)

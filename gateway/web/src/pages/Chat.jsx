@@ -134,11 +134,12 @@ export default function Chat() {
   const currentProfile = profiles.find((p) => p.id === currentProfileId) || profiles[0]
 
   // 如果当前选中的 Profile 被删除或不存在，回退到默认/第一个
+  // 直接 setCurrentProfileId（不走 switchProfile），避免回退时把模型写回后端
   useEffect(() => {
     if (profiles.length === 0) return
     if (!profiles.some((p) => p.id === currentProfileId)) {
       const fallback = profiles.find((p) => p.isDefault)?.id || profiles[0].id
-      switchProfile(fallback)
+      setCurrentProfileId(fallback)
     }
   }, [profiles, currentProfileId])
 
@@ -279,7 +280,7 @@ export default function Chat() {
     }
   }, [isLoggedIn])
 
-  // 切换对话时恢复该对话的 Agent / 联网 / 搜索源 / 助手设置
+  // 切换对话时恢复该对话的 Agent / 联网 / 搜索源 / 助手 / 模型设置
   useEffect(() => {
     if (!currentConversation) return
     setEnableTools(!!currentConversation.enableTools)
@@ -288,6 +289,16 @@ export default function Chat() {
     const exists = availableSearchProviders.some((p) => p.name === savedProvider)
     setSearchProvider(exists ? savedProvider : (availableSearchProviders[0]?.name || 'baidu'))
     setAssistantId(currentConversation.assistantId || '')
+    // 恢复该对话绑定的模型：按 model+provider 找匹配 profile（直接 setState，不触发后端写）
+    if (currentConversation.model && currentConversation.provider) {
+      const matched = profiles.find(
+        (p) => p.provider === currentConversation.provider && p.modelName === currentConversation.model
+      )
+      if (matched && matched.id !== currentProfileId) {
+        setCurrentProfileId(matched.id)
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentConversationId, availableSearchProviders])
 
   // Agent / 联网 / 搜索源 / 助手设置变化时同步到本地 conversation 和后端
@@ -366,6 +377,9 @@ export default function Chat() {
 
   const handleNewChat = () => {
     const conv = createConversation()
+    // 快照当前模型配置到新对话（model 身份），切换对话时据此恢复
+    conv.model = currentProfile?.modelName || ''
+    conv.provider = currentProfile?.provider || ''
     const next = [conv, ...conversations]
     updateConversations(next)
     switchConversation(conv.id)
@@ -512,6 +526,20 @@ export default function Chat() {
 
   const switchProfile = (id) => {
     setCurrentProfileId(id)
+    // 切换模型 = 更新当前对话绑定的模型配置并同步后端
+    const p = profiles.find((pp) => pp.id === id)
+    if (p && currentConversation) {
+      updateConversations((prev) =>
+        prev.map((c) =>
+          c.id === currentConversation.id
+            ? { ...c, model: p.modelName, provider: p.provider, updatedAt: Date.now() }
+            : c
+        )
+      )
+      conversationApi
+        .update(currentConversation.id, { model: p.modelName, provider: p.provider })
+        .catch(() => {})
+    }
   }
 
   /**
@@ -592,6 +620,15 @@ export default function Chat() {
               : c
           )
         )
+      }
+      // 首条消息发出后后端对话才被懒创建；此时把模型快照同步到后端，保证 reload 后可恢复
+      if (isFirstUser) {
+        conversationApi
+          .update(currentConversation.id, {
+            model: currentProfile?.modelName || '',
+            provider: currentProfile?.provider || ''
+          })
+          .catch(() => {})
       }
       setInput('')
       setAttachments([])
@@ -766,6 +803,15 @@ export default function Chat() {
     // 兜底：后端未生成标题时，再显式 PATCH 同步前端生成的标题
     if (!savedTitle && normalNewTitle) {
       conversationApi.update(currentConversation.id, { title: normalNewTitle }).catch(() => {})
+    }
+    // 首条消息发出后后端对话才被懒创建；此时把模型快照同步到后端，保证 reload 后可恢复
+    if (isFirstUser) {
+      conversationApi
+        .update(currentConversation.id, {
+          model: currentProfile?.modelName || '',
+          provider: currentProfile?.provider || ''
+        })
+        .catch(() => {})
     }
 
     setInput('')

@@ -63,6 +63,8 @@ export function createConversation(title = '新对话') {
     messages: [{ role: 'assistant', content: '你好，我是 Eleball。有什么可以帮你的吗？' }],
     enableWebSearch: false,
     searchProvider: 'baidu',
+    model: '',
+    provider: '',
     createdAt: now,
     updatedAt: now
   }

@@ -108,6 +108,9 @@ export function ChatProvider({ children }) {
             searchProvider: conv.search_provider || 'baidu',
             // 会话绑定的助手（空字符串 = 未绑定，使用全部已激活工具）
             assistantId: conv.assistant_id || '',
+            // 会话绑定的模型配置（model 身份），切换对话时据此恢复 currentProfileId
+            model: conv.model || '',
+            provider: conv.provider || '',
             createdAt: conv.created_at,
             updatedAt: conv.updated_at
           }
