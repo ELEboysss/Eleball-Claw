@@ -6,7 +6,6 @@ import Chat from './pages/Chat'
 import Recharge from './pages/Recharge'
 import Models from './pages/Models'
 import AgentMarket from './pages/AgentMarket'
-import Assistants from './pages/Assistants'
 import VisualStudio from './pages/VisualStudio'
 import ClawGuide from './pages/ClawGuide'
 
@@ -28,7 +27,6 @@ function App() {
           <Route path="/recharge" element={<Recharge />} />
           <Route path="/models" element={<Models />} />
           <Route path="/agents" element={<AgentMarket />} />
-          <Route path="/assistants" element={<Assistants />} />
           <Route path="/visual" element={<VisualStudio />} />
           <Route path="/video" element={<Navigate to="/visual?tab=video" replace />} />
           <Route path="/claw-guide" element={<ClawGuide />} />

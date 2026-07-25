@@ -1,19 +1,14 @@
 import { useState, useEffect } from 'react'
-import useSEO from '../hooks/useSEO'
-import { useAuth } from '../context/AuthContext'
 import { assistantApi, agentMarketApi } from '../api/client'
-import { Bot, Plus, Pencil, Trash2, Loader2, Sparkles, ShoppingCart } from 'lucide-react'
-import LoginModal from '../components/LoginModal'
+import { Bot, Plus, Pencil, Trash2, Loader2, Sparkles } from 'lucide-react'
 
-// 助手页：助手 = 已激活秘技的命名组合，可在对话页按会话绑定，
+// 助手管理：助手 = 已激活秘技的命名组合，可在对话页按会话绑定，
 // 绑定后 Agent 工作流仅载入该助手包含的秘技工具。
-export default function Assistants() {
-  useSEO('我的助手', '把已激活的秘技组合成命名助手，在对话中一键应用。')
-  const { isLoggedIn } = useAuth()
+// 作为秘技集市「我的助手」Tab 的内容组件复用（登录墙由所在页面负责）。
+export default function AssistantManager() {
   const [assistants, setAssistants] = useState([])
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
-  const [loginOpen, setLoginOpen] = useState(false)
   // 编辑器状态：null 关闭；{ id, name, description, agentIds } 打开（id 为 null 表示新建）
   const [editor, setEditor] = useState(null)
   const [activeAgents, setActiveAgents] = useState([])
@@ -31,9 +26,8 @@ export default function Assistants() {
   }
 
   useEffect(() => {
-    if (!isLoggedIn) return
     loadAssistants()
-  }, [isLoggedIn])
+  }, [])
 
   // 候选秘技：我的已购秘技中已激活的部分
   const loadActiveAgents = () => {
@@ -123,35 +117,8 @@ export default function Assistants() {
     }
   }
 
-  // 未登录引导
-  if (!isLoggedIn) {
-    return (
-      <div className="pt-24 px-4 text-center min-h-screen">
-        <div className="max-w-md mx-auto card">
-          <ShoppingCart className="w-12 h-12 mx-auto mb-4 text-eleball-primary" />
-          <h2 className="text-xl font-bold text-eleball-text mb-2">登录后管理你的助手</h2>
-          <p className="text-sm text-eleball-text-secondary mb-6">
-            把已激活的秘技组合成命名助手，在对话中一键应用。
-          </p>
-          <button onClick={() => setLoginOpen(true)} className="btn-primary w-full justify-center">
-            登录 / 注册
-          </button>
-        </div>
-        <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} />
-      </div>
-    )
-  }
-
   return (
-    <div className="pt-8 pb-16 px-4 max-w-6xl mx-auto min-h-screen">
-      {/* 标题区 */}
-      <div className="text-center mb-6">
-        <h1 className="text-2xl font-bold text-eleball-text mb-2">我的助手</h1>
-        <p className="text-sm text-eleball-text-secondary">
-          助手是已激活秘技的命名组合，在对话页绑定后仅载入组合内的工具
-        </p>
-      </div>
-
+    <div>
       {/* 新建与消息 */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
         <button onClick={openCreate} className="btn-primary text-sm px-4 py-2 flex items-center gap-1.5">
@@ -231,8 +198,6 @@ export default function Assistants() {
           </div>
         ))}
       </div>
-
-      <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} />
 
       {/* 助手编辑弹窗（新建 / 编辑共用） */}
       {editor && (

@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import useSEO from '../hooks/useSEO'
 import { useAuth } from '../context/AuthContext'
 import { agentMarketApi, billingApi, clawMarketApi } from '../api/client'
@@ -25,6 +26,7 @@ import {
 } from 'lucide-react'
 import LoginModal from '../components/LoginModal'
 import DockerMissingBanner from '../components/DockerMissingBanner'
+import AssistantManager from '../components/AssistantManager'
 
 const levelNames = {
   1: '黄阶秘技',
@@ -57,11 +59,14 @@ const categoryIcons = {
 export default function AgentMarket() {
   useSEO('Agent 技能市场', '可购买、可组合、可编排的 Agent 能力。给你的悬浮球加技能。')
   const { isLoggedIn, user } = useAuth()
+  // Tab：all=全部秘技 / owned=我的秘技 / assistants=我的助手；支持 ?tab=assistants 直接定位（对话页「管理助手」入口）
+  const [searchParams] = useSearchParams()
+  const initialTab = searchParams.get('tab') === 'assistants' ? 'assistants' : 'all'
   const [agents, setAgents] = useState([])
   const [categories, setCategories] = useState(['全部'])
   const [category, setCategory] = useState('全部')
   const [sort, setSort] = useState('hot')
-  const [filter, setFilter] = useState('all')
+  const [filter, setFilter] = useState(initialTab)
   const [keyword, setKeyword] = useState('')
   const [loading, setLoading] = useState(true)
   const [capabilities, setCapabilities] = useState(null)
@@ -101,6 +106,8 @@ export default function AgentMarket() {
   }, [category, sort, filter])
 
   const loadAgents = () => {
+    // 「我的助手」Tab 不加载秘技列表，助手数据由 AssistantManager 自行加载
+    if (filter === 'assistants') return
     setLoading(true)
     setMessage('')
     agentMarketApi
@@ -385,9 +392,15 @@ export default function AgentMarket() {
     <div className="pt-8 pb-16 px-4 max-w-6xl mx-auto min-h-screen">
       {/* 标题区 */}
       <div className="text-center mb-6">
-        <h1 className="text-2xl font-bold text-eleball-text mb-2">{filter === 'owned' ? '我的秘技' : '秘技集市'}</h1>
+        <h1 className="text-2xl font-bold text-eleball-text mb-2">
+          {filter === 'owned' ? '我的秘技' : filter === 'assistants' ? '我的助手' : '秘技集市'}
+        </h1>
         <p className="text-sm text-eleball-text-secondary">
-          {filter === 'owned' ? '你已购买和激活的秘技' : 'agent模式下可使用的skills及MCP工具'}
+          {filter === 'owned'
+            ? '你已购买和激活的秘技'
+            : filter === 'assistants'
+              ? '助手是已激活秘技的命名组合，在对话页绑定后仅载入组合内的工具'
+              : 'agent模式下可使用的skills及MCP工具'}
         </p>
       </div>
 
@@ -409,7 +422,7 @@ export default function AgentMarket() {
         </div>
       )}
 
-      {/* 全部 / 我的秘技 Tab */}
+      {/* 全部 / 我的秘技 / 我的助手 Tab */}
       <div className="flex justify-center mb-6">
         <div className="inline-flex p-1 rounded-xl bg-eleball-surface-variant border border-eleball-outline-variant">
           <button
@@ -432,9 +445,24 @@ export default function AgentMarket() {
           >
             我的秘技
           </button>
+          <button
+            onClick={() => setFilter('assistants')}
+            className={`px-5 py-2 rounded-lg text-sm font-medium transition-all ${
+              filter === 'assistants'
+                ? 'bg-white text-eleball-primary shadow-sm'
+                : 'text-eleball-text-secondary hover:text-eleball-text'
+            }`}
+          >
+            我的助手
+          </button>
         </div>
       </div>
 
+      {/* 我的助手 Tab：助手管理（CRUD + 秘技多选） */}
+      {filter === 'assistants' && <AssistantManager />}
+
+      {filter !== 'assistants' && (
+      <>
       {/* 余额与消息 */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
         <div className="flex items-center gap-3 text-sm text-eleball-text-secondary">
@@ -680,6 +708,8 @@ export default function AgentMarket() {
           )
         })}
       </div>
+      </>
+      )}
 
       <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} />
 

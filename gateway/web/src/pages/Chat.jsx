@@ -1327,7 +1327,7 @@ export default function Chat() {
                             </button>
                           ))}
                           <Link
-                            to="/assistants"
+                            to="/agents?tab=assistants"
                             onClick={() => setAssistantMenuOpen(false)}
                             className="block w-full text-left px-3 py-1.5 text-xs text-eleball-text-secondary hover:bg-eleball-primary-light border-t border-eleball-outline-variant"
                           >
