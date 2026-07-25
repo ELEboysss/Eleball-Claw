@@ -58,7 +58,7 @@ func normalizePullPolicy(policy string) string {
 // 返回成功上线的模块名列表（供关闭时 down）。
 // docker 缺失、marketplace 目录异常、单模块失败均只告警不阻断。
 // ctx 取消时中断后续模块的启动（已启动的仍返回，便于退出时清理）。
-func autoStartModules(ctx context.Context, logger *zap.Logger, cfg config.ModulesConfig) []string {
+func autoStartModules(ctx context.Context, logger *zap.Logger, cfg config.ModulesConfig, registry *service.ModuleRegistry) []string {
 	if _, err := exec.LookPath("docker"); err != nil {
 		logger.Warn("未检测到 docker，跳过预置模块自动上线（模块将保持离线，可安装 Docker 后重启或手动 module up）")
 		return nil
@@ -87,7 +87,23 @@ func autoStartModules(ctx context.Context, logger *zap.Logger, cfg config.Module
 			continue
 		}
 		started = append(started, name)
-		logger.Info("模块已上线，健康探测约 1 分钟内转在线", zap.String("module", name))
+		logger.Info("模块已上线，等待健康探测转在线", zap.String("module", name))
+	}
+
+	// 容器就绪需要几秒；逐模块短重试强制探测，让状态尽快转在线，
+	// 否则要等待后台探测周期（默认 5 分钟），技能页会长时间误显示离线。
+	if registry != nil {
+		for _, name := range started {
+			for attempt := 0; attempt < 10; attempt++ {
+				if ctx.Err() != nil {
+					break
+				}
+				time.Sleep(3 * time.Second)
+				if st := registry.ForceProbe(name); st != nil && st.Online {
+					break
+				}
+			}
+		}
 	}
 	return started
 }

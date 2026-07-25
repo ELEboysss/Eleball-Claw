@@ -429,7 +429,7 @@ func main() {
 	defer stopSignals()
 	if cfg.Modules.AutoStart {
 		go func() {
-			startedCh <- autoStartModules(sigCtx, logger, cfg.Modules)
+			startedCh <- autoStartModules(sigCtx, logger, cfg.Modules, moduleRegistry)
 		}()
 	} else {
 		startedCh <- nil
