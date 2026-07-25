@@ -130,6 +130,15 @@ func (l *ToolCallingLoop) RunWithRegistry(
 		}
 		result.Usage = addUsage(result.Usage, resp.Usage)
 
+		// 兼容在正文输出内联函数调用标记（<|FunctionCallBegin|>...）而非结构化
+		// tool_calls 的模型：还原为真实 tool_calls 并剥离标记，否则标记会透传给用户
+		if len(resp.ToolCalls) == 0 {
+			if calls, cleaned := parseInlineFunctionCalls(resp.Delta); len(calls) > 0 {
+				resp.ToolCalls = calls
+				resp.Delta = cleaned
+			}
+		}
+
 		isFinal := len(resp.ToolCalls) == 0
 		if onAssistantOutput != nil {
 			onAssistantOutput(AssistantOutput{
