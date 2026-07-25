@@ -39,6 +39,17 @@ if [[ ! -x "$GO" ]]; then
   exit 1
 fi
 
+# Docker 预检：serve 启动会自动上线内置模块（pull_first），依赖 docker。
+# 当前终端若早于 PATH 变更打开，先补 $HOME/bin（WSL 桥接 shim 所在目录）再告警。
+if ! command -v docker >/dev/null 2>&1; then
+  export PATH="$HOME/bin:$PATH"
+fi
+if command -v docker >/dev/null 2>&1; then
+  echo "▶ docker 已检测：内置模块将自动上线（pull_first）"
+else
+  echo "⚠ 未检测到 docker：内置模块保持离线（安装 Docker Desktop，或配置 WSL 桥接 shim 后重试）" >&2
+fi
+
 # build_dist：构建单个前端 dist（web 或 admin-web）
 # $1=前端目录 $2=展示名 $3=主仓库对应 node_modules（junction 源）
 build_dist() {

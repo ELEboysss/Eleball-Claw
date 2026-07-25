@@ -35,6 +35,20 @@ if (-not (Test-Path $Go)) {
     exit 1
 }
 
+# Docker preflight: serve start auto-ups built-in modules (pull_first), which needs docker.
+# If docker is not on PATH (e.g. this terminal predates the PATH change), try the
+# WSL bridge shim location ($env:USERPROFILE\bin) before warning.
+$dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
+if (-not $dockerCmd) {
+    $env:Path = "$env:USERPROFILE\bin;$env:Path"
+    $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
+}
+if ($dockerCmd) {
+    Write-Host ">> docker detected: built-in modules will auto start (pull_first)" -ForegroundColor DarkGray
+} else {
+    Write-Host "WARN: docker not found; built-in modules stay OFFLINE (install Docker Desktop, or set up the WSL bridge shim)" -ForegroundColor Yellow
+}
+
 # Port pre-check: if another instance is already LISTENING (e.g. the exe installed by
 # install.ps1 at ~/.eleball-claw/bin), the health probe would hit that old process during
 # the build window and falsely report "self-test passed". Fail fast and suggest -Port.
