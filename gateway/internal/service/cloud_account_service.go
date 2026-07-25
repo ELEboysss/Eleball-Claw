@@ -63,29 +63,38 @@ type cloudMeResponse struct {
 // GetVipLevel 取用户云端 VIP 等级（缓存优先）。token 为用户云端 JWT（不含 "Bearer " 前缀）。
 // 云端不可达或未配置时返回 0 + error，调用方按安全侧降级处理。
 func (s *CloudAccountService) GetVipLevel(ctx context.Context, userID, token string) (int, error) {
+	entry, err := s.getAccount(ctx, userID, token)
+	if err != nil {
+		return 0, err
+	}
+	return entry.vipLevel, nil
+}
+
+// getAccount 取云端账户信息（vip_level/role 等，缓存优先）
+func (s *CloudAccountService) getAccount(ctx context.Context, userID, token string) (*cloudAccountEntry, error) {
 	if s.cloudBase == "" {
-		return 0, errors.New("云端 API Base 未配置")
+		return nil, errors.New("云端 API Base 未配置")
 	}
 	if entry, ok := s.getCached(userID); ok {
-		return entry.vipLevel, nil
+		return entry, nil
 	}
 	if token == "" {
-		return 0, errors.New("未提供云端 token")
+		return nil, errors.New("未提供云端 token")
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cloudBase+"auth/me", nil)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := s.http.Do(req)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, errors.New("云端 /auth/me 返回非 200")
+		return nil, errors.New("云端 /auth/me 返回非 200")
 	}
 
 	var wrapper struct {
@@ -93,30 +102,32 @@ func (s *CloudAccountService) GetVipLevel(ctx context.Context, userID, token str
 		Data cloudMeResponse `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&wrapper); err != nil {
-		return 0, err
+		return nil, err
 	}
 	if wrapper.Code != 0 {
-		return 0, errors.New("云端 /auth/me 业务错误")
+		return nil, errors.New("云端 /auth/me 业务错误")
 	}
 
-	s.putCached(userID, &cloudAccountEntry{
+	entry := &cloudAccountEntry{
 		vipLevel:  wrapper.Data.VipLevel,
 		role:      wrapper.Data.Role,
 		username:  wrapper.Data.Username,
 		email:     wrapper.Data.Email,
 		fetchedAt: time.Now(),
-	})
-	return wrapper.Data.VipLevel, nil
+	}
+	s.putCached(userID, entry)
+	return entry, nil
 }
 
 // RequireVIP1 校验用户云端 VIP >= 1，不满足返回 error。token 不含 "Bearer " 前缀。
+// 管理员（role=admin）视为等效 VIP1+ 直接放行——管理员是运营方，不受 VIP 门禁限制。
 // 云端不可达时返回 error（安全侧降级：云端秘技门控一律拦）。
 func (s *CloudAccountService) RequireVIP1(ctx context.Context, userID, token string) error {
-	level, err := s.GetVipLevel(ctx, userID, token)
+	entry, err := s.getAccount(ctx, userID, token)
 	if err != nil {
 		return errors.New("无法校验云端会员等级，请稍后重试")
 	}
-	if level < 1 {
+	if entry.vipLevel < 1 && entry.role != "admin" {
 		return errors.New("该云端秘技需 VIP1 及以上")
 	}
 	return nil

@@ -292,7 +292,7 @@ export default function AgentMarket() {
 
   // 下载/安装云端已购秘技到本地：凡云端来源（无论 official）均需 VIP1+；第三方另需 Docker/Podman
   const handleInstall = async (meta) => {
-    const isVip = (user?.vip_level ?? 0) >= 1
+    const isVip = (user?.vip_level ?? 0) >= 1 || user?.role === 'admin'
     let hint = meta.official
       ? '（官方秘技，安装后直接激活，需 VIP1 及以上）'
       : '（第三方秘技，将拉取容器镜像并校验签名，需 Docker/Podman，且需 VIP1 及以上）'
