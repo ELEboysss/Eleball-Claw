@@ -164,8 +164,10 @@ export default function AgentMarket() {
       category: manifest?.category || '',
       level: manifest?.level || 1,
       price_danwan: 0,
-      avg_rating: 0,
-      active_count: 0,
+      // 云端下发的统计数据（评分/购买数/激活数），缺失时兜底 0
+      avg_rating: meta.avg_rating ?? 0,
+      active_count: meta.active_count ?? 0,
+      purchase_count: meta.purchase_count ?? 0,
       creator_name: meta.official ? '官方' : '第三方',
       // 云端已购·未安装标记，渲染「下载到本地」按钮
       cloud_not_installed: true,
