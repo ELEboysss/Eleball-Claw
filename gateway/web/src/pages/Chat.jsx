@@ -27,6 +27,7 @@ import { modelApi, billingApi, eleAgentApi, conversationApi, agentApi, assistant
 import { streamChat } from '../utils/sse'
 import LoginModal from '../components/LoginModal'
 import ModelSettings from '../components/ModelSettings'
+import AssistantPicker from '../components/AssistantPicker'
 import AgentSwitch from '../components/AgentSwitch'
 import AgentStream from '../components/AgentStream'
 import AgentSteps from '../components/AgentSteps'
@@ -95,11 +96,11 @@ export default function Chat() {
   const [enableWebSearch, setEnableWebSearch] = useState(false)
   const [searchProvider, setSearchProvider] = useState('baidu')
   const [availableSearchProviders, setAvailableSearchProviders] = useState([])
-  const [providerMenuOpen, setProviderMenuOpen] = useState(false)
   // 会话绑定的助手（'' = 默认，全部已激活工具）与我的助手列表
   const [assistantId, setAssistantId] = useState('')
   const [assistants, setAssistants] = useState([])
-  const [assistantMenuOpen, setAssistantMenuOpen] = useState(false)
+  // 助手切换弹窗：以独立按钮触发、弹窗内切换，避免下拉浮层被输入框 overflow-hidden 裁切
+  const [assistantPickerOpen, setAssistantPickerOpen] = useState(false)
   const [keepThinking, setKeepThinking] = useState(() => loadKeepThinking(user?.user_id))
   const [agentSessionRefresh, setAgentSessionRefresh] = useState(0)
   // 当前正在流式更新的 Agent assistant 消息 ID，用于把 steps 实时写入对话消息
@@ -107,8 +108,6 @@ export default function Chat() {
   const messagesEndRef = useRef(null)
   const abortRef = useRef(false)
   const fileInputRef = useRef(null)
-  const providerMenuRef = useRef(null)
-  const assistantMenuRef = useRef(null)
   const {
     execute: executeAgent,
     reset: resetAgent,
@@ -259,38 +258,26 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoggedIn])
 
-  // 点击搜索源下拉外部时自动关闭
-  useEffect(() => {
-    if (!providerMenuOpen) return
-    const handleClickOutside = (e) => {
-      if (providerMenuRef.current && !providerMenuRef.current.contains(e.target)) {
-        setProviderMenuOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [providerMenuOpen])
-
-  // 点击助手下拉外部时自动关闭
-  useEffect(() => {
-    if (!assistantMenuOpen) return
-    const handleClickOutside = (e) => {
-      if (assistantMenuRef.current && !assistantMenuRef.current.contains(e.target)) {
-        setAssistantMenuOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [assistantMenuOpen])
-
-  // 拉取我的助手列表（打开下拉时刷新，保证新建/删除后及时同步）
+  // 拉取我的助手列表；原生 select 无法监听「展开」，改为切回页面时刷新，
+  // 保证在「我的助手」新建/删除后回到对话页能及时同步
   useEffect(() => {
     if (!isLoggedIn) return
-    assistantApi
-      .list()
-      .then((d) => setAssistants(Array.isArray(d) ? d : d?.items || []))
-      .catch(() => {})
-  }, [isLoggedIn, assistantMenuOpen])
+    const load = () =>
+      assistantApi
+        .list()
+        .then((d) => setAssistants(Array.isArray(d) ? d : d?.items || []))
+        .catch(() => {})
+    load()
+    const onFocus = () => {
+      if (document.visibilityState === 'visible') load()
+    }
+    document.addEventListener('visibilitychange', onFocus)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      document.removeEventListener('visibilitychange', onFocus)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [isLoggedIn])
 
   // 切换对话时恢复该对话的 Agent / 联网 / 搜索源 / 助手设置
   useEffect(() => {
@@ -1241,101 +1228,39 @@ export default function Chat() {
                     </button>
                   )}
                   {enableTools && enableWebSearch && availableSearchProviders.length > 0 && (
-                    <div ref={providerMenuRef} className="relative">
-                      <button
-                        type="button"
-                        onClick={() => setProviderMenuOpen((v) => !v)}
+                    <div className="relative">
+                      <select
+                        value={searchProvider}
+                        onChange={(e) => setSearchProvider(e.target.value)}
                         disabled={loading}
-                        className="inline-flex items-center gap-1 px-2 py-1.5 rounded-full text-xs font-medium border transition-colors bg-blue-50 text-blue-600 border-blue-200 hover:bg-blue-100"
+                        title="选择联网搜索源"
+                        className="appearance-none bg-blue-50 hover:bg-blue-100 text-blue-600 text-xs font-medium pl-2.5 pr-7 py-1.5 rounded-full border border-blue-200 outline-none cursor-pointer transition-colors max-w-[120px] truncate disabled:opacity-50"
                       >
-                        <span>{availableSearchProviders.find((p) => p.name === searchProvider)?.label || '搜索源'}</span>
-                        <ChevronDown className={`w-3 h-3 transition-transform ${providerMenuOpen ? 'rotate-180' : ''}`} />
-                      </button>
-                      {providerMenuOpen && (
-                        <div className="absolute bottom-full left-0 mb-1.5 bg-white rounded-xl shadow-lg border border-eleball-outline-variant py-1 min-w-[120px] z-50 overflow-hidden">
-                          {availableSearchProviders.map((p) => (
-                            <button
-                              key={p.name}
-                              type="button"
-                              onClick={() => {
-                                setSearchProvider(p.name)
-                                setProviderMenuOpen(false)
-                              }}
-                              className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
-                                p.name === searchProvider
-                                  ? 'text-eleball-primary bg-eleball-primary-light/50 font-medium'
-                                  : 'text-eleball-text hover:bg-eleball-primary-light'
-                              }`}
-                            >
-                              {p.label}
-                            </button>
-                          ))}
-                        </div>
-                      )}
+                        {availableSearchProviders.map((p) => (
+                          <option key={p.name} value={p.name}>{p.label}</option>
+                        ))}
+                      </select>
+                      <ChevronDown className="w-3 h-3 text-blue-600 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
                     </div>
                   )}
                   {enableTools && enableWebSearch && availableSearchProviders.length === 0 && (
                     <span className="text-xs text-eleball-text-secondary">未配置搜索源</span>
                   )}
                   {enableTools && supportsAgent && (
-                    <div ref={assistantMenuRef} className="relative">
-                      <button
-                        type="button"
-                        onClick={() => setAssistantMenuOpen((v) => !v)}
-                        disabled={loading}
-                        title="选择本会话使用的助手（已激活秘技的组合）"
-                        className="inline-flex items-center gap-1 px-2 py-1.5 rounded-full text-xs font-medium border transition-colors bg-purple-50 text-purple-600 border-purple-200 hover:bg-purple-100"
-                      >
-                        <span className="max-w-[96px] truncate">
-                          {assistantId
-                            ? assistants.find((a) => a.id === assistantId)?.name || '助手'
-                            : '默认（全部已激活）'}
-                        </span>
-                        <ChevronDown className={`w-3 h-3 transition-transform ${assistantMenuOpen ? 'rotate-180' : ''}`} />
-                      </button>
-                      {assistantMenuOpen && (
-                        <div className="absolute bottom-full left-0 mb-1.5 bg-white rounded-xl shadow-lg border border-eleball-outline-variant py-1 min-w-[160px] z-50 overflow-hidden">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setAssistantId('')
-                              setAssistantMenuOpen(false)
-                            }}
-                            className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
-                              !assistantId
-                                ? 'text-eleball-primary bg-eleball-primary-light/50 font-medium'
-                                : 'text-eleball-text hover:bg-eleball-primary-light'
-                            }`}
-                          >
-                            默认（全部已激活）
-                          </button>
-                          {assistants.map((a) => (
-                            <button
-                              key={a.id}
-                              type="button"
-                              onClick={() => {
-                                setAssistantId(a.id)
-                                setAssistantMenuOpen(false)
-                              }}
-                              className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
-                                a.id === assistantId
-                                  ? 'text-eleball-primary bg-eleball-primary-light/50 font-medium'
-                                  : 'text-eleball-text hover:bg-eleball-primary-light'
-                              }`}
-                            >
-                              {a.name}
-                            </button>
-                          ))}
-                          <Link
-                            to="/agents?tab=assistants"
-                            onClick={() => setAssistantMenuOpen(false)}
-                            className="block w-full text-left px-3 py-1.5 text-xs text-eleball-text-secondary hover:bg-eleball-primary-light border-t border-eleball-outline-variant"
-                          >
-                            管理助手
-                          </Link>
-                        </div>
-                      )}
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setAssistantPickerOpen(true)}
+                      disabled={loading}
+                      title="选择本会话使用的助手（已激活秘技的组合）"
+                      className="inline-flex items-center gap-1 px-2 py-1.5 rounded-full text-xs font-medium border transition-colors bg-purple-50 text-purple-600 border-purple-200 hover:bg-purple-100 disabled:opacity-50"
+                    >
+                      <span className="max-w-[96px] truncate">
+                        {assistantId
+                          ? assistants.find((a) => a.id === assistantId)?.name || '助手'
+                          : '默认（全部已激活）'}
+                      </span>
+                      <ChevronDown className="w-3 h-3" />
+                    </button>
                   )}
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
@@ -1391,6 +1316,14 @@ export default function Chat() {
         eleagentModels={models}
         onProfilesChange={updateProfiles}
         onCurrentChange={switchProfile}
+      />
+
+      <AssistantPicker
+        open={assistantPickerOpen}
+        onClose={() => setAssistantPickerOpen(false)}
+        assistants={assistants}
+        currentId={assistantId}
+        onPick={setAssistantId}
       />
 
       <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} />
