@@ -442,6 +442,13 @@ func main() {
 		}
 	}()
 
+	// 终端提示（双行：英文行兜底 GBK 控制台乱码场景，中文行为用户主提示）。
+	// 走 fmt 而非 zap logger：保持纯文本输出，不混进 JSON 日志流。
+	fmt.Println()
+	fmt.Printf("Eleball-claw is running at http://localhost:%d — press Ctrl+C or close this terminal to stop the service.\n", cfg.Server.Port)
+	fmt.Println("Ctrl+C 或关闭该终端后服务将会停止。")
+	fmt.Println()
+
 	// 阻塞等待退出信号（Ctrl+C / SIGTERM），然后优雅关闭
 	<-sigCtx.Done()
 	logger.Info("收到退出信号，开始优雅关闭")

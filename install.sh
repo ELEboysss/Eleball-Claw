@@ -29,7 +29,7 @@ ARCH="$(uname -m)"
 case "$ARCH" in
   x86_64|amd64) ARCH="amd64" ;;
   aarch64|arm64) ARCH="arm64" ;;
-  *) echo "不支持的架构: $ARCH"; exit 1 ;;
+  *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
 # 下载地址：默认走云端网关 release 端点，按架构下载（CLAW_DOWNLOAD_URL 可覆盖为镜像/内网）
@@ -41,7 +41,7 @@ if [ -n "$VERSION" ] && [ "$VERSION" != "latest" ]; then
   URL="${URL}&version=${VERSION}"
 fi
 
-echo "==> 下载 claw ($OS/$ARCH) from $URL"
+echo "==> Downloading claw ($OS/$ARCH) from $URL"
 TMP_BIN="$(mktemp)"
 HEADER_FILE="$(mktemp)"
 if command -v curl >/dev/null 2>&1; then
@@ -56,11 +56,11 @@ EXPECTED_SHA="$(grep -i 'X-Content-SHA256:' "$HEADER_FILE" | tr -d '\r' | sed 's
 if [ -n "$EXPECTED_SHA" ] && command -v sha256sum >/dev/null 2>&1; then
   ACTUAL_SHA="$(sha256sum "$TMP_BIN" | awk '{print $1}')"
   if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
-    echo "✗ 校验失败：SHA256 不匹配（期望 $EXPECTED_SHA，实际 $ACTUAL_SHA）"
+    echo "ERROR: SHA256 mismatch (expected $EXPECTED_SHA, got $ACTUAL_SHA)"
     rm -f "$TMP_BIN" "$HEADER_FILE"
     exit 1
   fi
-  echo "==> SHA256 校验通过"
+  echo "==> SHA256 verified"
 fi
 rm -f "$HEADER_FILE"
 
@@ -72,7 +72,7 @@ else
   mkdir -p "$CONFIG_DIR/bin"
   mv "$TMP_BIN" "$CONFIG_DIR/bin/eleball-claw"
   BINARY="$CONFIG_DIR/bin/eleball-claw"
-  echo "==> 无 sudo 权限，已安装到 $BINARY（建议加入 PATH）"
+  echo "==> No sudo access, installed to $BINARY (consider adding it to PATH)"
 fi
 chmod +x "$BINARY"
 
@@ -112,13 +112,13 @@ mail:
   enabled: false
   port: 465
 YAML
-  echo "==> 已生成配置 ${CONFIG_DIR}/claw.yaml"
+  echo "==> Config generated: ${CONFIG_DIR}/claw.yaml"
 fi
 
 echo ""
-echo "✅ Eleball-claw 安装完成"
-echo "   启动: CONFIG_PATH=${CONFIG_DIR}/claw.yaml eleball-claw serve --port=${PORT}"
-echo "   首页: http://localhost:${PORT}"
-echo "   配置: ${CONFIG_DIR}/claw.yaml"
-echo "   模块: eleball-claw module ls   # 模块目录 ${CONFIG_DIR}/marketplace（首次使用自动播种官方模块）"
-echo "         eleball-claw module up   # 经 docker 一键启动全部模块（需已安装 Docker）"
+echo "Eleball-claw installed successfully."
+echo "   Start:   CONFIG_PATH=${CONFIG_DIR}/claw.yaml eleball-claw serve --port=${PORT}"
+echo "   URL:     http://localhost:${PORT}"
+echo "   Config:  ${CONFIG_DIR}/claw.yaml"
+echo "   Modules: eleball-claw module ls   # module home: ${CONFIG_DIR}/marketplace (official modules seeded on first use)"
+echo "            eleball-claw module up   # start all modules via docker (Docker required)"
