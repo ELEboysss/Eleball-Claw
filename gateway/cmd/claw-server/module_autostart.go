@@ -59,7 +59,7 @@ func normalizePullPolicy(policy string) string {
 // docker 缺失、marketplace 目录异常、单模块失败均只告警不阻断。
 // ctx 取消时中断后续模块的启动（已启动的仍返回，便于退出时清理）。
 func autoStartModules(ctx context.Context, logger *zap.Logger, cfg config.ModulesConfig, registry *service.ModuleRegistry) []string {
-	if _, err := exec.LookPath("docker"); err != nil {
+	if service.EnsureDockerOnPath() == "" {
 		logger.Warn("未检测到 docker，跳过预置模块自动上线（模块将保持离线，可安装 Docker 后重启或手动 module up）")
 		return nil
 	}
@@ -141,7 +141,7 @@ func autoStopModules(logger *zap.Logger, names []string) {
 	if len(names) == 0 {
 		return
 	}
-	if _, err := exec.LookPath("docker"); err != nil {
+	if service.EnsureDockerOnPath() == "" {
 		return
 	}
 	root, err := service.EnsureMarketplaceRoot()

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/eleball/gateway/internal/config"
+	"github.com/eleball/gateway/internal/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -24,12 +25,16 @@ func NewSystemHandler(modules config.ModulesConfig) *SystemHandler {
 	return &SystemHandler{modules: modules}
 }
 
-// statusProbeTimeout docker 状态探测的单次超时（本地命令，3s 足够）
-const statusProbeTimeout = 3 * time.Second
+// statusProbeTimeout docker 状态探测的单次超时。
+// 经 shim（如 WSL 桥接）调用时可能触发 dockerd 冷启动（等待就绪最长约 40s），
+// 超时需覆盖该场景；daemon 已在运行时探测为毫秒级，不影响正常路径耗时。
+const statusProbeTimeout = 45 * time.Second
 
 // GetSystemStatus 系统状态（docker/compose 可用性 + 模块自动上下线开关）。
 // GET /v1/claw-console/system/status
 func (h *SystemHandler) GetSystemStatus(c *gin.Context) {
+	// PATH 未刷新场景（Windows 安装 Docker 后未重开终端）先回退探测常见安装位置
+	service.EnsureDockerOnPath()
 	dockerVersion := probeDockerVersion()
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,

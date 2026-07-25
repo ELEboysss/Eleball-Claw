@@ -43,8 +43,8 @@ func runModuleCommand(args []string) int {
 		return moduleList(absRoot)
 	}
 
-	// up/down/ps/logs 需要 docker
-	if _, err := exec.LookPath("docker"); err != nil {
+	// up/down/ps/logs 需要 docker（PATH 未刷新时回退探测常见安装位置并临时注入进程 PATH）
+	if service.EnsureDockerOnPath() == "" {
 		fmt.Fprintln(os.Stderr, "未找到 docker 命令。模块以容器方式运行，请先安装 Docker（https://docs.docker.com/get-docker/）")
 		return 1
 	}

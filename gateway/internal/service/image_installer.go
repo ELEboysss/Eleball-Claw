@@ -26,6 +26,8 @@ type ImageInstaller struct {
 // NewImageInstaller 创建镜像安装器。runtime 为空时按 docker->podman 顺序探测可用运行时。
 func NewImageInstaller(runtime string) *ImageInstaller {
 	if runtime == "" {
+		// PATH 未刷新场景（Windows 安装 Docker 后未重开终端）回退探测常见安装位置
+		EnsureDockerOnPath()
 		if _, err := exec.LookPath("docker"); err == nil {
 			runtime = "docker"
 		} else if _, err := exec.LookPath("podman"); err == nil {

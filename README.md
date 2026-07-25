@@ -147,6 +147,39 @@ modules:
 > 或 `modules.image_tag`，需同步修改各模块 `docker-compose.yml` 的 `image:`，否则 compose 会按文件内的
 > 镜像名另拉/另建。本地控制台可通过 `GET /v1/claw-console/system/status` 查询 docker/compose 可用性。
 
+### Windows 无 Docker Desktop：WSL 桥接 shim
+
+没有 Docker Desktop 时可复用 WSL2 发行版内的 docker（claw 的 docker 探测会回退查找
+`%USERPROFILE%\bin\docker.bat` 等 shim，无需加入 PATH）。架设步骤：
+
+1. WSL 发行版（如 Ubuntu-24.04）内安装 docker（`apt install docker.io docker-compose-v2`）。
+2. 新建 `/usr/local/bin/docker-shim`（把 Windows 路径参数经 wslpath 转成 `/mnt/<盘>/...`，其余透传）：
+
+   ```bash
+   #!/bin/bash
+   args=()
+   for a in "$@"; do
+     if [[ "$a" =~ ^[A-Za-z]:[\/] ]]; then args+=("$(wslpath -u "$a")"); else args+=("$a"); fi
+   done
+   exec docker "${args[@]}"
+   ```
+
+3. 新建 `/usr/local/bin/start-dockerd.sh`：`exec dockerd >>/var/log/dockerd.log 2>&1`（均 `chmod +x`）。
+4. **dockerd 必须由计划任务常驻**：inbox 版 WSL 会在启动会话退出后回收其后台进程
+   （nohup/setsid/隐藏窗口 holder 均无效），因此用计划任务托管（完全脱离控制台会话，且登录自启）：
+
+   ```powershell
+   schtasks /create /tn "claw-dockerd" /sc onlogon /ru "$env:USERNAME" `
+     /tr "wsl -d Ubuntu-24.04 -u root /usr/local/bin/start-dockerd.sh" /f
+   ```
+
+5. 新建 `%USERPROFILE%\bin\docker.bat`：daemon 未运行时 `schtasks /run /tn "claw-dockerd"` 拉起并等待就绪
+   （轮询 `docker info` 最长约 40s），然后把参数中的 `\` 替换为 `/` 后调用
+   `wsl -d Ubuntu-24.04 -- bash /usr/local/bin/docker-shim %ARGS%`。
+
+之后 claw（exe 或 dev-run）即可正常自动上线模块；compose 文件路径自动经 `/mnt/<盘>` 映射进 WSL。
+注意 WSL 内 docker 的镜像/容器与 Docker Desktop 互不共享。
+
 ## 与云端 eleball 的关系
 
 claw 定位为设备端本地化组件，与云端 `eleball.cn` 互补：
