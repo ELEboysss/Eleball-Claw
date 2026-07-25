@@ -123,6 +123,12 @@ export const settingsApi = {
   update: (settings) => client.put('/claw-console/settings', settings)
 }
 
+// ====== 系统状态 API（本地 claw：Docker/Compose 可用性等，用于缺失引导横幅）======
+export const systemApi = {
+  // -> { docker_available, docker_version, compose_available, modules_auto_start, modules_auto_stop }
+  status: () => client.get('/claw-console/system/status')
+}
+
 // ====== 当前用户计费 API（云端，只看自己；去平台总收入）======
 // claw 本地不计费；展示云端账户弹丸余额与记录（用户在云端充值/扣费）
 export const billingApi = {

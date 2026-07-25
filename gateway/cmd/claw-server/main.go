@@ -15,9 +15,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"syscall"
+	"time"
 
 	"github.com/eleball/gateway/internal/config"
 	"github.com/eleball/gateway/internal/handler"
@@ -140,6 +144,8 @@ func main() {
 		&model.ModuleRecord{},
 		&model.DriverRecord{},
 		&model.AgentUserCredential{},
+		&model.Assistant{},
+		&model.AssistantItem{},
 		&model.VisualGenerationTask{},
 		&model.VisualConversation{},
 	); err != nil {
@@ -185,6 +191,7 @@ func main() {
 	vipRepo := repository.NewVIPRepo(db)
 	moduleRepo := repository.NewModuleRepo(db)
 	driverRepo := repository.NewDriverRepo(db)
+	assistantRepo := repository.NewAssistantRepo(db)
 
 	// 6. 服务
 
@@ -256,10 +263,17 @@ func main() {
 	moduleRegistry.SetRepo(moduleRepo)
 	moduleRegistry.SetDriverRepo(driverRepo)
 	moduleService := service.NewModuleService(moduleRegistry, moduleRepo, driverRepo)
+	// claw 云端秘技安装后落本地 AgentItem/AgentPurchase（激活链路依赖购买记录）
+	moduleService.SetAgentRepo(agentRepo)
 
 	// 扫描 marketplace/ 预置官方模块（search-web 等）
 	if err := seed.AutoEnsureMarketplaceModules(moduleService, logger); err != nil {
 		logger.Warn("自动补齐内置模块失败", zap.Error(err))
+	}
+
+	// 预置本地 search-web 官方搜索 SKU（免费，百度千帆/必应两变体）
+	if err := seed.SearchWebSKUs(agentRepo, logger); err != nil {
+		logger.Warn("预置 SearchWeb 官方搜索秘技失败", zap.Error(err))
 	}
 
 	// 启动模块后台健康探测（每 5 分钟一次）
@@ -267,6 +281,8 @@ func main() {
 	defer moduleRegistry.Stop()
 
 	agentService := service.NewAgentMarketService(db, agentRepo, userRepo, vipService, moduleRegistry)
+	// claw 本地购买仅放行免费 SKU；付费秘技引导云端 eleball.cn 购买
+	agentService.SetLocalFreeOnly(true)
 
 	// Agent 工作流
 	agentSandbox := service.NewFileSandbox(cfg.Agent.BasePath, cfg.Agent.KnowledgeBase)
@@ -311,6 +327,9 @@ func main() {
 	agentService.SetModuleService(moduleService)
 	// claw 云端秘技 provenance 判定（激活云端来源秘技需 VIP1+）
 	agentService.SetModuleRepo(moduleRepo)
+	// 助手服务（已激活秘技的命名组合）；Agent 执行按请求/会话绑定的助手过滤动态工具
+	assistantService := service.NewAssistantService(db, assistantRepo, agentRepo)
+	agentWorkflowService.SetAssistantService(assistantService)
 	// 云端账户/VIP 缓存（claw 仅从云端取 VIP 一项用于门控）
 	cloudAccountService := service.NewCloudAccountService(cfg.Server.EleagentBaseURL)
 
@@ -349,6 +368,9 @@ func main() {
 	adminSettingHandler := handler.NewAdminSettingHandler(settingService)
 	releaseHandler := handler.NewReleaseHandler(releaseService, logger)
 	clawConsoleHandler := handler.NewClawConsoleHandler(db)
+	assistantHandler := handler.NewAssistantHandler(assistantService)
+	// 本地系统状态（docker/compose 可用性 + 模块自动上下线开关）
+	systemHandler := handler.NewSystemHandler(cfg.Modules)
 
 	// 8. 路由（claw 裁剪版）
 	r := router.NewClawRouter(cfg, logger, jwtUtil,
@@ -356,6 +378,7 @@ func main() {
 		conversationHandler, moduleHandler, agentWorkflowHandler, agentHandler,
 		agentCredentialHandler, visualHandler, publicSettingHandler, releaseHandler,
 		clawConsoleHandler, cloudAccountService, adminEleAgentModelHandler, adminSettingHandler,
+		assistantHandler, systemHandler,
 	)
 
 	// 9. 启动
@@ -399,7 +422,43 @@ func main() {
 	// CLAW_NO_BROWSER=1 可关闭；Linux 无桌面环境（无 DISPLAY）时自动跳过。
 	openBrowserDelayed(fmt.Sprintf("http://localhost:%d", cfg.Server.Port), logger)
 
-	if err := r.Run(addr); err != nil {
-		logger.Fatal("HTTP 服务启动失败", zap.Error(err))
+	// 预置模块自动上线：后台执行（拉镜像优先、本地构建兜底，不阻塞网关启动）；
+	// 成功启动的模块名经 channel 回传，供退出时自动下线。
+	startedCh := make(chan []string, 1)
+	sigCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	if cfg.Modules.AutoStart {
+		go func() {
+			startedCh <- autoStartModules(sigCtx, logger, cfg.Modules)
+		}()
+	} else {
+		startedCh <- nil
+	}
+
+	srv := &http.Server{Addr: addr, Handler: r}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Fatal("HTTP 服务启动失败", zap.Error(err))
+		}
+	}()
+
+	// 阻塞等待退出信号（Ctrl+C / SIGTERM），然后优雅关闭
+	<-sigCtx.Done()
+	logger.Info("收到退出信号，开始优雅关闭")
+
+	// 预置模块自动下线：仅清理本网关成功启动的模块（等自动上线流程收尾，最多 30s）
+	if cfg.Modules.AutoStop {
+		select {
+		case started := <-startedCh:
+			autoStopModules(logger, started)
+		case <-time.After(30 * time.Second):
+			logger.Warn("等待模块上线流程收尾超时，跳过自动下线")
+		}
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("HTTP 服务优雅关闭失败", zap.Error(err))
 	}
 }

@@ -5,7 +5,7 @@
 services:
   search-web:
     build: .
-    image: registry.eleball.cn/eleball/search-web:1.0.0
+    image: crpi-2tmk9w177nykk4zb.cn-hangzhou.personal.cr.aliyuncs.com/eleball/search-web:develop
     container_name: eleball-search-web
     ports:
       - "8091:8091"

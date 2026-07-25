@@ -75,7 +75,10 @@ function createClient(baseURL, { timeout = 15000 } = {}) {
         if (body.code === 0) {
           return body.data
         }
-        return Promise.reject(new Error(body.message || '请求失败'))
+        // 透传业务错误码（如 4002=VIP 门禁），页面可据此做引导文案
+        const bizErr = new Error(body.message || '请求失败')
+        bizErr.code = body.code
+        return Promise.reject(bizErr)
       }
       return body
     },
@@ -110,7 +113,10 @@ function createClient(baseURL, { timeout = 15000 } = {}) {
 
       const rawMessage = error.response?.data?.message || error.message || '网络错误'
       const friendlyMessage = normalizeErrorMessage(status, rawMessage)
-      return Promise.reject(new Error(friendlyMessage))
+      // 同样透传业务错误码（HTTP 4xx/5xx 场景，如 VIP 门禁 403+4002）
+      const httpErr = new Error(friendlyMessage)
+      httpErr.code = error.response?.data?.code
+      return Promise.reject(httpErr)
     }
   )
 
@@ -194,6 +200,12 @@ export const publicSettingApi = {
   get: () => client.get('/public/settings')
 }
 
+// ====== 系统状态 API（本地 claw：Docker/Compose 可用性等，用于缺失引导横幅）======
+export const systemApi = {
+  // -> { docker_available, docker_version, compose_available, modules_auto_start, modules_auto_stop }
+  status: () => client.get('/claw-console/system/status')
+}
+
 // ====== 对话历史 API（本地 claw：本地存储）======
 export const conversationApi = {
   list: (page = 1, pageSize = 20) =>
@@ -274,6 +286,17 @@ export const agentApi = {
   }
 }
 
+// ====== 助手 API（本地 claw：已激活秘技的命名组合，按会话应用）======
+export const assistantApi = {
+  list: () => client.get('/assistants'),
+  create: (data) => client.post('/assistants', data),
+  get: (id) => client.get(`/assistants/${id}`),
+  update: (id, data) => client.patch(`/assistants/${id}`, data),
+  remove: (id) => client.delete(`/assistants/${id}`),
+  // 全量设置助手包含的秘技（仅允许已购+已激活的秘技，否则后端返回 3001）
+  setItems: (id, agentIds) => client.put(`/assistants/${id}/items`, { agent_ids: agentIds })
+}
+
 // ====== 视觉生成 API（本地 claw）======
 export const visualApi = {
   create: (body) => client.post('/visual/generations', body, { timeout: 120000 }),
@@ -321,6 +344,9 @@ export const agentMarketApi = {
   saveCredentials: (id, values) => client.post(`/agents/${id}/credentials`, { values }),
   // 提交本地秘技到云端审核（转发云端 register 接口）
   submitForReview: (payload) => cloudClient.post('/market/modules/register', payload),
+  // 本地购买：仅免费 SKU 可成功，付费 SKU 由后端返回「付费秘技请到云端购买」
+  purchaseLocal: (id, currency = 'danwan') =>
+    client.post(`/agents/${id}/purchase`, { agent_id: id, currency }),
 
   // --- 云端 eleball ---
   // 购买秘技（云端账户扣费）
@@ -336,7 +362,10 @@ export const agentMarketApi = {
 // 契约：GET /v1/market/modules/installed -> ModuleInstallMeta[]（见 specs/api-schema.yml）
 export const clawMarketApi = {
   listInstalledModules: (since) =>
-    cloudClient.get('/market/modules/installed', { params: since ? { since } : {} })
+    cloudClient.get('/market/modules/installed', { params: since ? { since } : {} }),
+  // 安装云端已购秘技到本地（body 为单个 ModuleInstallMeta）；
+  // official=false 时后端做 VIP1+ 门禁，未达标返回 code=4002（HTTP 403）
+  installModule: (meta) => client.post('/claw-console/modules/install', meta)
 }
 
 // ====== SKU 凭证 API（本地 claw，Cookie / API Key / Token）======

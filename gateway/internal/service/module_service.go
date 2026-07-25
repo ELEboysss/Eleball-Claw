@@ -13,6 +13,7 @@ import (
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
 	"github.com/eleball/gateway/marketplace"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -22,6 +23,8 @@ type ModuleService struct {
 	registry   *ModuleRegistry
 	moduleRepo *repository.ModuleRepo
 	driverRepo *repository.DriverRepo
+	// claw 云端秘技安装后同步本地 AgentItem/AgentPurchase（cmd/server 不注入则跳过）
+	agentRepo *repository.AgentRepo
 	// P4：第三方模块镜像安装器（拉镜像 + 签名校验 + 启动容器）。官方预置模块不经此安装器。
 	installer *ImageInstaller
 }
@@ -36,6 +39,11 @@ func NewModuleService(registry *ModuleRegistry, moduleRepo *repository.ModuleRep
 	}
 }
 
+// SetAgentRepo 注入秘技仓库（claw 用：云端秘技安装后落本地 AgentItem/AgentPurchase）
+func (s *ModuleService) SetAgentRepo(repo *repository.AgentRepo) {
+	s.agentRepo = repo
+}
+
 // ModuleImageMeta 第三方模块容器镜像信息（云端 ModuleInstallMeta.image）
 type ModuleImageMeta struct {
 	Registry   string `json:"registry"`
@@ -48,6 +56,8 @@ type ModuleImageMeta struct {
 // claw 据此安装到本地：official=true 直接激活预置；否则走 ImageInstaller 拉镜像 + 签名校验。
 type ModuleInstallMeta struct {
 	ModuleID      string          `json:"module_id"`
+	// AgentID 云端秘技（AgentItem）ID；安装后据此在本地 upsert AgentItem，为空回退 manifest.id
+	AgentID       string          `json:"agent_id,omitempty"`
 	Name          string          `json:"name"`
 	Description    string          `json:"description"`
 	Version       string          `json:"version"`
@@ -387,6 +397,23 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Mod
 
 	// 已存在则幂等返回（避免重复拉镜像/启动容器）
 	if existing, err := s.moduleRepo.GetByID(meta.ModuleID); err == nil && existing != nil {
+		// 官方预置模块：幂等路径也补齐 official/来源标记（本地扫描建记录时无此信息）。
+		// 注意：经云端 installed 接口安装的官方模块同样标记 cloud-purchased，
+		// 与本地纯扫描预置（InstallSource 为空）区分，激活时统一走 VIP 门控。
+		if meta.Official && (!existing.Official || existing.InstallSource == "") {
+			existing.Official = true
+			existing.InstallSource = "cloud-purchased"
+			if meta.Version != "" {
+				existing.Version = meta.Version
+			}
+			if err := s.moduleRepo.CreateOrUpdate(existing); err != nil {
+				return nil, err
+			}
+		}
+		// 幂等路径也要补齐驱动绑定（首次安装时驱动写库失败重试、云端补发 driver_id 等场景）
+		if err := s.upsertDriverBinding(meta); err != nil {
+			return nil, err
+		}
 		existing.Status = model.ModuleStatusOnline
 		if st := s.registry.Check(meta.ModuleID); st != nil {
 			if !st.Online {
@@ -405,7 +432,9 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Mod
 			return nil, fmt.Errorf("官方模块 %s 未在本地预置，请确认 marketplace/ 已包含", meta.ModuleID)
 		}
 		rec.Official = true
-		rec.InstallSource = "preset"
+		// 云端安装的官方模块标记 cloud-purchased（激活走 VIP 门控）；
+		// 本地纯扫描预置保持空值，不受门控。
+		rec.InstallSource = "cloud-purchased"
 		if meta.Version != "" {
 			rec.Version = meta.Version
 		}
@@ -427,11 +456,13 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Mod
 		if err := s.registry.RegisterRecord(rec); err != nil {
 			return nil, fmt.Errorf("注册模块到 registry 失败: %w", err)
 		}
-		// 绑定驱动别名（云端下发 driver_id）
-		if meta.DriverID != "" {
-			_ = s.BindDriverModule(meta.DriverID, meta.ModuleID)
-		}
 		record = rec
+	}
+
+	// 安装成功后按 meta upsert 本地驱动别名并绑定模块（official/第三方通用）。
+	// 本地 drivers 表缺该 DriverRecord 时新建，存在则更新绑定与令牌。
+	if err := s.upsertDriverBinding(meta); err != nil {
+		return nil, err
 	}
 
 	// 触发一次健康探测刷新状态
@@ -445,4 +476,160 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Mod
 		record.HealthError = st.Error
 	}
 	return record, nil
+}
+
+// upsertDriverBinding 按云端 meta upsert 本地驱动别名并绑定到已安装模块。
+// meta.DriverID 为空时不做任何事。已存在的驱动记录只更新绑定/传输类型/令牌，保留其余字段。
+func (s *ModuleService) upsertDriverBinding(meta ModuleInstallMeta) error {
+	if meta.DriverID == "" {
+		return nil
+	}
+	if s.driverRepo == nil {
+		return errors.New("DriverRepo 未初始化")
+	}
+
+	transportType := meta.TransportType
+	if transportType == "" {
+		transportType = string(model.ModuleTransportTypeModule)
+	}
+
+	if existing, err := s.driverRepo.GetByID(meta.DriverID); err == nil && existing != nil {
+		changed := false
+		if existing.ModuleID != meta.ModuleID {
+			existing.ModuleID = meta.ModuleID
+			changed = true
+		}
+		if meta.TransportType != "" && existing.TransportType != meta.TransportType {
+			existing.TransportType = meta.TransportType
+			changed = true
+		}
+		if meta.AuthToken != "" && existing.AuthToken != meta.AuthToken {
+			existing.AuthToken = meta.AuthToken
+			changed = true
+		}
+		if existing.Name == "" {
+			existing.Name = meta.Name
+			if existing.Name == "" {
+				existing.Name = meta.DriverID
+			}
+			changed = true
+		}
+		if !changed {
+			return nil
+		}
+		if err := s.driverRepo.CreateOrUpdate(existing); err != nil {
+			return fmt.Errorf("更新驱动别名 %s 失败: %w", meta.DriverID, err)
+		}
+		return nil
+	}
+
+	name := meta.Name
+	if name == "" {
+		name = meta.DriverID
+	}
+	rec := &model.DriverRecord{
+		ID:            meta.DriverID,
+		Name:          name,
+		TransportType: transportType,
+		ModuleID:      meta.ModuleID,
+		AuthToken:     meta.AuthToken,
+	}
+	if err := s.driverRepo.CreateOrUpdate(rec); err != nil {
+		return fmt.Errorf("创建驱动别名 %s 失败: %w", meta.DriverID, err)
+	}
+	return nil
+}
+
+// EnsureCloudAgentProvision 云端秘技安装成功后，按 meta.Manifest 在本地落库：
+//   - upsert AgentItem（status=approved、manifest_json 落库；已存在时保留 purchase_count 等统计字段）；
+//   - 为当前用户幂等写入 AgentPurchase（金额 0，来源为云端已购）。
+//
+// 未注入 AgentRepo（云端 cmd/server）或 meta 未携带 manifest 时直接跳过。
+// 本地 AgentItem.ID 优先取 meta.AgentID，为空回退 manifest.id。
+func (s *ModuleService) EnsureCloudAgentProvision(meta ModuleInstallMeta, userID string) error {
+	if s.agentRepo == nil {
+		return nil
+	}
+	if len(meta.Manifest) == 0 || string(meta.Manifest) == "null" {
+		return nil
+	}
+	if userID == "" {
+		return errors.New("无法识别当前用户，无法写入秘技购买记录")
+	}
+
+	var manifest model.ToolManifest
+	if err := json.Unmarshal(meta.Manifest, &manifest); err != nil {
+		return fmt.Errorf("manifest 解析失败: %w", err)
+	}
+
+	agentID := meta.AgentID
+	if agentID == "" {
+		agentID = manifest.ID
+	}
+	if agentID == "" {
+		return errors.New("manifest 缺少 id 且 meta 未下发 agent_id，无法落库秘技记录")
+	}
+
+	name := manifest.Name
+	if name == "" {
+		name = meta.Name
+	}
+	description := manifest.Description
+	if description == "" {
+		description = meta.Description
+	}
+	level := model.AgentLevel(manifest.Level)
+	if level < model.AgentLevelHuang || level > model.AgentLevelFenJue {
+		level = model.AgentLevelHuang
+	}
+
+	if existing, err := s.agentRepo.GetByID(agentID); err == nil && existing != nil {
+		// 已存在：只更新描述性字段，保留 purchase_count/avg_rating 等统计与价格、创作者信息
+		existing.Name = name
+		existing.Description = description
+		existing.Category = manifest.Category
+		existing.Level = level
+		existing.ManifestJSON = string(meta.Manifest)
+		existing.Status = model.AgentStatusApproved
+		if err := s.agentRepo.Update(existing); err != nil {
+			return fmt.Errorf("更新本地秘技 %s 失败: %w", agentID, err)
+		}
+	} else {
+		item := &model.AgentItem{
+			ID:           agentID,
+			Name:         name,
+			Description:  description,
+			CreatorID:    "cloud",
+			CreatorName:  "Eleball 云端",
+			Category:     manifest.Category,
+			Level:        level,
+			ManifestJSON: string(meta.Manifest),
+			Status:       model.AgentStatusApproved,
+		}
+		if err := s.agentRepo.Create(item); err != nil {
+			return fmt.Errorf("创建本地秘技 %s 失败: %w", agentID, err)
+		}
+	}
+
+	// 幂等写入购买记录：云端已购秘技本地补单，金额记 0
+	purchased, err := s.agentRepo.HasPurchased(agentID, userID)
+	if err != nil {
+		return err
+	}
+	if purchased {
+		return nil
+	}
+	purchase := &model.AgentPurchase{
+		ID:              uuid.New().String(),
+		AgentID:         agentID,
+		BuyerID:         userID,
+		PricePaid:       0,
+		Currency:        "cloud-purchased",
+		CreatorEarnings: 0,
+		PlatformFee:     0,
+	}
+	if err := s.agentRepo.CreatePurchase(purchase); err != nil {
+		return fmt.Errorf("写入秘技购买记录失败: %w", err)
+	}
+	return nil
 }

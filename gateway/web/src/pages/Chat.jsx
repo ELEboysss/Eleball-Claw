@@ -23,7 +23,7 @@ import {
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { useChat } from '../context/ChatContext'
-import { modelApi, billingApi, eleAgentApi, conversationApi, agentApi } from '../api/client'
+import { modelApi, billingApi, eleAgentApi, conversationApi, agentApi, assistantApi } from '../api/client'
 import { streamChat } from '../utils/sse'
 import LoginModal from '../components/LoginModal'
 import ModelSettings from '../components/ModelSettings'
@@ -96,6 +96,10 @@ export default function Chat() {
   const [searchProvider, setSearchProvider] = useState('baidu')
   const [availableSearchProviders, setAvailableSearchProviders] = useState([])
   const [providerMenuOpen, setProviderMenuOpen] = useState(false)
+  // 会话绑定的助手（'' = 默认，全部已激活工具）与我的助手列表
+  const [assistantId, setAssistantId] = useState('')
+  const [assistants, setAssistants] = useState([])
+  const [assistantMenuOpen, setAssistantMenuOpen] = useState(false)
   const [keepThinking, setKeepThinking] = useState(() => loadKeepThinking(user?.user_id))
   const [agentSessionRefresh, setAgentSessionRefresh] = useState(0)
   // 当前正在流式更新的 Agent assistant 消息 ID，用于把 steps 实时写入对话消息
@@ -104,6 +108,7 @@ export default function Chat() {
   const abortRef = useRef(false)
   const fileInputRef = useRef(null)
   const providerMenuRef = useRef(null)
+  const assistantMenuRef = useRef(null)
   const {
     execute: executeAgent,
     reset: resetAgent,
@@ -266,7 +271,28 @@ export default function Chat() {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [providerMenuOpen])
 
-  // 切换对话时恢复该对话的 Agent / 联网 / 搜索源设置
+  // 点击助手下拉外部时自动关闭
+  useEffect(() => {
+    if (!assistantMenuOpen) return
+    const handleClickOutside = (e) => {
+      if (assistantMenuRef.current && !assistantMenuRef.current.contains(e.target)) {
+        setAssistantMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [assistantMenuOpen])
+
+  // 拉取我的助手列表（打开下拉时刷新，保证新建/删除后及时同步）
+  useEffect(() => {
+    if (!isLoggedIn) return
+    assistantApi
+      .list()
+      .then((d) => setAssistants(Array.isArray(d) ? d : d?.items || []))
+      .catch(() => {})
+  }, [isLoggedIn, assistantMenuOpen])
+
+  // 切换对话时恢复该对话的 Agent / 联网 / 搜索源 / 助手设置
   useEffect(() => {
     if (!currentConversation) return
     setEnableTools(!!currentConversation.enableTools)
@@ -274,21 +300,23 @@ export default function Chat() {
     const savedProvider = currentConversation.searchProvider || 'baidu'
     const exists = availableSearchProviders.some((p) => p.name === savedProvider)
     setSearchProvider(exists ? savedProvider : (availableSearchProviders[0]?.name || 'baidu'))
+    setAssistantId(currentConversation.assistantId || '')
   }, [currentConversationId, availableSearchProviders])
 
-  // Agent / 联网 / 搜索源设置变化时同步到本地 conversation 和后端
+  // Agent / 联网 / 搜索源 / 助手设置变化时同步到本地 conversation 和后端
   useEffect(() => {
     if (!currentConversation || !isLoggedIn) return
     const needsUpdate =
       !!currentConversation.enableTools !== enableTools ||
       !!currentConversation.enableWebSearch !== enableWebSearch ||
-      (currentConversation.searchProvider || 'baidu') !== searchProvider
+      (currentConversation.searchProvider || 'baidu') !== searchProvider ||
+      (currentConversation.assistantId || '') !== assistantId
     if (!needsUpdate) return
 
     updateConversations((prev) =>
       prev.map((c) =>
         c.id === currentConversation.id
-          ? { ...c, enableTools, enableWebSearch, searchProvider, updatedAt: Date.now() }
+          ? { ...c, enableTools, enableWebSearch, searchProvider, assistantId, updatedAt: Date.now() }
           : c
       )
     )
@@ -296,10 +324,12 @@ export default function Chat() {
       .update(currentConversation.id, {
         enable_tools: enableTools,
         enable_web_search: enableWebSearch,
-        search_provider: searchProvider
+        search_provider: searchProvider,
+        // 空字符串 = 清除会话绑定的助手
+        assistant_id: assistantId
       })
       .catch(() => {})
-  }, [enableTools, enableWebSearch, searchProvider, currentConversation?.id, isLoggedIn])
+  }, [enableTools, enableWebSearch, searchProvider, assistantId, currentConversation?.id, isLoggedIn])
 
   const updateConversations = (next) => {
     setConversations(next)
@@ -634,7 +664,8 @@ export default function Chat() {
           apiKey: '',
           enableTools: true,
           enableWebSearch,
-          searchProvider
+          searchProvider,
+          assistantId
         })
       } catch (err) {
         const errorMsg = err.message || 'Agent 执行失败'
@@ -1245,6 +1276,66 @@ export default function Chat() {
                   )}
                   {enableTools && enableWebSearch && availableSearchProviders.length === 0 && (
                     <span className="text-xs text-eleball-text-secondary">未配置搜索源</span>
+                  )}
+                  {enableTools && supportsAgent && (
+                    <div ref={assistantMenuRef} className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setAssistantMenuOpen((v) => !v)}
+                        disabled={loading}
+                        title="选择本会话使用的助手（已激活秘技的组合）"
+                        className="inline-flex items-center gap-1 px-2 py-1.5 rounded-full text-xs font-medium border transition-colors bg-purple-50 text-purple-600 border-purple-200 hover:bg-purple-100"
+                      >
+                        <span className="max-w-[96px] truncate">
+                          {assistantId
+                            ? assistants.find((a) => a.id === assistantId)?.name || '助手'
+                            : '默认（全部已激活）'}
+                        </span>
+                        <ChevronDown className={`w-3 h-3 transition-transform ${assistantMenuOpen ? 'rotate-180' : ''}`} />
+                      </button>
+                      {assistantMenuOpen && (
+                        <div className="absolute bottom-full left-0 mb-1.5 bg-white rounded-xl shadow-lg border border-eleball-outline-variant py-1 min-w-[160px] z-50 overflow-hidden">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setAssistantId('')
+                              setAssistantMenuOpen(false)
+                            }}
+                            className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
+                              !assistantId
+                                ? 'text-eleball-primary bg-eleball-primary-light/50 font-medium'
+                                : 'text-eleball-text hover:bg-eleball-primary-light'
+                            }`}
+                          >
+                            默认（全部已激活）
+                          </button>
+                          {assistants.map((a) => (
+                            <button
+                              key={a.id}
+                              type="button"
+                              onClick={() => {
+                                setAssistantId(a.id)
+                                setAssistantMenuOpen(false)
+                              }}
+                              className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
+                                a.id === assistantId
+                                  ? 'text-eleball-primary bg-eleball-primary-light/50 font-medium'
+                                  : 'text-eleball-text hover:bg-eleball-primary-light'
+                              }`}
+                            >
+                              {a.name}
+                            </button>
+                          ))}
+                          <Link
+                            to="/assistants"
+                            onClick={() => setAssistantMenuOpen(false)}
+                            className="block w-full text-left px-3 py-1.5 text-xs text-eleball-text-secondary hover:bg-eleball-primary-light border-t border-eleball-outline-variant"
+                          >
+                            管理助手
+                          </Link>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">

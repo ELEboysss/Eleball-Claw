@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/eleball/gateway/internal/model"
+	"github.com/eleball/gateway/marketplace"
 	"github.com/eleball/gateway/internal/repository"
 	"github.com/eleball/gateway/internal/service"
 	"go.uber.org/zap"
@@ -244,6 +245,67 @@ func FirecrawlSKUs(repo *repository.AgentRepo, logger *zap.Logger) error {
 	return nil
 }
 
+// SearchWebSKUs 预置本地 search-web 官方搜索 SKU（百度千帆 / 必应两变体）。
+// 免费上架（PriceDanwan=0），claw 本地可直接走免费购买路径（0 元记录）并激活；
+// 模块 install_source 为空（本地预置），购买/激活均无 VIP 门禁。
+func SearchWebSKUs(repo *repository.AgentRepo, logger *zap.Logger) error {
+	adminID := "00000000-0000-0000-0000-000000000000"
+	now := time.Now()
+	items := []*model.AgentItem{
+		{
+			ID:            "search-web-baidu",
+			Name:          "百度千帆搜索",
+			Description:   "基于本地 search-web 模块的百度千帆 AI 搜索（需在秘技卡片配置百度千帆 API Key）",
+			Category:      "搜索",
+			PriceDanwan:   0,
+			PriceElegant:  nil,
+			Status:        model.AgentStatusApproved,
+			Level:         model.AgentLevelHuang,
+			CreatorID:     adminID,
+			CreatorName:   "官方",
+			CreatedAt:     now,
+			ManifestJSON:  loadManifestJSON("search-web/skus/baidu.json", logger),
+		},
+		{
+			ID:            "search-web-bing",
+			Name:          "必应搜索",
+			Description:   "基于本地 search-web 模块的必应（Bing）网页搜索（需在秘技卡片配置 Bing Search API Key）",
+			Category:      "搜索",
+			PriceDanwan:   0,
+			PriceElegant:  nil,
+			Status:        model.AgentStatusApproved,
+			Level:         model.AgentLevelHuang,
+			CreatorID:     adminID,
+			CreatorName:   "官方",
+			CreatedAt:     now,
+			ManifestJSON:  loadManifestJSON("search-web/skus/bing.json", logger),
+		},
+	}
+
+	created, synced := 0, 0
+	for _, item := range items {
+		existing, err := repo.GetByID(item.ID)
+		if err == nil && existing != nil {
+			if shouldSyncManifest(existing.ManifestJSON, item.ManifestJSON) {
+				existing.ManifestJSON = item.ManifestJSON
+				if err := repo.Update(existing); err != nil {
+					logger.Warn("同步 SearchWeb SKU manifest 失败", zap.String("id", item.ID), zap.Error(err))
+				} else {
+					synced++
+				}
+			}
+			continue
+		}
+		if err := repo.Create(item); err != nil {
+			return err
+		}
+		created++
+	}
+
+	logger.Info("已预置 SearchWeb 官方搜索秘技", zap.Int("created", created), zap.Int("synced", synced))
+	return nil
+}
+
 // shouldSyncManifest 判断是否需要用 marketplace 文件中的 manifest 覆盖数据库值。
 // 仅当文件加载成功（非空、非 "{}"）且与数据库内容不一致时才覆盖：
 // 既能让历史预置的旧 manifest 自动补齐后续新增字段（如 credentials），
@@ -255,8 +317,13 @@ func shouldSyncManifest(existing, fromFile string) bool {
 	return strings.TrimSpace(existing) != strings.TrimSpace(fromFile)
 }
 
-// loadManifestJSON 从 marketplace 目录加载指定 SKU 的 ToolManifest 原始 JSON。
+// loadManifestJSON 加载指定 SKU 的 ToolManifest 原始 JSON。
+// 优先从内嵌的 marketplace.FS 读取（relativePath 形如 search-web/skus/baidu.json，
+// 单文件二进制分发时无磁盘 marketplace 目录也可用），失败再回退文件系统候选路径。
 func loadManifestJSON(relativePath string, logger *zap.Logger) string {
+	if data, err := marketplace.FS.ReadFile(relativePath); err == nil {
+		return string(data)
+	}
 	candidates := []string{
 		filepath.Join("marketplace", relativePath),
 		filepath.Join("..", "marketplace", relativePath),

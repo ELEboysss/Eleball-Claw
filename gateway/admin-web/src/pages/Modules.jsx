@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { moduleApi, clawMarketApi } from '../api/client'
+import DockerMissingBanner from '../components/DockerMissingBanner'
 
 // capabilities 后端以 JSON 字符串存储/返回，解析为数组（兼容已为数组的形态）
 function parseCapabilities(raw) {
@@ -64,9 +65,9 @@ export default function Modules() {
     }
   }
 
-  // P4：安装云端已购模块到本地（官方预置直接激活；第三方拉镜像+签名校验）
+  // P4：安装云端已购模块到本地（均需 VIP1+；官方直接激活预置，第三方拉镜像+签名校验）
   const handleInstall = async (meta) => {
-    if (!window.confirm(`确定安装模块 ${meta.module_id} 到本地？${meta.official ? '（官方预置，直接激活）' : '（第三方，将拉取容器镜像并校验签名，需 Docker/Podman）'}`)) return
+    if (!window.confirm(`确定安装模块 ${meta.module_id} 到本地？（需 VIP1 及以上）${meta.official ? '（官方秘技，直接激活预置）' : '（第三方，将拉取容器镜像并校验签名，需 Docker/Podman）'}`)) return
     setInstalling(meta.module_id)
     setError('')
     try {
@@ -235,6 +236,9 @@ export default function Modules() {
           {loading ? '扫描中...' : '扫描 Marketplace'}
         </button>
       </div>
+
+      {/* Docker 缺失引导横幅：未安装 Docker 时提示安装指引，可关闭（存 localStorage） */}
+      <DockerMissingBanner />
 
       {error && <div className="rounded-xl bg-red-50 text-red-600 px-4 py-3 text-sm">{error}</div>}
 

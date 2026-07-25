@@ -41,7 +41,24 @@ func (l *AgentToolLoader) LoadToolsForUser(ctx context.Context, userID string) (
 	if err != nil {
 		return nil, err
 	}
+	return l.buildTools(items), nil
+}
 
+// LoadToolsForUserFiltered 同上，但仅加载指定秘技 ID 集合内的工具（助手组合过滤用）。
+// 空集合直接返回空工具列表（不注入动态工具，不报错）。
+func (l *AgentToolLoader) LoadToolsForUserFiltered(ctx context.Context, userID string, agentIDs []string) ([]*Tool, error) {
+	if len(agentIDs) == 0 {
+		return []*Tool{}, nil
+	}
+	items, err := l.agentRepo.ListPurchasedExecutableToolsFiltered(userID, agentIDs)
+	if err != nil {
+		return nil, err
+	}
+	return l.buildTools(items), nil
+}
+
+// buildTools 将秘技条目转换为 Tool 列表（跳过未上架/模块离线/manifest 解析失败的项）
+func (l *AgentToolLoader) buildTools(items []*model.AgentItem) []*Tool {
 	tools := make([]*Tool, 0, len(items))
 	for _, item := range items {
 		if item.Status != model.AgentStatusApproved {
@@ -68,7 +85,7 @@ func (l *AgentToolLoader) LoadToolsForUser(ctx context.Context, userID string) (
 			tools = append(tools, tool)
 		}
 	}
-	return tools, nil
+	return tools
 }
 
 // buildTool 将 AgentItem 转换为 Tool

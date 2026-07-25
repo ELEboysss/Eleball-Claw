@@ -261,16 +261,35 @@ func (r *AgentRepo) IncrementElegantBalance(userID string, amount int64) error {
 // ListPurchasedExecutableTools 查询用户已购买且处于激活状态的可执行秘技（driver != none）
 func (r *AgentRepo) ListPurchasedExecutableTools(userID string) ([]*model.AgentItem, error) {
 	var items []*model.AgentItem
-	err := r.db.Table("agent_items").
+	err := r.purchasedExecutableToolsQuery(userID).
+		Order("agent_purchases.created_at DESC").
+		Find(&items).Error
+	return items, err
+}
+
+// ListPurchasedExecutableToolsFiltered 同上，但限定在指定秘技 ID 集合内（助手组合过滤用）。
+// 空集合直接返回空，不查库。
+func (r *AgentRepo) ListPurchasedExecutableToolsFiltered(userID string, agentIDs []string) ([]*model.AgentItem, error) {
+	if len(agentIDs) == 0 {
+		return []*model.AgentItem{}, nil
+	}
+	var items []*model.AgentItem
+	err := r.purchasedExecutableToolsQuery(userID).
+		Where("agent_items.id IN ?", agentIDs).
+		Order("agent_purchases.created_at DESC").
+		Find(&items).Error
+	return items, err
+}
+
+// purchasedExecutableToolsQuery 已购买+已激活+approved+manifest 非空的公共查询
+func (r *AgentRepo) purchasedExecutableToolsQuery(userID string) *gorm.DB {
+	return r.db.Table("agent_items").
 		Joins("JOIN agent_purchases ON agent_purchases.agent_id = agent_items.id").
 		Joins("JOIN agent_user_tools ON agent_user_tools.agent_id = agent_items.id AND agent_user_tools.user_id = ?", userID).
 		Where("agent_purchases.buyer_id = ?", userID).
 		Where("agent_user_tools.active = ?", true).
 		Where("agent_items.status = ?", model.AgentStatusApproved).
-		Where("agent_items.manifest_json IS NOT NULL AND agent_items.manifest_json != ''").
-		Order("agent_purchases.created_at DESC").
-		Find(&items).Error
-	return items, err
+		Where("agent_items.manifest_json IS NOT NULL AND agent_items.manifest_json != ''")
 }
 
 // CreateUserTool 创建用户已激活的动态工具记录

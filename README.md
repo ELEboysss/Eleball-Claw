@@ -33,6 +33,16 @@ Eleball-claw 把 AI agent 能力运行到本地设备（Windows / Linux 优先�
 | P5 | ✅ 双轨通道：LAN mDNS + E2E 加密中继 + auto 选择（P2P 打洞评估后暂不做） |
 | P6 | ✅ install 脚本（对接云端网关 release 端点）+ 文档 + E2E 验证 |
 
+### ✅ 技能页云端秘技全流程（claw_skills_20260724）
+- **技能页云端+本地合并**：web 技能页（`/agents`）登录态拉云端 `GET /v1/market/modules/installed`（claw_skills_20260724 起云端正式实现，契约见 `specs/api-schema.yml` `ModuleInstallMeta` 含 `agent_id`），云端已购未安装秘技以徽章卡片合并展示。
+- **下载/安装 VIP 门禁**：技能页「下载到本地」直调 `/v1/claw-console/modules/install`；凡云端来源秘技（无论 official）均需云端 VIP1+（后端 4002 兜底，前端前置提示 + 升级引导）；claw 本地扫描/内置秘技（如 SearchWeb）不经过此接口，天然豁免。
+- **安装即落库闭环**：安装成功后本地自动 upsert 驱动映射 + `AgentItem`（approved）+ 购买记录（`EnsureCloudAgentProvision`），云端购买的秘技可直接在技能页激活。
+- **激活应用到 Agent 模式**：激活 toggle（凡云端安装来源 `install_source=cloud-purchased`，含官方模块，均需 VIP1+；本地内置秘技免门控）后，下次 `/v1/agent/execute` 由 `AgentToolLoader` 自动载入该秘技工具，无需重启。
+
+### ✅ 本地预置 SKU 与助手（claw_skills_20260724）
+- **本地预置 SearchWeb SKU**：启动时种子 `search-web-baidu`（百度千帆）/ `search-web-bing`（必应）两个免费官方秘技，各声明 `api_key` 凭证（卡片上「配置凭证」填入后由 moduleDriver 注入模块 `params.credentials`，环境变量回退）；本地免费获取走本地 `POST /agents/:id/purchase`（付费 SKU 提示到云端购买）；本地秘技购买/激活不走云端 VIP 门禁。
+- **助手（Assistant）**：`/assistants` 管理页 CRUD「已激活秘技的命名组合」；对话页 AgentSwitch 旁下拉按会话绑定助手；Agent 模式仅加载助手内秘技工具（`assistant_id` 请求值优先、会话绑定回落、缺省为全部已激活）。
+
 ## 目录结构
 
 ```
@@ -115,6 +125,27 @@ eleball-claw module logs stt -f     # 跟踪日志
 
 模块端口固定发布到宿主机（stt 8092 / search-web 8091 / firecrawl 8093 / agent-reach 8094），
 claw（宿主机进程）经 `http://localhost:<端口>` 调用；启动后约 1 分钟内控制台「本地模块」自动转在线。
+
+**随 serve 自动上下线（默认开启，claw_skills_20260724）**：`serve` 启动后后台自动上线所有含
+docker-compose.yml 的预置模块——**拉镜像优先**：先 `docker pull <registry>/<模块名>:<image_tag>`
+（默认指向 CI 推送的阿里云 ACR `develop` 滚动标签），成功后 `docker compose up -d` 复用已拉镜像；
+拉取失败（离线/未推镜像）自动回退 `docker compose up -d --build` 本地构建兜底，不阻塞网关启动；
+无 docker 仅告警跳过，网关照常运行。收到退出信号（Ctrl+C / SIGTERM / 关闭控制台窗口）时自动
+`docker compose down` 本网关启动的模块。与手动 `module up/down` 使用同一 compose project 命名，幂等共存。
+可用配置调整：
+
+```yaml
+modules:
+  auto_start: true   # MODULES_AUTO_START
+  auto_stop: true    # MODULES_AUTO_STOP
+  registry: crpi-2tmk9w177nykk4zb.cn-hangzhou.personal.cr.aliyuncs.com/eleball  # MODULES_REGISTRY
+  image_tag: develop # MODULES_IMAGE_TAG
+  pull_policy: pull_first  # MODULES_PULL_POLICY：pull_first（拉取优先、构建兜底）/ build_only（仅构建）/ pull_only（仅拉取）
+```
+
+> 注意：compose 文件中的 `image:` 字段与上述默认 registry/tag 对齐；若自行修改 `modules.registry`
+> 或 `modules.image_tag`，需同步修改各模块 `docker-compose.yml` 的 `image:`，否则 compose 会按文件内的
+> 镜像名另拉/另建。本地控制台可通过 `GET /v1/claw-console/system/status` 查询 docker/compose 可用性。
 
 ## 与云端 eleball 的关系
 

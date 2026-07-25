@@ -1,0 +1,41 @@
+{
+  "$schema": "../../../specs/tool-manifest-schema.json",
+  "id": "com.eleball.tools.search_web.bing",
+  "name": "必应搜索",
+  "description": "基于本地 search-web 模块的必应（Bing）网页搜索。搜索源固定为 bing（provider=bing），使用前需在秘技卡片配置 Bing Search API Key。",
+  "driver": "search_web",
+  "runtime_type": "remote",
+  "category": "搜索",
+  "level": 1,
+  "permissions": ["network"],
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "搜索关键词"
+      },
+      "provider": {
+        "type": "string",
+        "enum": ["bing"],
+        "default": "bing",
+        "description": "搜索源，本秘技固定为 bing（必应），无需修改"
+      }
+    },
+    "required": ["query"]
+  },
+  "actions": [
+    { "name": "search", "description": "按关键词搜索互联网内容（必应）" }
+  ],
+  "metadata": { "module": "search-web" },
+  "credentials": {
+    "bing_search_api_key": {
+      "type": "api_key",
+      "label": "Bing Search API Key",
+      "description": "Bing Web Search API 的订阅密钥。获取入口：Microsoft Azure Portal → 创建 Bing Search 资源 → 「密钥和终结点」中复制密钥。",
+      "placeholder": "粘贴 Bing Search 订阅密钥",
+      "required": true
+    }
+  },
+  "timeout_seconds": 30
+}

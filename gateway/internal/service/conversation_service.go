@@ -165,7 +165,9 @@ type UpdateConversationReq struct {
 	EnableTools     *bool   `json:"enable_tools,omitempty"`
 	EnableWebSearch *bool   `json:"enable_web_search,omitempty"`
 	SearchProvider  *string `json:"search_provider,omitempty"`
-	UpdatedAt       *int64  `json:"updated_at,omitempty"`
+	// AssistantID 会话绑定的助手 ID（空字符串 = 清除绑定）
+	AssistantID *string `json:"assistant_id,omitempty"`
+	UpdatedAt   *int64  `json:"updated_at,omitempty"`
 }
 
 // Update 更新对话元数据（带简单冲突检测：客户端 updated_at 小于服务端时拒绝）
@@ -196,6 +198,9 @@ func (s *ConversationService) Update(ctx context.Context, id, userID string, req
 	}
 	if req.SearchProvider != nil {
 		updates["search_provider"] = *req.SearchProvider
+	}
+	if req.AssistantID != nil {
+		updates["assistant_id"] = *req.AssistantID
 	}
 	return s.repo.UpdateFields(id, updates)
 }

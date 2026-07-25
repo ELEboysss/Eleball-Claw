@@ -192,16 +192,25 @@ func (h *ModuleHandler) InstallModule(c *gin.Context) {
 		return
 	}
 
-	// 云端第三方模块（official=false）拉取安装需 VIP1+；official=true 与本地预置合并免门控。
-	if !meta.Official {
-		if !requireCloudVIP1(c, h.cloudAccount) {
-			return
-		}
+	// 凡云端来源模块（经 /market/modules/installed 拉取，无论 official）安装均需 VIP1+。
+	// claw 本地扫描/内置秘技（如 SearchWeb）不经过此接口，天然豁免。
+	if !requireCloudVIP1(c, h.cloudAccount) {
+		return
 	}
 
 	record, err := h.moduleService.InstallFromCloudMeta(meta)
 	if err != nil {
 		h.logger.Warn("模块安装失败", zap.String("module_id", meta.ModuleID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 3001, "message": err.Error()})
+		return
+	}
+
+	// 安装成功后补齐本地秘技数据：upsert AgentItem + 幂等写入当前用户的购买记录，
+	// 否则技能页无本地数据且 ToggleAgentActive 会因「未购买」拒绝激活。
+	userIDVal, _ := c.Get("user_id")
+	userID, _ := userIDVal.(string)
+	if err := h.moduleService.EnsureCloudAgentProvision(meta, userID); err != nil {
+		h.logger.Warn("云端秘技本地落库失败", zap.String("module_id", meta.ModuleID), zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 3001, "message": err.Error()})
 		return
 	}

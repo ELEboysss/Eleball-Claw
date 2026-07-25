@@ -63,6 +63,21 @@ agent_reach:
   probe_interval: 5m
   proxy: ""
 
+modules:
+  # 预置模块（marketplace 下含 docker-compose.yml 者）随 serve 自动上下线。
+  # auto_start：启动后后台自动上线（拉镜像优先、本地构建兜底，不阻塞网关；无 docker 仅告警跳过）
+  # auto_stop：收到退出信号时 docker compose down 本网关启动的模块
+  auto_start: true
+  auto_stop: true
+  # 镜像命名空间前缀（env MODULES_REGISTRY），与 CI build-modules 推送的阿里云 ACR 一致；
+  # 自行修改时需同步调整各模块 docker-compose.yml 的 image 字段
+  registry: crpi-2tmk9w177nykk4zb.cn-hangzhou.personal.cr.aliyuncs.com/eleball
+  # 镜像标签（env MODULES_IMAGE_TAG），与 CI 滚动标签一致
+  image_tag: develop
+  # 上线策略（env MODULES_PULL_POLICY）：
+  #   pull_first（默认）先 docker pull，失败回退本地构建；build_only 仅本地构建；pull_only 仅拉镜像、失败不回退
+  pull_policy: pull_first
+
 admin:
   enabled: false
   ip_whitelist_enabled: false

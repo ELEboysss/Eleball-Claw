@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import useSEO from '../hooks/useSEO'
 import { useAuth } from '../context/AuthContext'
-import { agentMarketApi, billingApi } from '../api/client'
+import { agentMarketApi, billingApi, clawMarketApi } from '../api/client'
 import {
   Search,
   Star,
@@ -20,9 +20,11 @@ import {
   Settings,
   Cloud,
   CloudOff,
+  CloudDownload,
   AlertCircle
 } from 'lucide-react'
 import LoginModal from '../components/LoginModal'
+import DockerMissingBanner from '../components/DockerMissingBanner'
 
 const levelNames = {
   1: '黄阶秘技',
@@ -75,6 +77,9 @@ export default function AgentMarket() {
   const [confirmAgent, setConfirmAgent] = useState(null)
   const [confirmLoading, setConfirmLoading] = useState(false)
   const [togglingId, setTogglingId] = useState(null)
+  // 云端已购秘技（ModuleInstallMeta 列表）与安装中 module_id
+  const [cloudMetas, setCloudMetas] = useState([])
+  const [installingId, setInstallingId] = useState(null)
 
   // 加载能力开关与余额
   useEffect(() => {
@@ -106,6 +111,20 @@ export default function AgentMarket() {
       })
       .catch((err) => setMessage(err.message || '加载失败'))
       .finally(() => setLoading(false))
+    // 并行拉取云端已购秘技（未登录/失败静默降级，只显示本地）
+    loadCloudMetas()
+  }
+
+  // 拉取云端已购秘技元数据，用于合并展示「云端已购·未安装」卡片
+  const loadCloudMetas = () => {
+    if (!isLoggedIn) {
+      setCloudMetas([])
+      return
+    }
+    clawMarketApi
+      .listInstalledModules()
+      .then((d) => setCloudMetas(d?.items || d || []))
+      .catch(() => {})
   }
 
   const loadPurchasedAgents = () => {
@@ -118,16 +137,68 @@ export default function AgentMarket() {
       .catch(() => {})
   }
 
+  // 解析本地秘技 manifest 中声明的模块 ID（用于与云端已购列表去重）
+  const parseManifestModuleId = (agent) => {
+    try {
+      const manifest = typeof agent.manifest_json === 'string' ? JSON.parse(agent.manifest_json) : agent.manifest_json
+      return manifest?.metadata?.module || ''
+    } catch {
+      return ''
+    }
+  }
+
+  // 把云端 ModuleInstallMeta 合成为与本地卡片同构的展示对象（卡片数据来自 meta + meta.manifest）
+  const metaToCloudCard = (meta) => {
+    let manifest = meta.manifest
+    if (typeof manifest === 'string') {
+      try {
+        manifest = JSON.parse(manifest)
+      } catch {
+        manifest = null
+      }
+    }
+    return {
+      id: meta.agent_id || meta.module_id,
+      name: manifest?.name || meta.name || meta.module_id,
+      description: manifest?.description || meta.description || '',
+      category: manifest?.category || '',
+      level: manifest?.level || 1,
+      price_danwan: 0,
+      avg_rating: 0,
+      active_count: 0,
+      creator_name: meta.official ? '官方' : '第三方',
+      // 云端已购·未安装标记，渲染「下载到本地」按钮
+      cloud_not_installed: true,
+      cloud_meta: meta
+    }
+  }
+
+  // 本地列表 + 云端已购未安装合并：本地已有同 agent_id 或同 module_id 的秘技时去重
+  const displayAgents = useMemo(() => {
+    const localIds = new Set(agents.map((a) => a.id))
+    const localModuleIds = new Set(agents.map((a) => parseManifestModuleId(a)).filter(Boolean))
+    const cloudCards = cloudMetas
+      .filter((m) => {
+        const aid = m.agent_id || m.module_id
+        if (localIds.has(aid)) return false
+        if (m.module_id && localModuleIds.has(m.module_id)) return false
+        return true
+      })
+      .map(metaToCloudCard)
+      .filter((c) => category === '全部' || !c.category || c.category === category)
+    return [...agents, ...cloudCards]
+  }, [agents, cloudMetas, category])
+
   const filteredAgents = useMemo(() => {
-    if (!keyword.trim()) return agents
+    if (!keyword.trim()) return displayAgents
     const k = keyword.toLowerCase()
-    return agents.filter(
+    return displayAgents.filter(
       (a) =>
         (a.name || '').toLowerCase().includes(k) ||
         (a.description || '').toLowerCase().includes(k) ||
         (a.category || '').toLowerCase().includes(k)
     )
-  }, [agents, keyword])
+  }, [displayAgents, keyword])
 
   const parseManifestCredentials = (agent) => {
     try {
@@ -180,16 +251,53 @@ export default function AgentMarket() {
     setConfirmLoading(true)
     setMessage('')
     try {
-      await agentMarketApi.purchase(confirmAgent.id, currency)
-      setPurchasedIds((prev) => new Set([...prev, confirmAgent.id]))
-      setMessage(`购买成功：${confirmAgent.name}`)
+      if (confirmAgent.cloud_not_installed) {
+        // 云端卡片：走云端购买（云端账户扣费）
+        await agentMarketApi.purchase(confirmAgent.id, currency)
+        setPurchasedIds((prev) => new Set([...prev, confirmAgent.id]))
+        setMessage(`购买成功：${confirmAgent.name}，可下载到本地安装`)
+      } else {
+        // 本地卡片：走本地购买（仅免费 SKU 会成功，付费 SKU 由后端返回提示）
+        await agentMarketApi.purchaseLocal(confirmAgent.id, currency)
+        setPurchasedIds((prev) => new Set([...prev, confirmAgent.id]))
+        setMessage(`领取成功：${confirmAgent.name}，可在卡片上激活使用`)
+      }
       setConfirmAgent(null)
       loadAgents()
+      loadCloudMetas()
       billingApi.getBalance().then(setBalance).catch(() => {})
     } catch (err) {
       setMessage(err.message || '购买失败')
     } finally {
       setConfirmLoading(false)
+    }
+  }
+
+  // 下载/安装云端已购秘技到本地：凡云端来源（无论 official）均需 VIP1+；第三方另需 Docker/Podman
+  const handleInstall = async (meta) => {
+    const isVip = (user?.vip_level ?? 0) >= 1
+    let hint = meta.official
+      ? '（官方秘技，安装后直接激活，需 VIP1 及以上）'
+      : '（第三方秘技，将拉取容器镜像并校验签名，需 Docker/Podman，且需 VIP1 及以上）'
+    // 前置提示升级 VIP，但不阻断（后端 4002 兜底）
+    if (!isVip) {
+      hint += '\n检测到当前账号未开通 VIP，安装可能被拒绝，建议先升级 VIP。'
+    }
+    if (!window.confirm(`确定下载并安装「${meta.name || meta.module_id}」到本地？${hint}`)) return
+    setInstallingId(meta.module_id)
+    setMessage('')
+    try {
+      await clawMarketApi.installModule(meta)
+      setMessage(`${meta.name || meta.module_id} 安装成功，可在卡片上激活使用`)
+      loadAgents()
+    } catch (err) {
+      if (err.code === 4002) {
+        setMessage(`${err.message || '该云端秘技需 VIP1 及以上'}，请升级 VIP 后重试`)
+      } else {
+        setMessage(err.message || '安装失败')
+      }
+    } finally {
+      setInstallingId(null)
     }
   }
 
@@ -218,7 +326,12 @@ export default function AgentMarket() {
       )
       setMessage(`${agent.name} 已${active ? '激活' : '取消激活'}`)
     } catch (err) {
-      setMessage(err.message || '切换激活状态失败')
+      // 云端来源秘技激活的 VIP1+ 门禁（code=4002）：展示升级引导
+      if (err.code === 4002) {
+        setMessage(`${err.message || '该云端秘技需 VIP1 及以上'}，请升级 VIP 后重试`)
+      } else {
+        setMessage(err.message || '切换激活状态失败')
+      }
     } finally {
       setTogglingId(null)
     }
@@ -267,6 +380,9 @@ export default function AgentMarket() {
           {filter === 'owned' ? '你已购买和激活的秘技' : 'agent模式下可使用的skills及MCP工具'}
         </p>
       </div>
+
+      {/* Docker 缺失引导横幅：未安装 Docker 时提示安装指引，可关闭（存 localStorage） */}
+      <DockerMissingBanner />
 
       {/* claw 未登录提示：仅展示本地自部署模块与驱动，登录后可拉取云端已购秘技 */}
       {!isLoggedIn && (
@@ -407,6 +523,12 @@ export default function AgentMarket() {
                   <Icon className="w-6 h-6 text-eleball-primary" />
                 </div>
                 <div className="flex items-center gap-2">
+                  {agent.cloud_not_installed && (
+                    <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-sky-50 text-sky-600 flex items-center gap-1" title="云端已购，下载安装到本地后可激活使用">
+                      <CloudDownload className="w-3 h-3" />
+                      云端已购·未安装
+                    </span>
+                  )}
                   {agent.driver_registered === false && (
                     <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-orange-50 text-orange-600 flex items-center gap-1" title="该秘技依赖的驱动别名尚未注册，暂不可购买/领取">
                       <AlertCircle className="w-3 h-3" />
@@ -467,7 +589,9 @@ export default function AgentMarket() {
 
               <div className="mt-auto flex items-center justify-between gap-3">
                 <div className="text-sm">
-                  {agent.price_danwan === 0 ? (
+                  {agent.cloud_not_installed ? (
+                    <span className="text-sky-600 font-medium">云端已购</span>
+                  ) : agent.price_danwan === 0 ? (
                     <span className="text-emerald-600 font-medium">免费</span>
                   ) : (
                     <span className="font-bold text-eleball-text">
@@ -480,7 +604,26 @@ export default function AgentMarket() {
                     </span>
                   )}
                 </div>
-                {isPurchased && agent.manifest_json ? (
+                {agent.cloud_not_installed ? (
+                  <button
+                    onClick={() => handleInstall(agent.cloud_meta)}
+                    disabled={installingId === agent.cloud_meta?.module_id}
+                    className="btn-primary text-sm px-4 py-2 flex items-center gap-1.5 disabled:opacity-50"
+                    title={agent.cloud_meta?.official ? '官方秘技，需 VIP1 及以上' : '第三方秘技，需 Docker/Podman 且需 VIP1 及以上'}
+                  >
+                    {installingId === agent.cloud_meta?.module_id ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        安装中...
+                      </>
+                    ) : (
+                      <>
+                        <CloudDownload className="w-3.5 h-3.5" />
+                        下载到本地
+                      </>
+                    )}
+                  </button>
+                ) : isPurchased && agent.manifest_json ? (
                   <label className={`inline-flex items-center gap-2 px-3 py-2 rounded-full text-xs font-medium transition-colors ${agent.driver_registered === false ? 'cursor-not-allowed bg-gray-100 text-gray-400' : 'cursor-pointer ' + (agent.is_active ? 'bg-emerald-50 text-emerald-600' : 'bg-eleball-surface-variant text-eleball-text-secondary')}`}>
                     <input
                       type="checkbox"

@@ -74,7 +74,7 @@ type ModuleRecord struct {
 	ImageRef       string `json:"image_ref,omitempty"`                              // 完整镜像引用 registry/repo@digest 或 registry/repo:tag
 	ImageDigest    string `json:"image_digest,omitempty"`                            // 镜像 sha256 摘要（内容寻址，防篡改）
 	Signature      string `json:"signature,omitempty"`                              // cosign/sigstore 签名（校验通过方可激活）
-	InstallSource  string `json:"install_source,omitempty"`                         // 安装来源：cloud-purchased / local / preset
+	InstallSource  string `json:"install_source,omitempty"`                         // 安装来源：cloud-purchased（云端安装，含官方，激活需 VIP1+）/ local；本地扫描预置为空
 	// 以下字段不在数据库中，由实时健康探测填充
 	HealthError    string              `gorm:"-" json:"error,omitempty"`
 }

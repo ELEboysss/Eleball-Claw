@@ -19,10 +19,26 @@ type AppConfig struct {
 	Release     ReleaseConfig    `mapstructure:"release"`
 	Agent       AgentConfig      `mapstructure:"agent"`
 	AgentReach  AgentReachConfig `mapstructure:"agent_reach"`
+	Modules     ModulesConfig    `mapstructure:"modules"`
 	Admin       AdminConfig      `mapstructure:"admin"`
 	AdminGate   AdminGateConfig  `mapstructure:"admin_gate"`
 	Payment     PaymentConfig    `mapstructure:"payment"`
 	Mail        MailConfig        `mapstructure:"mail"`
+}
+
+// ModulesConfig 预置模块生命周期配置（claw 本地网关）
+// auto_start：serve 启动后后台自动上线预置模块（拉镜像优先，本地构建兜底，不阻塞网关启动）；
+// auto_stop：serve 收到退出信号时自动 docker compose down 由本网关启动的模块。
+// docker 不可用时仅告警跳过，不影响网关本身运行。
+type ModulesConfig struct {
+	AutoStart bool `mapstructure:"auto_start"`
+	AutoStop  bool `mapstructure:"auto_stop"`
+	// Registry 镜像命名空间前缀（默认阿里云 ACR，与 CI build-modules 推送目标一致）
+	Registry string `mapstructure:"registry"`
+	// ImageTag 镜像标签（默认 develop，与 CI 滚动标签一致）
+	ImageTag string `mapstructure:"image_tag"`
+	// PullPolicy 上线策略：pull_first（拉镜像优先、构建兜底）/ build_only（仅本地构建）/ pull_only（仅拉镜像）
+	PullPolicy string `mapstructure:"pull_policy"`
 }
 
 // MailConfig 邮件发送配置（用于邮箱验证码登录 OTP 发送）。
@@ -195,6 +211,15 @@ func Load(path string) (*AppConfig, error) {
 	viper.SetDefault("admin_gate.fail_lock_count", 20)
 	viper.SetDefault("admin_gate.fail_lock_minutes", 30)
 
+	// 预置模块生命周期：默认随 serve 自动上线/下线（无 docker 时仅告警跳过）
+	viper.SetDefault("modules.auto_start", true)
+	viper.SetDefault("modules.auto_stop", true)
+	// 预置模块镜像：默认拉取阿里云 ACR 的 develop 滚动标签（与 CI build-modules 推送一致），
+	// 拉镜像优先、本地构建兜底（pull_first）
+	viper.SetDefault("modules.registry", "crpi-2tmk9w177nykk4zb.cn-hangzhou.personal.cr.aliyuncs.com/eleball")
+	viper.SetDefault("modules.image_tag", "develop")
+	viper.SetDefault("modules.pull_policy", "pull_first")
+
 	// 允许通过环境变量覆盖关键配置，便于 Docker/脚本部署
 	// jwt.secret 绑定 JWT_SECRET：claw 与云端共享 JWT 密钥，部署时注入云端 JWT_SECRET，
 	// 即可让 claw-server 直验云端签发的 JWT（统一账户，无需 introspection）。
@@ -217,6 +242,11 @@ func Load(path string) (*AppConfig, error) {
 	_ = viper.BindEnv("agent_reach.health_check_interval", "AGENT_REACH_HEALTH_CHECK_INTERVAL")
 	_ = viper.BindEnv("agent_reach.probe_interval", "AGENT_REACH_PROBE_INTERVAL")
 	_ = viper.BindEnv("agent_reach.proxy", "AGENT_REACH_PROXY")
+	_ = viper.BindEnv("modules.auto_start", "MODULES_AUTO_START")
+	_ = viper.BindEnv("modules.auto_stop", "MODULES_AUTO_STOP")
+	_ = viper.BindEnv("modules.registry", "MODULES_REGISTRY")
+	_ = viper.BindEnv("modules.image_tag", "MODULES_IMAGE_TAG")
+	_ = viper.BindEnv("modules.pull_policy", "MODULES_PULL_POLICY")
 	_ = viper.BindEnv("admin.enabled", "ADMIN_ENABLED")
 	_ = viper.BindEnv("admin.ip_whitelist_enabled", "ADMIN_IP_WHITELIST_ENABLED")
 	_ = viper.BindEnv("admin.allowed_ips", "ADMIN_ALLOWED_IPS")

@@ -11,6 +11,8 @@ type ChatConversation struct {
 	EnableTools     bool   `gorm:"default:false" json:"enable_tools"`
 	EnableWebSearch bool   `gorm:"default:false" json:"enable_web_search"`
 	SearchProvider  string `gorm:"size:32;default:'baidu'" json:"search_provider"`
+	// AssistantID 会话绑定的助手 ID（空 = 不指定助手，Agent 执行注入全部已激活秘技）
+	AssistantID string `gorm:"size:64" json:"assistant_id,omitempty"`
 	DiskPath        string `gorm:"type:text" json:"-"`
 	CreatedAt    int64     `gorm:"not null" json:"created_at"`
 	UpdatedAt    int64     `gorm:"index:idx_chat_conv_user_updated;not null" json:"updated_at"`

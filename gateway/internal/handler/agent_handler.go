@@ -109,7 +109,7 @@ func (h *AgentHandler) ToggleAgentActive(c *gin.Context) {
 	userIDVal, _ := c.Get("user_id")
 	userID, _ := userIDVal.(string)
 	agentID := c.Param("id")
-	// 云端来源秘技（cloud-purchased）激活需 VIP1+；本地扫描/official 免门控
+	// 云端来源秘技（cloud-purchased，含官方模块）激活需 VIP1+；claw 本地扫描/内置秘技免门控
 	if h.agentService.IsCloudPurchasedAgent(agentID) {
 		if !requireCloudVIP1(c, h.cloudAccount) {
 			return

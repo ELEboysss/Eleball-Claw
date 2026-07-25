@@ -21,7 +21,7 @@ import (
 // 与云端 NewRouter 的差异（§B.3 路由改造）：
 //   - 删除 /v1/admin/* 全部管理后台路由，改为 /v1/claw-console/* 本地控制台（最小集，P3 扩充）。
 //   - 删除计费/支付/订单/充值套餐/CDK/VIP 套餐/提现/admin gate 路由（claw 本地不计费、无交易、无前置闸门）。
-//   - 删除 /agents/:id/purchase 与 /developer/withdrawals（购买与提现走云端 eleball.cn）。
+//   - /agents/:id/purchase 仅放行免费 SKU（本地 0 元记录）；付费秘技由 service 拒绝并引导云端购买；/developer/withdrawals 仍删除。
 //   - 保留对话/视觉/Agent 工作流/集市模块/对话历史/同步/模型列表/STT/凭证/秘技审核提交。
 //
 // claw 本地网关注入 nil billing，chat/agent/visual/eleagent 流程均 nil 检查后跳过计费（本地不计费，
@@ -45,6 +45,8 @@ func NewClawRouter(
 	cloudAccount *service.CloudAccountService,
 	adminEleAgentModelHandler *handler.AdminEleAgentModelHandler,
 	adminSettingHandler *handler.AdminSettingHandler,
+	assistantHandler *handler.AssistantHandler,
+	systemHandler *handler.SystemHandler,
 ) *gin.Engine {
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
@@ -142,10 +144,12 @@ func NewClawRouter(
 			}
 
 			// 秘技集市（本地 + 云端拉取合并展示，P2 实现登录态拉云端）
-			// 注意：不含 /agents/:id/purchase（购买走云端 eleball.cn）与 /developer/withdrawals（提现走云端）
+			// 注意：/agents/:id/purchase 仅放行免费 SKU（0 元本地记录），付费秘技由 service 拒绝并引导云端购买；
+			// 不含 /developer/withdrawals（提现走云端）
 			auth.GET("/agents", agentHandler.ListAgents)
 			auth.GET("/agents/:id", agentHandler.GetAgent)
 			auth.POST("/agents", agentHandler.CreateAgent)
+			auth.POST("/agents/:id/purchase", agentHandler.PurchaseAgent)
 			auth.POST("/agents/:id/active", agentHandler.ToggleAgentActive)
 			auth.GET("/agents/:id/reviews", agentHandler.ListReviews)
 			auth.POST("/agents/:id/reviews", agentHandler.CreateReview)
@@ -161,6 +165,14 @@ func NewClawRouter(
 				auth.POST("/agents/:id/credentials", agentCredentialHandler.Save)
 			}
 
+			// 助手（已激活秘技的命名组合，按会话应用到 Agent 工作流）
+			auth.GET("/assistants", assistantHandler.ListAssistants)
+			auth.POST("/assistants", assistantHandler.CreateAssistant)
+			auth.GET("/assistants/:id", assistantHandler.GetAssistant)
+			auth.PATCH("/assistants/:id", assistantHandler.UpdateAssistant)
+			auth.DELETE("/assistants/:id", assistantHandler.DeleteAssistant)
+			auth.PUT("/assistants/:id/items", assistantHandler.SetAssistantItems)
+
 			// 本地控制台（替代云端 /v1/admin/*）：P3 扩充，仅 JWT 用户登录（无 admin gate / admin auth）。
 			// 复用既有 handler，端点挂到 /claw-console/* 下。
 			console := auth.Group("/claw-console")
@@ -171,6 +183,9 @@ func NewClawRouter(
 
 				// 本地 token 用量统计（P3 细化，替代云端 DAU/收入）
 				console.GET("/stats", clawConsoleHandler.GetStats)
+
+				// 本地系统状态（docker/compose 可用性 + 模块自动上下线开关）
+				console.GET("/system/status", systemHandler.GetSystemStatus)
 
 				// 本地集市模块管理（扫描本地 + 已安装；提交审核走云端）
 				console.GET("/modules", moduleHandler.ListModules)

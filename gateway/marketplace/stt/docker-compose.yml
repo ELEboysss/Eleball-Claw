@@ -6,7 +6,7 @@
 services:
   stt:
     build: .
-    image: registry.eleball.cn/eleball/stt:1.0.0
+    image: crpi-2tmk9w177nykk4zb.cn-hangzhou.personal.cr.aliyuncs.com/eleball/stt:develop
     container_name: eleball-stt
     ports:
       - "8092:8092"

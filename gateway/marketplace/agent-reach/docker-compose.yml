@@ -6,6 +6,9 @@
 services:
   agent-reach:
     build: .
+    # 与 claw 自动上线「拉镜像优先」对齐：image 命名 = <modules.registry>/<模块名>:<modules.image_tag>，
+    # 默认指向 CI 推送的阿里云 ACR develop 滚动标签；保留 build 作为本地构建兜底。
+    image: crpi-2tmk9w177nykk4zb.cn-hangzhou.personal.cr.aliyuncs.com/eleball/agent-reach:develop
     container_name: eleball-agent-reach
     ports:
       - "8094:8080"

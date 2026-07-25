@@ -129,12 +129,41 @@ class SearchResult(BaseModel):
     snippet: str
 
 
+# ====== 凭证读取（对齐 stt 模块模式：params.credentials 优先，环境变量回退）======
+
+def _read_credentials(params: dict[str, Any]) -> dict[str, str]:
+    """读取用户在秘技卡片配置的凭证（网关经 params["credentials"] 注入）。"""
+    creds = params.get("credentials") or {}
+    return {k: str(v) for k, v in creds.items() if v}
+
+
+def _provider_key_available(name: str, credentials: dict[str, str] | None) -> bool:
+    """判定指定源本次调用是否有可用 key：用户凭证优先，环境变量回退。
+
+    list_sources/_is_available 无 SKU 上下文仍按 env 判定；do_search 带每次调用的
+    credentials，故此处单独判定，缺 key 时给出明确的配置引导错误。
+    """
+    creds = credentials or {}
+    if name == "baidu":
+        return bool(creds.get("baidu_api_key") or os.environ.get("BAIDU_API_KEY"))
+    if name == "bing":
+        return bool(creds.get("bing_search_api_key") or os.environ.get("BING_SEARCH_API_KEY"))
+    return _is_available(name)
+
+
+# 缺 key 时的引导文案
+_KEY_MISSING_HINTS = {
+    "baidu": "未配置百度千帆 API Key，请在秘技卡片配置凭证（baidu_api_key）",
+    "bing": "未配置必应 Bing Search API Key，请在秘技卡片配置凭证（bing_search_api_key）",
+}
+
+
 # ====== 各源搜索实现 ======
 
-def _search_baidu(query: str) -> list[SearchResult]:
-    api_key = os.environ.get("BAIDU_API_KEY", "")
+def _search_baidu(query: str, credentials: dict[str, str] | None = None) -> list[SearchResult]:
+    api_key = (credentials or {}).get("baidu_api_key") or os.environ.get("BAIDU_API_KEY", "")
     if not api_key:
-        raise RuntimeError("百度 AI 搜索未配置：未设置 BAIDU_API_KEY")
+        raise RuntimeError(_KEY_MISSING_HINTS["baidu"])
     endpoint = os.environ.get(
         "BAIDU_SEARCH_ENDPOINT",
         "https://qianfan.baidubce.com/v2/ai_search/web_search",
@@ -165,10 +194,10 @@ def _search_baidu(query: str) -> list[SearchResult]:
     return results
 
 
-def _search_bing(query: str) -> list[SearchResult]:
-    api_key = os.environ.get("BING_SEARCH_API_KEY", "")
+def _search_bing(query: str, credentials: dict[str, str] | None = None) -> list[SearchResult]:
+    api_key = (credentials or {}).get("bing_search_api_key") or os.environ.get("BING_SEARCH_API_KEY", "")
     if not api_key:
-        raise RuntimeError("Bing 搜索未配置：未设置 BING_SEARCH_API_KEY")
+        raise RuntimeError(_KEY_MISSING_HINTS["bing"])
     endpoint = os.environ.get(
         "BING_SEARCH_ENDPOINT", "https://api.bing.microsoft.com/v7.0/search"
     )
@@ -235,20 +264,24 @@ def _search_duckduckgo(query: str) -> list[SearchResult]:
     return results
 
 
-def do_search(query: str, provider: str | None = None) -> list[SearchResult]:
-    """按指定源搜索；provider 为空时兜底选第一个可用源（上游应显式传 provider）。"""
+def do_search(query: str, provider: str | None = None,
+              credentials: dict[str, str] | None = None) -> list[SearchResult]:
+    """按指定源搜索；provider 为空时兜底选第一个可用源（上游应显式传 provider）。
+
+    credentials 为本次调用的用户凭证（params["credentials"]），对 baidu/bing
+    等需 key 的源优先生效；缺 key 时返回明确的配置引导错误。
+    """
     name = (provider or _first_available_provider()).lower().strip()
     if not provider:
         logger.info("search 未传 provider，兜底使用 %s；上游应先调 list_sources 显式选源", name)
-    if not _is_available(name):
-        raise HTTPException(
-            status_code=400,
-            detail=f"搜索源 {name} 不可用（未配置凭据），请先调 list_sources 查看可用源",
-        )
+    if not _provider_key_available(name, credentials):
+        hint = _KEY_MISSING_HINTS.get(
+            name, f"搜索源 {name} 不可用（未配置凭据），请先调 list_sources 查看可用源")
+        raise HTTPException(status_code=400, detail=hint)
     if name == "baidu":
-        return _search_baidu(query)
+        return _search_baidu(query, credentials)
     if name == "bing":
-        return _search_bing(query)
+        return _search_bing(query, credentials)
     if name == "searxng":
         return _search_searxng(query)
     if name == "duckduckgo":
@@ -294,7 +327,7 @@ def execute(req: ExecuteRequest) -> dict[str, Any]:
             if not query:
                 raise HTTPException(status_code=400, detail="search 需要参数 query")
             provider = params.get("provider") or params.get("source")
-            results = do_search(str(query), provider)
+            results = do_search(str(query), provider, _read_credentials(params))
             return {"provider": provider or _first_available_provider(), "results": [r.model_dump() for r in results]}
         if action == "fetch":
             url = params.get("url")

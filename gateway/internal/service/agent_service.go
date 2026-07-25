@@ -36,6 +36,7 @@ type AgentService struct {
 	trigger              *AgentTrigger
 	toolLoop             *ToolCallingLoop
 	agentToolLoader      *AgentToolLoader
+	assistantSvc         *AssistantService
 	clientResolver       AgentLLMClientResolver
 	model                string
 	maxSteps             int
@@ -111,6 +112,8 @@ type AgentExecuteRequest struct {
 	EnableTools     *bool             `json:"enable_tools,omitempty"`
 	EnableWebSearch *bool             `json:"enable_web_search,omitempty"`
 	SearchProvider  *string           `json:"search_provider,omitempty"`
+	// AssistantID 本次执行应用的助手（非空优先于会话绑定的 assistant_id）
+	AssistantID string `json:"assistant_id"`
 }
 
 // normalizeRequest 兼容前端可能使用的 content / message 字段
@@ -123,6 +126,11 @@ func (req *AgentExecuteRequest) normalize() {
 // SetAgentToolLoader 设置动态工具加载器（可选）
 func (s *AgentService) SetAgentToolLoader(loader *AgentToolLoader) {
 	s.agentToolLoader = loader
+}
+
+// SetAssistantService 设置助手服务（可选；设置后按请求/会话绑定的助手过滤动态工具）
+func (s *AgentService) SetAssistantService(svc *AssistantService) {
+	s.assistantSvc = svc
 }
 
 // Execute 执行 Agent 工作流
@@ -304,10 +312,26 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	}()
 
 	// 9. 构建可用工具列表（根据联网开关决定是否暴露 SearchWeb / FetchURL）
-	// 克隆注册表并注入用户购买的动态工具，实现集市 SKU 的动态加载
+	// 克隆注册表并注入用户购买的动态工具，实现集市 SKU 的动态加载。
+	// 助手过滤：请求 assistant_id 优先，缺省回落会话绑定值；指定助手时仅注入该助手包含的秘技，
+	// 助手条目为空时不注入任何动态工具（空列表，不报错）；未指定助手则注入全部已激活秘技。
 	var dynamicTools []*Tool
 	if s.agentToolLoader != nil {
-		loaded, loadErr := s.agentToolLoader.LoadToolsForUser(ctx, userID)
+		assistantID := req.AssistantID
+		if assistantID == "" {
+			assistantID = conv.AssistantID
+		}
+		var loaded []*Tool
+		var loadErr error
+		if assistantID != "" && s.assistantSvc != nil {
+			agentIDs, aidErr := s.assistantSvc.AgentIDsFor(userID, assistantID)
+			if aidErr != nil && s.logger != nil {
+				s.logger.Warn("解析助手秘技集合失败", zap.String("assistant_id", assistantID), zap.Error(aidErr))
+			}
+			loaded, loadErr = s.agentToolLoader.LoadToolsForUserFiltered(ctx, userID, agentIDs)
+		} else {
+			loaded, loadErr = s.agentToolLoader.LoadToolsForUser(ctx, userID)
+		}
 		if loadErr != nil && s.logger != nil {
 			s.logger.Warn("加载用户动态工具失败", zap.String("user_id", userID), zap.Error(loadErr))
 		}

@@ -23,6 +23,14 @@ type AgentMarketService struct {
 	moduleRepo      *repository.ModuleRepo
 	db              *gorm.DB
 	agentToolLoader *AgentToolLoader
+	// localFreeOnly=true 时仅允许免费 SKU 本地购买（claw：付费秘技统一引导到云端 eleball.cn 购买）。
+	// 云端 cmd/server 不设置，保持原有余额扣费购买行为。
+	localFreeOnly bool
+}
+
+// SetLocalFreeOnly 设置是否仅允许免费 SKU 本地购买（claw 本地集市用）。
+func (s *AgentMarketService) SetLocalFreeOnly(b bool) {
+	s.localFreeOnly = b
 }
 
 // NewAgentMarketService 创建服务
@@ -51,9 +59,10 @@ func (s *AgentMarketService) SetModuleRepo(repo *repository.ModuleRepo) {
 	s.moduleRepo = repo
 }
 
-// IsCloudPurchasedAgent 判定某秘技是否为云端第三方拉取来源（provenance）。
+// IsCloudPurchasedAgent 判定某秘技是否为云端安装来源（provenance）。
 // 用于 claw 云端秘技激活门控：InstallSource=="cloud-purchased" 的需 VIP1+；
-// 本地扫描 / preset / official 合并的免门控。
+// claw 本地扫描/内置秘技（InstallSource 为空或 local，如 SearchWeb）免门控。
+// 注意：经云端 installed 接口安装的官方模块同样标记 cloud-purchased，不再豁免。
 func (s *AgentMarketService) IsCloudPurchasedAgent(agentID string) bool {
 	if s.moduleRepo == nil {
 		return false
@@ -348,7 +357,7 @@ func (s *AgentMarketService) PurchaseAgent(buyerID string, req PurchaseAgentRequ
 	}
 
 	if price <= 0 {
-		// 免费秘技直接记录
+		// 免费秘技直接记录（claw 本地购买路径：不触碰 billing/余额，nil 安全）
 		purchase := &model.AgentPurchase{
 			ID:              uuid.New().String(),
 			AgentID:         req.AgentID,
@@ -358,7 +367,22 @@ func (s *AgentMarketService) PurchaseAgent(buyerID string, req PurchaseAgentRequ
 			CreatorEarnings: 0,
 			PlatformFee:     0,
 		}
-		return s.agentRepo.CreatePurchase(purchase)
+		if err := s.agentRepo.CreatePurchase(purchase); err != nil {
+			return err
+		}
+		// 对齐付费路径：购买后自动激活动态工具（若该 SKU 携带可执行 manifest）
+		if s.agentToolLoader != nil {
+			_ = s.agentToolLoader.ActivateToolOnPurchase(buyerID, req.AgentID)
+		}
+		// 更新购买计数
+		purchaseCount, _ := s.agentRepo.CountPurchases(req.AgentID)
+		s.agentRepo.UpdateStats(req.AgentID, purchaseCount, agent.AvgRating, agent.FavoriteCount, agent.UseCount+1)
+		return nil
+	}
+
+	// claw 本地集市：付费秘技统一引导到云端 eleball.cn 购买（本地不计费、无余额体系）
+	if s.localFreeOnly {
+		return errors.New("付费秘技请到云端购买")
 	}
 
 	// 扣除购买者余额（弹丸从 user.balance，优雅弹丸从 developer_account）

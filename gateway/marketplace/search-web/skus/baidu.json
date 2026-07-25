@@ -1,0 +1,41 @@
+{
+  "$schema": "../../../specs/tool-manifest-schema.json",
+  "id": "com.eleball.tools.search_web.baidu",
+  "name": "百度千帆搜索",
+  "description": "基于本地 search-web 模块的百度千帆 AI 搜索。搜索源固定为 baidu（provider=baidu），使用前需在秘技卡片配置百度千帆 API Key。",
+  "driver": "search_web",
+  "runtime_type": "remote",
+  "category": "搜索",
+  "level": 1,
+  "permissions": ["network"],
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "搜索关键词"
+      },
+      "provider": {
+        "type": "string",
+        "enum": ["baidu"],
+        "default": "baidu",
+        "description": "搜索源，本秘技固定为 baidu（百度千帆），无需修改"
+      }
+    },
+    "required": ["query"]
+  },
+  "actions": [
+    { "name": "search", "description": "按关键词搜索互联网内容（百度千帆）" }
+  ],
+  "metadata": { "module": "search-web" },
+  "credentials": {
+    "baidu_api_key": {
+      "type": "api_key",
+      "label": "百度千帆 API Key",
+      "description": "百度千帆 AI 搜索的 API Key。获取入口：百度智能云控制台 → 千帆大模型平台 → 应用接入，创建应用后获取 API Key（每日有免费调用额度）。",
+      "placeholder": "粘贴千帆应用 API Key",
+      "required": true
+    }
+  },
+  "timeout_seconds": 30
+}

@@ -106,6 +106,8 @@ export function ChatProvider({ children }) {
             enableTools: !!conv.enable_tools,
             enableWebSearch: !!conv.enable_web_search,
             searchProvider: conv.search_provider || 'baidu',
+            // 会话绑定的助手（空字符串 = 未绑定，使用全部已激活工具）
+            assistantId: conv.assistant_id || '',
             createdAt: conv.created_at,
             updatedAt: conv.updated_at
           }

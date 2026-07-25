@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -55,6 +56,11 @@ type RelayTunnel struct {
 	mu    sync.Mutex // 保护 conn 写
 	stop  chan struct{}
 	done  chan struct{}
+	// started 标记隧道是否真的启动过（Start 在缺配置时直接跳过）；
+	// Stop 仅对已启动的隧道等待 done，否则立即返回，避免优雅关闭时永久阻塞。
+	started atomic.Bool
+	// stopOnce 防止重复 close(stop) panic
+	stopOnce sync.Once
 }
 
 // NewRelayTunnel 创建隧道。relayURL/deviceID/jwtToken 任一为空时 Start 跳过（relay 不可用，仅 LAN）。
@@ -79,12 +85,16 @@ func (t *RelayTunnel) Start() {
 		t.logger.Info("relay 隧道未启用（缺 RELAY_URL/DEVICE_ID/JWT，仅 LAN 可用）")
 		return
 	}
+	t.started.Store(true)
 	go t.run()
 }
 
-// Stop 停止隧道
+// Stop 停止隧道（未启动过 / 重复调用均安全）
 func (t *RelayTunnel) Stop() {
-	close(t.stop)
+	if !t.started.Load() {
+		return
+	}
+	t.stopOnce.Do(func() { close(t.stop) })
 	t.mu.Lock()
 	if t.conn != nil {
 		_ = t.conn.Close()
