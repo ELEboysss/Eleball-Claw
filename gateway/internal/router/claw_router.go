@@ -47,6 +47,7 @@ func NewClawRouter(
 	adminSettingHandler *handler.AdminSettingHandler,
 	assistantHandler *handler.AssistantHandler,
 	teamHandler *handler.TeamHandler,
+	teamMemoryHandler *handler.TeamMemoryHandler,
 	systemHandler *handler.SystemHandler,
 ) *gin.Engine {
 	if cfg.Server.Mode == "release" {
@@ -180,6 +181,13 @@ func NewClawRouter(
 			auth.GET("/teams/:id", teamHandler.GetTeam)
 			auth.PATCH("/teams/:id", teamHandler.UpdateTeam)
 			auth.DELETE("/teams/:id", teamHandler.DeleteTeam)
+
+			// 组共享记忆（Agent Team P2，校验组归属当前用户）
+			if teamMemoryHandler != nil {
+				auth.GET("/teams/:id/memories", teamMemoryHandler.ListMemories)
+				auth.POST("/teams/:id/memories", teamMemoryHandler.CreateMemory)
+				auth.DELETE("/teams/:id/memories/:memoryId", teamMemoryHandler.DeleteMemory)
+			}
 
 			// 本地控制台（替代云端 /v1/admin/*）：P3 扩充，仅 JWT 用户登录（无 admin gate / admin auth）。
 			// 复用既有 handler，端点挂到 /claw-console/* 下。

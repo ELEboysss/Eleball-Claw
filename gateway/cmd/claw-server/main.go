@@ -147,6 +147,7 @@ func main() {
 		&model.Assistant{},
 		&model.AssistantItem{},
 		&model.Team{},
+		&model.TeamMemory{},
 		&model.VisualGenerationTask{},
 		&model.VisualConversation{},
 	); err != nil {
@@ -315,6 +316,10 @@ func main() {
 
 	// 对话分组服务（Agent Team）
 	teamService := service.NewTeamService(db, teamRepo)
+	// 组共享记忆仓库（Agent Team P2）：删除组时级联清理组记忆
+	teamMemoryRepo := repository.NewTeamMemoryRepo(db)
+	teamService.SetTeamMemoryRepo(teamMemoryRepo)
+	teamMemoryService := service.NewTeamMemoryService(teamMemoryRepo, teamService)
 	conversationService := service.NewConversationService(chatConversationRepo, vipService, cfg.Agent.BasePath)
 	// 对话归组（PATCH team_id）需校验分组归属
 	conversationService.SetTeamService(teamService)
@@ -336,6 +341,8 @@ func main() {
 	// 助手服务（已激活秘技的命名组合）；Agent 执行按请求/会话绑定的助手过滤动态工具
 	assistantService := service.NewAssistantService(db, assistantRepo, agentRepo)
 	agentWorkflowService.SetAssistantService(assistantService)
+	// 组共享记忆服务（Agent Team P2）：执行前检索注入 + 执行后异步提取
+	agentWorkflowService.SetTeamMemoryService(teamMemoryService)
 	// 云端账户/VIP 缓存（claw 仅从云端取 VIP 一项用于门控）
 	cloudAccountService := service.NewCloudAccountService(cfg.Server.EleagentBaseURL)
 
@@ -376,6 +383,7 @@ func main() {
 	clawConsoleHandler := handler.NewClawConsoleHandler(db)
 	assistantHandler := handler.NewAssistantHandler(assistantService)
 	teamHandler := handler.NewTeamHandler(teamService)
+	teamMemoryHandler := handler.NewTeamMemoryHandler(teamMemoryService)
 	// 本地系统状态（docker/compose 可用性 + 模块自动上下线开关）
 	systemHandler := handler.NewSystemHandler(cfg.Modules)
 
@@ -385,7 +393,7 @@ func main() {
 		conversationHandler, moduleHandler, agentWorkflowHandler, agentHandler,
 		agentCredentialHandler, visualHandler, publicSettingHandler, releaseHandler,
 		clawConsoleHandler, cloudAccountService, adminEleAgentModelHandler, adminSettingHandler,
-		assistantHandler, teamHandler, systemHandler,
+		assistantHandler, teamHandler, teamMemoryHandler, systemHandler,
 	)
 
 	// 9. 启动

@@ -37,6 +37,7 @@ type AgentService struct {
 	toolLoop             *ToolCallingLoop
 	agentToolLoader      *AgentToolLoader
 	assistantSvc         *AssistantService
+	teamMemorySvc        *TeamMemoryService
 	clientResolver       AgentLLMClientResolver
 	model                string
 	maxSteps             int
@@ -131,6 +132,11 @@ func (s *AgentService) SetAgentToolLoader(loader *AgentToolLoader) {
 // SetAssistantService 设置助手服务（可选；设置后按请求/会话绑定的助手过滤动态工具）
 func (s *AgentService) SetAssistantService(svc *AssistantService) {
 	s.assistantSvc = svc
+}
+
+// SetTeamMemoryService 设置组共享记忆服务（Agent Team P2，可选；设置后组内对话执行前注入记忆、执行后异步提取）
+func (s *AgentService) SetTeamMemoryService(svc *TeamMemoryService) {
+	s.teamMemorySvc = svc
 }
 
 // Execute 执行 Agent 工作流
@@ -343,8 +349,8 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	}
 	availableTools := s.schemaBuilder.BuildWithOptionsAndDynamic(hasFileTools, enableWebSearch, dynamicTools)
 
-	// 10. 构建初始消息
-	messages := s.buildInitialMessages(req, preprocessed)
+	// 10. 构建初始消息（Agent Team P2：组内对话注入组共享记忆区块）
+	messages := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID)
 
 	// 11. Function Calling 循环
 	env := &ToolEnv{
@@ -443,6 +449,8 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		s.writeEvent(w, "final_answer", map[string]string{"delta": result.FinalContent})
 		s.writeToolSummaryEvent(w, result.Records)
 		s.saveAgentAssistantMessage(ctx, conv.ID, userID, session.ID, result.Records, result.FinalContent)
+		// Agent Team P2：组内对话执行成功后异步提取组共享记忆（失败仅记日志）
+		s.extractTeamMemoryAsync(conv, userID, modelName, llmClient, req.Message, result.FinalContent)
 		s.writeEvent(w, "done", map[string]string{"session_id": session.ID})
 		return nil
 	}
@@ -482,6 +490,8 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 
 	s.writeToolSummaryEvent(w, result.Records)
 	s.saveAgentAssistantMessage(ctx, conv.ID, userID, session.ID, result.Records, finalAnswer)
+	// Agent Team P2：组内对话执行成功后异步提取组共享记忆（失败仅记日志）
+	s.extractTeamMemoryAsync(conv, userID, modelName, llmClient, req.Message, finalAnswer)
 	s.writeEvent(w, "done", map[string]string{"session_id": session.ID})
 	return nil
 }
@@ -546,16 +556,27 @@ func (s *AgentService) ensureSessionQuota(ctx context.Context, userID string) er
 	return nil
 }
 
-// buildInitialMessages 构建初始消息列表
-func (s *AgentService) buildInitialMessages(req AgentExecuteRequest, attachments []AgentAttachment) []llm.Message {
+// buildInitialMessages 构建初始消息列表。
+// Agent Team P2：teamID 非空且 teamMemorySvc 已装配时，检索组共享记忆并把
+// 「组共享记忆」区块拼入 system 消息内容尾部（不新增消息，避免弱模型角色混乱）；
+// userID/teamID 传空则跳过注入（如工具关闭的普通对话路径）。
+func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID string) []llm.Message {
 	messages := make([]llm.Message, 0, len(req.History)+2)
+	systemContent := "你是一个有用的 AI 助手。\n" +
+		"规则：\n" +
+		"1. 当用户问题涉及实时信息、搜索网络、读取文件、处理图片/OCR 或生成视频时，你必须调用对应工具获取结果，禁止只回复“我要查询/请稍等”而不调用工具。\n" +
+		"2. 请直接输出工具调用，拿到工具结果后再给出最终回答。\n" +
+		"3. 如果工具返回失败或没有有效结果，如实告知用户，不要编造。"
+	// Agent Team P2：组共享记忆注入（区块预算 4000 字符 ≈ 2000 tokens，超出按相关度截断）
+	if teamID != "" && s.teamMemorySvc != nil {
+		memories := s.teamMemorySvc.SearchForInjection(ctx, userID, teamID, req.Message, 8)
+		if block := s.teamMemorySvc.FormatInjectionBlock(memories, TeamMemoryInjectMaxChars); block != "" {
+			systemContent += "\n\n" + block
+		}
+	}
 	messages = append(messages, llm.Message{
-		Role: "system",
-		Content: "你是一个有用的 AI 助手。\n" +
-			"规则：\n" +
-			"1. 当用户问题涉及实时信息、搜索网络、读取文件、处理图片/OCR 或生成视频时，你必须调用对应工具获取结果，禁止只回复“我要查询/请稍等”而不调用工具。\n" +
-			"2. 请直接输出工具调用，拿到工具结果后再给出最终回答。\n" +
-			"3. 如果工具返回失败或没有有效结果，如实告知用户，不要编造。",
+		Role:    "system",
+		Content: systemContent,
 	})
 	if len(req.History) > 0 {
 		messages = append(messages, req.History...)
@@ -581,6 +602,24 @@ func (s *AgentService) resolveClient(ctx context.Context, req AgentExecuteReques
 	return s.clientResolver(ctx, req.Provider, modelName, req.BaseURL, req.APIKey)
 }
 
+// extractTeamMemoryAsync Agent Team P2：执行成功后异步提取组共享记忆。
+// 仅当对话归属分组（conv.TeamID 非空）且 teamMemorySvc 已装配时触发；
+// goroutine 内使用 context.Background()+WithTimeout(60s)——请求 ctx 随 SSE 结束即取消，
+// 不能复用；复用本次执行的 llmClient 与 modelName；失败仅记日志，不影响主流程。
+func (s *AgentService) extractTeamMemoryAsync(conv *model.ChatConversation, userID, modelName string, client AgentLLMClient, userMessage, finalAnswer string) {
+	if s.teamMemorySvc == nil || conv == nil || conv.TeamID == "" {
+		return
+	}
+	teamID, conversationID := conv.TeamID, conv.ID
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if err := s.teamMemorySvc.ExtractAndStore(ctx, client, modelName, teamID, userID, conversationID, userMessage, finalAnswer); err != nil && s.logger != nil {
+			s.logger.Warn("组共享记忆提取失败", zap.String("team_id", teamID), zap.String("conversation_id", conversationID), zap.Error(err))
+		}
+	}()
+}
+
 // chatStream 普通对话流，返回累计的 token 用量用于计费
 func (s *AgentService) chatStream(ctx context.Context, req AgentExecuteRequest, w io.Writer) (*llm.Usage, error) {
 	modelName := s.model
@@ -598,7 +637,8 @@ func (s *AgentService) chatStream(ctx context.Context, req AgentExecuteRequest, 
 	// Ele Agent 模型名为 subProvider/subModel，上游真实请求只使用 subModel
 	modelName = normalizeAgentModelName(req.Provider, modelName)
 
-	messages := s.buildInitialMessages(req, req.Attachments)
+	// 工具关闭的普通对话路径不注入组共享记忆（userID/teamID 传空跳过；保持与历史行为一致）
+	messages := s.buildInitialMessages(ctx, req, req.Attachments, "", "")
 	stream, err := llmClient.ChatStream(ctx, llm.ChatRequest{
 		Model:    modelName,
 		Messages: messages,

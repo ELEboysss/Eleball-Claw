@@ -11,13 +11,19 @@ import (
 
 // TeamService 对话分组业务逻辑（Agent Team，组严格按 user_id 隔离）
 type TeamService struct {
-	db   *gorm.DB
-	repo *repository.TeamRepo
+	db         *gorm.DB
+	repo       *repository.TeamRepo
+	memoryRepo *repository.TeamMemoryRepo
 }
 
 // NewTeamService 创建服务
 func NewTeamService(db *gorm.DB, repo *repository.TeamRepo) *TeamService {
 	return &TeamService{db: db, repo: repo}
+}
+
+// SetTeamMemoryRepo 装配组记忆仓库（Agent Team P2；设置后删除组时级联清理组记忆）
+func (s *TeamService) SetTeamMemoryRepo(memoryRepo *repository.TeamMemoryRepo) {
+	s.memoryRepo = memoryRepo
 }
 
 // TeamListItem 组列表项（含组内对话数）
@@ -122,13 +128,19 @@ func (s *TeamService) Update(userID, id string, name, description *string) (*mod
 	return t, nil
 }
 
-// Delete 删除分组：组内对话 team_id 置空（不删对话）
+// Delete 删除分组：组内对话 team_id 置空（不删对话），级联清理组共享记忆
 func (s *TeamService) Delete(userID, id string) error {
 	if _, err := s.getOwned(userID, id); err != nil {
 		return err
 	}
 	if err := s.repo.Delete(id); err != nil {
 		return err
+	}
+	// Agent Team P2：删除组记忆（memoryRepo 未装配时跳过，保持 P1 行为）
+	if s.memoryRepo != nil {
+		if err := s.memoryRepo.DeleteByTeam(id); err != nil {
+			return err
+		}
 	}
 	return s.repo.ClearConversationRefs(s.db, id)
 }

@@ -2965,6 +2965,18 @@ type E2ETeam struct {
 
 var e2eTeams = make(map[string]*E2ETeam)
 
+// 组共享记忆内存存储（Agent Team P2）：memoryID -> E2ETeamMemory
+var e2eTeamMemories = make(map[string]*E2ETeamMemory)
+
+// e2eGetOwnedTeam 查询分组并校验归属（不存在与非本人统一返回 nil）
+func e2eGetOwnedTeam(uid, id string) *E2ETeam {
+	t := e2eTeams[id]
+	if t == nil || t.UserID != uid {
+		return nil
+	}
+	return t
+}
+
 // e2eListTeamsHandler 分组列表（含 conversation_count 统计）
 func e2eListTeamsHandler(w http.ResponseWriter, r *http.Request) {
 	uid := userIDFrom(r)
@@ -3099,6 +3111,120 @@ func e2eDeleteTeamHandler(w http.ResponseWriter, r *http.Request, id string) {
 		}
 	}
 	delete(e2eTeams, id)
+	// 级联删除组共享记忆（Agent Team P2）
+	for mid, m := range e2eTeamMemories {
+		if m.TeamID == id {
+			delete(e2eTeamMemories, mid)
+		}
+	}
+	respondSuccess(w, nil)
+}
+
+// ============================================================================
+//  组共享记忆（TeamMemory，Agent Team P2，E2E 内存实现，与云端 /v1/teams/:id/memories* 对齐）
+// ============================================================================
+
+// E2ETeamMemory 组共享记忆条目（scope = user + team）
+type E2ETeamMemory struct {
+	ID                   string `json:"id"`
+	TeamID               string `json:"team_id"`
+	UserID               string `json:"user_id"`
+	Content              string `json:"content"`
+	Tags                 string `json:"tags,omitempty"`
+	SourceConversationID string `json:"source_conversation_id,omitempty"`
+	CreatedAt            int64  `json:"created_at"`
+	UpdatedAt            int64  `json:"updated_at"`
+}
+
+// e2eListTeamMemoriesHandler 组记忆列表（分页 page/page_size，按 created_at 倒序）
+func e2eListTeamMemoriesHandler(w http.ResponseWriter, r *http.Request, teamID string) {
+	uid := userIDFrom(r)
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	mu.RLock()
+	defer mu.RUnlock()
+	if e2eGetOwnedTeam(uid, teamID) == nil {
+		respondError(w, 3001, "组不存在")
+		return
+	}
+	items := make([]*E2ETeamMemory, 0)
+	for _, m := range e2eTeamMemories {
+		if m.TeamID == teamID {
+			items = append(items, m)
+		}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt > items[j].CreatedAt })
+	total := len(items)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	respondSuccess(w, map[string]interface{}{
+		"items": items[start:end],
+		"total": total,
+	})
+}
+
+// e2eCreateTeamMemoryHandler 手动新增组记忆（content 必填，≤500 字）
+func e2eCreateTeamMemoryHandler(w http.ResponseWriter, r *http.Request, teamID string) {
+	uid := userIDFrom(r)
+	var req struct {
+		Content string `json:"content"`
+		Tags    string `json:"tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Content) == "" {
+		respondError(w, 1001, "参数错误: content 必填")
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if e2eGetOwnedTeam(uid, teamID) == nil {
+		respondError(w, 3001, "组不存在")
+		return
+	}
+	if len([]rune(strings.TrimSpace(req.Content))) > 500 {
+		respondError(w, 3001, "记忆内容不能超过 500 字")
+		return
+	}
+	now := time.Now().Unix()
+	m := &E2ETeamMemory{
+		ID:        fmt.Sprintf("tm-%s", newUUID()[:8]),
+		TeamID:    teamID,
+		UserID:    uid,
+		Content:   strings.TrimSpace(req.Content),
+		Tags:      strings.TrimSpace(req.Tags),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	e2eTeamMemories[m.ID] = m
+	respondSuccess(w, m)
+}
+
+// e2eDeleteTeamMemoryHandler 删除组记忆条目（校验组归属，且条目属于该组）
+func e2eDeleteTeamMemoryHandler(w http.ResponseWriter, r *http.Request, teamID, memoryID string) {
+	uid := userIDFrom(r)
+	mu.Lock()
+	defer mu.Unlock()
+	if e2eGetOwnedTeam(uid, teamID) == nil {
+		respondError(w, 3001, "组不存在")
+		return
+	}
+	m := e2eTeamMemories[memoryID]
+	if m == nil || m.TeamID != teamID {
+		respondError(w, 3001, "记忆不存在")
+		return
+	}
+	delete(e2eTeamMemories, memoryID)
 	respondSuccess(w, nil)
 }
 
@@ -7027,7 +7153,23 @@ func main() {
 		}
 	})))
 	mux.HandleFunc("/v1/teams/", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
-		id := strings.TrimPrefix(r.URL.Path, "/v1/teams/")
+		rest := strings.TrimPrefix(r.URL.Path, "/v1/teams/")
+		// 组共享记忆子路由（Agent Team P2）：/v1/teams/:id/memories[/:memoryId]
+		if parts := strings.Split(rest, "/"); len(parts) >= 2 && parts[1] == "memories" {
+			teamID := parts[0]
+			switch {
+			case len(parts) == 2 && r.Method == http.MethodGet:
+				e2eListTeamMemoriesHandler(w, r, teamID)
+			case len(parts) == 2 && r.Method == http.MethodPost:
+				e2eCreateTeamMemoryHandler(w, r, teamID)
+			case len(parts) == 3 && r.Method == http.MethodDelete:
+				e2eDeleteTeamMemoryHandler(w, r, teamID, parts[2])
+			default:
+				respondError(w, 1001, "方法不支持")
+			}
+			return
+		}
+		id := rest
 		if id == "" || strings.Contains(id, "/") {
 			respondError(w, 4004, "路径不存在")
 			return
