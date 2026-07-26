@@ -70,3 +70,10 @@ func (r *TeamRepo) ClearConversationRefs(db *gorm.DB, teamID string) error {
 		Where("team_id = ?", teamID).
 		Update("team_id", "").Error
 }
+
+// ClearAssistantRefs 清除组内所有助手的 team_id 归属（Agent Team P3：删除组时调用，不删助手）
+func (r *TeamRepo) ClearAssistantRefs(db *gorm.DB, teamID string) error {
+	return db.Model(&model.Assistant{}).
+		Where("team_id = ?", teamID).
+		Update("team_id", "").Error
+}

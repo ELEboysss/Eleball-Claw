@@ -3269,6 +3269,9 @@ func e2eAgentExecuteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID := newUUID()
+	// Agent Team P3：云端 agent_sessions 已加 parent_session_id（CallAssistant 子 session provenance）；
+	// e2e 不持久化 agent_sessions（/v1/agent/sessions 返回空列表），CallAssistant 由真实 LLM 行为驱动，
+	// e2e 不模拟委派闭环，故此处无字段需镜像。
 
 	enableWebSearch := req.EnableWebSearch != nil && *req.EnableWebSearch
 	searchProvider := "baidu"

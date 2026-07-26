@@ -9,8 +9,14 @@ type Assistant struct {
 	UserID      string    `gorm:"index:idx_assistants_user;not null;size:64" json:"user_id"`
 	Name        string    `gorm:"not null" json:"name"`
 	Description string    `gorm:"type:text" json:"description"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	// Agent Team P3：助手作为子 agent 被 CallAssistant 编排时的人格/指令；空=默认专家模板
+	SystemPrompt string `gorm:"type:text" json:"system_prompt"`
+	// Agent Team P3：是否对其他编排者暴露能力（进入能力目录）
+	Shared bool `gorm:"default:true" json:"shared"`
+	// Agent Team P3：空=全局可见（所有组的编排者可见）；非空=仅该组可见
+	TeamID    string    `gorm:"size:32" json:"team_id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // AssistantItem 助手包含的秘技条目（同一助手内 agent_id 唯一）

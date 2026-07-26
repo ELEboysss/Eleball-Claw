@@ -29,7 +29,8 @@ func setupTeamTest(t *testing.T) *teamTestEnv {
 	require.NoError(t, err)
 	// :memory: 数据库按连接隔离，限制单连接避免「no such table」
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, db.AutoMigrate(&model.Team{}, &model.ChatConversation{}))
+	// Agent Team P3：删除组时级联清 assistants.team_id，需一并迁移 Assistant 表
+	require.NoError(t, db.AutoMigrate(&model.Team{}, &model.ChatConversation{}, &model.Assistant{}))
 
 	teamSvc := NewTeamService(db, repository.NewTeamRepo(db))
 	convRepo := repository.NewChatConversationRepo(db)

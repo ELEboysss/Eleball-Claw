@@ -62,12 +62,16 @@ func (h *AssistantHandler) GetAssistant(c *gin.Context) {
 }
 
 // UpdateAssistantRequest 更新助手请求（指针字段，缺省不更新）
+// Agent Team P3：扩展 system_prompt / shared / team_id（team_id 非空校验组归属）
 type UpdateAssistantRequest struct {
-	Name        *string `json:"name"`
-	Description *string `json:"description"`
+	Name         *string `json:"name"`
+	Description  *string `json:"description"`
+	SystemPrompt *string `json:"system_prompt"`
+	Shared       *bool   `json:"shared"`
+	TeamID       *string `json:"team_id"`
 }
 
-// UpdateAssistant 更新助手名称/描述
+// UpdateAssistant 更新助手名称/描述/编排协作字段
 func (h *AssistantHandler) UpdateAssistant(c *gin.Context) {
 	var req UpdateAssistantRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -75,7 +79,13 @@ func (h *AssistantHandler) UpdateAssistant(c *gin.Context) {
 		return
 	}
 	userID, _ := c.Get("user_id")
-	view, err := h.assistantService.Update(userID.(string), c.Param("id"), req.Name, req.Description)
+	view, err := h.assistantService.Update(userID.(string), c.Param("id"), service.AssistantUpdateInput{
+		Name:         req.Name,
+		Description:  req.Description,
+		SystemPrompt: req.SystemPrompt,
+		Shared:       req.Shared,
+		TeamID:       req.TeamID,
+	})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 3001, "message": err.Error()})
 		return

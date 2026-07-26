@@ -5,6 +5,8 @@ type AgentSession struct {
 	ID           string    `gorm:"primaryKey;size:32" json:"id"`
 	UserID       string    `gorm:"index:idx_agent_session_user_created;not null;size:32" json:"user_id"`
 	ConversationID string  `gorm:"index;size:32" json:"conversation_id,omitempty"`
+	// Agent Team P3：子调用 provenance——编排者触发 CallAssistant 时子 session 记录父 session
+	ParentSessionID string `gorm:"size:32;index" json:"parent_session_id,omitempty"`
 	Title        string    `gorm:"type:text" json:"title"`
 	Status       string    `gorm:"index:idx_agent_session_user_status;size:32;not null" json:"status"` // queued / running / succeeded / failed
 	ToolChain    string    `gorm:"type:text" json:"tool_chain,omitempty"`            // JSON 数组，记录实际 tool_calls

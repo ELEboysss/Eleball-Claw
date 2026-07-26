@@ -15,6 +15,7 @@ import (
 
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
+	"github.com/eleball/gateway/pkg/llm"
 )
 
 // ToolFunc 工具函数签名
@@ -31,6 +32,13 @@ type ToolEnv struct {
 	SearchProvider string // 当前 conversation 选择的搜索源，如 baidu / bing
 	// Credentials 当前工具声明的凭证字段定义，供驱动校验/注入
 	Credentials map[string]model.CredentialDef
+	// Agent Team P3：编排深度。0=编排者主循环；>0=子 agent 执行环境。
+	// CallAssistant 在 Depth>0 时直接拒绝（结构性限深的防御性兜底）
+	Depth int
+	// Agent Team P3：本次 execute 的委派计数器（上限 5），由 Execute 装配；子 env 不共享
+	DelegateCalls *int
+	// Agent Team P3：子调用 token 用量累计钩子，挂到主循环 totalUsage（只经此钩子进账一次）
+	UsageAccumulator func(*llm.Usage)
 }
 
 // SaveOutput 将工具产物登记为匿名资源

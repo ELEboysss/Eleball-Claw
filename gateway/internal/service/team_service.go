@@ -128,7 +128,8 @@ func (s *TeamService) Update(userID, id string, name, description *string) (*mod
 	return t, nil
 }
 
-// Delete 删除分组：组内对话 team_id 置空（不删对话），级联清理组共享记忆
+// Delete 删除分组：组内对话 team_id 置空（不删对话），级联清理组共享记忆；
+// Agent Team P3：组内助手 team_id 一并置空（不删助手，文档 §3）
 func (s *TeamService) Delete(userID, id string) error {
 	if _, err := s.getOwned(userID, id); err != nil {
 		return err
@@ -141,6 +142,10 @@ func (s *TeamService) Delete(userID, id string) error {
 		if err := s.memoryRepo.DeleteByTeam(id); err != nil {
 			return err
 		}
+	}
+	// Agent Team P3：清助手组归属
+	if err := s.repo.ClearAssistantRefs(s.db, id); err != nil {
+		return err
 	}
 	return s.repo.ClearConversationRefs(s.db, id)
 }

@@ -139,7 +139,7 @@ func TestAssistantService_CRUD(t *testing.T) {
 
 	// 更新名称/描述
 	newName, newDesc := "搜索助手 Pro", "搜索 + 阅读"
-	updated, err := env.assistant.Update(assistantTestUser, view.ID, &newName, &newDesc)
+	updated, err := env.assistant.Update(assistantTestUser, view.ID, AssistantUpdateInput{Name: &newName, Description: &newDesc})
 	require.NoError(t, err)
 	assert.Equal(t, newName, updated.Name)
 	assert.Equal(t, newDesc, updated.Description)
@@ -153,7 +153,7 @@ func TestAssistantService_CRUD(t *testing.T) {
 	// 用户隔离：他人不可见/不可改
 	_, err = env.assistant.Get("user-2", view.ID)
 	require.Error(t, err)
-	_, err = env.assistant.Update("user-2", view.ID, &newName, nil)
+	_, err = env.assistant.Update("user-2", view.ID, AssistantUpdateInput{Name: &newName})
 	require.Error(t, err)
 
 	// 删除

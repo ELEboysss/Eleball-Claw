@@ -340,6 +340,8 @@ func main() {
 	agentService.SetModuleRepo(moduleRepo)
 	// 助手服务（已激活秘技的命名组合）；Agent 执行按请求/会话绑定的助手过滤动态工具
 	assistantService := service.NewAssistantService(db, assistantRepo, agentRepo)
+	// Agent Team P3：助手 PATCH team_id 时同样校验组归属
+	assistantService.SetTeamService(teamService)
 	agentWorkflowService.SetAssistantService(assistantService)
 	// 组共享记忆服务（Agent Team P2）：执行前检索注入 + 执行后异步提取
 	agentWorkflowService.SetTeamMemoryService(teamMemoryService)

@@ -321,12 +321,12 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	// 克隆注册表并注入用户购买的动态工具，实现集市 SKU 的动态加载。
 	// 助手过滤：请求 assistant_id 优先，缺省回落会话绑定值；指定助手时仅注入该助手包含的秘技，
 	// 助手条目为空时不注入任何动态工具（空列表，不报错）；未指定助手则注入全部已激活秘技。
+	assistantID := req.AssistantID
+	if assistantID == "" {
+		assistantID = conv.AssistantID
+	}
 	var dynamicTools []*Tool
 	if s.agentToolLoader != nil {
-		assistantID := req.AssistantID
-		if assistantID == "" {
-			assistantID = conv.AssistantID
-		}
 		var loaded []*Tool
 		var loadErr error
 		if assistantID != "" && s.assistantSvc != nil {
@@ -343,14 +343,28 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		}
 		dynamicTools = loaded
 	}
+
+	// Agent Team P3：构建协作助手能力目录；目录非空时注入 CallAssistant 编排工具
+	// （随 dynamicTools 进 schema 与注册表），目录区块在下一步拼入 system prompt。
+	// callRT 由下方客户端解析后填充，CallAssistant 闭包在实际被工具循环调用时读取。
+	var callRT callAssistantRuntime
+	catalogBlock := ""
+	if s.assistantSvc != nil && s.agentToolLoader != nil {
+		catalog := s.assistantSvc.BuildCapabilityCatalog(ctx, userID, assistantID, conv.TeamID)
+		if len(catalog) > 0 {
+			catalogBlock = FormatCatalogBlock(catalog)
+			dynamicTools = append(dynamicTools, s.buildCallAssistantTool(catalog, session, &callRT))
+		}
+	}
+
 	registry := s.registry.Clone()
 	for _, t := range dynamicTools {
 		registry.Register(t)
 	}
 	availableTools := s.schemaBuilder.BuildWithOptionsAndDynamic(hasFileTools, enableWebSearch, dynamicTools)
 
-	// 10. 构建初始消息（Agent Team P2：组内对话注入组共享记忆区块）
-	messages := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID)
+	// 10. 构建初始消息（Agent Team P2：组内对话注入组共享记忆区块；P3：能力目录区块）
+	messages := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID, catalogBlock)
 
 	// 11. Function Calling 循环
 	env := &ToolEnv{
@@ -360,6 +374,12 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		Sandbox:        s.sandbox,
 		SessionRepo:    s.sessionRepo,
 		SearchProvider: searchProvider,
+		// Agent Team P3：委派计数器（每次 execute 独立，上限 5）+ 子调用用量累计钩子
+		// （子 Usage 只经此钩子进 totalUsage 一次，与 result.Usage 的 addUsage 不重叠）
+		DelegateCalls: new(int),
+		UsageAccumulator: func(u *llm.Usage) {
+			totalUsage = addUsage(totalUsage, u)
+		},
 	}
 
 	modelName := s.model
@@ -378,6 +398,10 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 
 	// Ele Agent 模型名为 subProvider/subModel，上游真实请求只使用 subModel
 	modelName = normalizeAgentModelName(req.Provider, modelName)
+
+	// Agent Team P3：填充编排运行时（CallAssistant 被工具循环调用时读取）
+	callRT.client = llmClient
+	callRT.model = modelName
 
 	result, err := s.toolLoop.RunWithRegistry(ctx, registry, llmClient, modelName, availableTools, messages, env,
 		func(record ToolCallRecord) error {
@@ -498,6 +522,12 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 
 // createSession 创建 Agent Session
 func (s *AgentService) createSession(ctx context.Context, userID, conversationID, message string) (*model.AgentSession, error) {
+	return s.createSessionWithParent(ctx, userID, conversationID, "", message)
+}
+
+// createSessionWithParent 创建 Agent Session；Agent Team P3：parentSessionID 非空时记录
+// 子调用 provenance（编排者触发 CallAssistant 时子 session 关联父 session）
+func (s *AgentService) createSessionWithParent(ctx context.Context, userID, conversationID, parentSessionID, message string) (*model.AgentSession, error) {
 	if err := s.ensureSessionQuota(ctx, userID); err != nil {
 		return nil, err
 	}
@@ -511,15 +541,16 @@ func (s *AgentService) createSession(ctx context.Context, userID, conversationID
 	title := truncateByRunes(message, 30)
 
 	session := &model.AgentSession{
-		ID:             id,
-		UserID:         userID,
-		ConversationID: conversationID,
-		Title:          title,
-		Status:         "running",
-		Permissions:    "[]",
-		DiskPath:       sessionDir,
-		CreatedAt:      time.Now().Unix(),
-		UpdatedAt:      time.Now().Unix(),
+		ID:              id,
+		UserID:          userID,
+		ConversationID:  conversationID,
+		ParentSessionID: parentSessionID,
+		Title:           title,
+		Status:          "running",
+		Permissions:     "[]",
+		DiskPath:        sessionDir,
+		CreatedAt:       time.Now().Unix(),
+		UpdatedAt:       time.Now().Unix(),
 	}
 	if err := s.sessionRepo.Create(session); err != nil {
 		return nil, err
@@ -560,7 +591,8 @@ func (s *AgentService) ensureSessionQuota(ctx context.Context, userID string) er
 // Agent Team P2：teamID 非空且 teamMemorySvc 已装配时，检索组共享记忆并把
 // 「组共享记忆」区块拼入 system 消息内容尾部（不新增消息，避免弱模型角色混乱）；
 // userID/teamID 传空则跳过注入（如工具关闭的普通对话路径）。
-func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID string) []llm.Message {
+// Agent Team P3：catalogBlock 非空时把协作助手能力目录区块拼入 system 尾部（组记忆区块之后）。
+func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID, catalogBlock string) []llm.Message {
 	messages := make([]llm.Message, 0, len(req.History)+2)
 	systemContent := "你是一个有用的 AI 助手。\n" +
 		"规则：\n" +
@@ -573,6 +605,10 @@ func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecut
 		if block := s.teamMemorySvc.FormatInjectionBlock(memories, TeamMemoryInjectMaxChars); block != "" {
 			systemContent += "\n\n" + block
 		}
+	}
+	// Agent Team P3：协作助手能力目录注入（组记忆区块之后）
+	if catalogBlock != "" {
+		systemContent += "\n\n" + catalogBlock
 	}
 	messages = append(messages, llm.Message{
 		Role:    "system",
@@ -637,8 +673,8 @@ func (s *AgentService) chatStream(ctx context.Context, req AgentExecuteRequest, 
 	// Ele Agent 模型名为 subProvider/subModel，上游真实请求只使用 subModel
 	modelName = normalizeAgentModelName(req.Provider, modelName)
 
-	// 工具关闭的普通对话路径不注入组共享记忆（userID/teamID 传空跳过；保持与历史行为一致）
-	messages := s.buildInitialMessages(ctx, req, req.Attachments, "", "")
+	// 工具关闭的普通对话路径不注入组共享记忆与能力目录（userID/teamID/catalogBlock 传空跳过；保持与历史行为一致）
+	messages := s.buildInitialMessages(ctx, req, req.Attachments, "", "", "")
 	stream, err := llmClient.ChatStream(ctx, llm.ChatRequest{
 		Model:    modelName,
 		Messages: messages,

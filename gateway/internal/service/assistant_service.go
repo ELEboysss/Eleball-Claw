@@ -16,11 +16,17 @@ type AssistantService struct {
 	db        *gorm.DB
 	repo      *repository.AssistantRepo
 	agentRepo *repository.AgentRepo
+	teamSvc   *TeamService // Agent Team P3：PATCH team_id 时校验组归属（可选装配）
 }
 
 // NewAssistantService 创建服务
 func NewAssistantService(db *gorm.DB, repo *repository.AssistantRepo, agentRepo *repository.AgentRepo) *AssistantService {
 	return &AssistantService{db: db, repo: repo, agentRepo: agentRepo}
+}
+
+// SetTeamService 装配组服务（Agent Team P3；设置后 PATCH team_id 校验组归属当前用户）
+func (s *AssistantService) SetTeamService(svc *TeamService) {
+	s.teamSvc = svc
 }
 
 // AssistantAgentItem 助手条目展开视图（供前端展示秘技概要）
@@ -92,6 +98,7 @@ func (s *AssistantService) Create(userID, name, description string) (*AssistantV
 		UserID:      userID,
 		Name:        name,
 		Description: description,
+		Shared:      true, // Agent Team P3：与 DB 默认值对齐，新建助手默认对编排者可见
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
@@ -110,20 +117,45 @@ func (s *AssistantService) Get(userID, id string) (*AssistantView, error) {
 	return &AssistantView{Assistant: a, Items: s.expandItems(a.ID)}, nil
 }
 
-// Update 更新助手名称/描述（nil 字段不更新）
-func (s *AssistantService) Update(userID, id string, name, description *string) (*AssistantView, error) {
+// AssistantUpdateInput 助手可更新字段（nil 字段不更新）
+// Agent Team P3：扩展 system_prompt / shared / team_id
+type AssistantUpdateInput struct {
+	Name         *string
+	Description  *string
+	SystemPrompt *string
+	Shared       *bool
+	TeamID       *string // 空字符串=移出组（全局可见）；非空校验组归属当前用户
+}
+
+// Update 更新助手（nil 字段不更新）；team_id 非空时校验组归属当前用户
+func (s *AssistantService) Update(userID, id string, in AssistantUpdateInput) (*AssistantView, error) {
 	a, err := s.getOwned(userID, id)
 	if err != nil {
 		return nil, err
 	}
-	if name != nil {
-		if *name == "" {
+	if in.Name != nil {
+		if *in.Name == "" {
 			return nil, errors.New("助手名称不能为空")
 		}
-		a.Name = *name
+		a.Name = *in.Name
 	}
-	if description != nil {
-		a.Description = *description
+	if in.Description != nil {
+		a.Description = *in.Description
+	}
+	// Agent Team P3：编排协作三字段
+	if in.SystemPrompt != nil {
+		a.SystemPrompt = *in.SystemPrompt
+	}
+	if in.Shared != nil {
+		a.Shared = *in.Shared
+	}
+	if in.TeamID != nil {
+		if *in.TeamID != "" && s.teamSvc != nil {
+			if err := s.teamSvc.CheckOwned(userID, *in.TeamID); err != nil {
+				return nil, err
+			}
+		}
+		a.TeamID = *in.TeamID
 	}
 	a.UpdatedAt = time.Now()
 	if err := s.repo.Update(a); err != nil {
