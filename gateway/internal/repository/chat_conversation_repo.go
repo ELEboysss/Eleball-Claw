@@ -29,16 +29,20 @@ func (r *ChatConversationRepo) GetByID(id string) (*model.ChatConversation, erro
 	return &conv, nil
 }
 
-// ListByUser 查询用户对话列表（排除已软删除）
-func (r *ChatConversationRepo) ListByUser(userID string, page, pageSize int) ([]model.ChatConversation, int64, error) {
+// ListByUser 查询用户对话列表（排除已软删除；teamID 非空时按组过滤）
+func (r *ChatConversationRepo) ListByUser(userID, teamID string, page, pageSize int) ([]model.ChatConversation, int64, error) {
+	query := r.db.Model(&model.ChatConversation{}).Where("user_id = ? AND status != ?", userID, "deleted")
+	if teamID != "" {
+		query = query.Where("team_id = ?", teamID)
+	}
 	var total int64
-	if err := r.db.Model(&model.ChatConversation{}).Where("user_id = ? AND status != ?", userID, "deleted").Count(&total).Error; err != nil {
+	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 
 	var items []model.ChatConversation
 	offset := (page - 1) * pageSize
-	err := r.db.Where("user_id = ? AND status != ?", userID, "deleted").
+	err := query.
 		Order("updated_at DESC").
 		Limit(pageSize).
 		Offset(offset).

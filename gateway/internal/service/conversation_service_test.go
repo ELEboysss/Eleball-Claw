@@ -99,7 +99,7 @@ func TestConversationService_List(t *testing.T) {
 	_, err = svc.CreateConversation(ctx, "u1", CreateConversationReq{Title: "b"})
 	require.NoError(t, err)
 
-	items, total, err := svc.List(ctx, "u1", 1, 10)
+	items, total, err := svc.List(ctx, "u1", "", 1, 10)
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), total)
 	assert.Len(t, items, 2)

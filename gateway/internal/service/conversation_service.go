@@ -24,11 +24,18 @@ type ConversationService struct {
 	repo       *repository.ChatConversationRepo
 	vipService *VIPService
 	basePath   string
+	// teamService 对话分组校验（PATCH team_id 归组时校验组归属），可为空（测试场景）
+	teamService *TeamService
 }
 
 // NewConversationService 创建服务
 func NewConversationService(repo *repository.ChatConversationRepo, vipService *VIPService, basePath string) *ConversationService {
 	return &ConversationService{repo: repo, vipService: vipService, basePath: basePath}
+}
+
+// SetTeamService 装配对话分组服务（PATCH team_id 归组时校验组归属）
+func (s *ConversationService) SetTeamService(teamService *TeamService) {
+	s.teamService = teamService
 }
 
 // CreateConversationReq 创建对话请求
@@ -167,6 +174,8 @@ type UpdateConversationReq struct {
 	SearchProvider  *string `json:"search_provider,omitempty"`
 	// AssistantID 会话绑定的助手 ID（空字符串 = 清除绑定）
 	AssistantID *string `json:"assistant_id,omitempty"`
+	// TeamID 会话所属的对话分组 ID（空字符串 = 移出分组）
+	TeamID *string `json:"team_id,omitempty"`
 	// Model / Provider 会话绑定的模型配置（profile.modelName + provider）。
 	// 切换对话时按此恢复 currentProfileId；对话中切模型时同步到此。
 	Model    *string `json:"model,omitempty"`
@@ -206,6 +215,15 @@ func (s *ConversationService) Update(ctx context.Context, id, userID string, req
 	if req.AssistantID != nil {
 		updates["assistant_id"] = *req.AssistantID
 	}
+	if req.TeamID != nil {
+		// 归组前校验组存在且属于当前用户；空字符串 = 移出分组，无需校验
+		if *req.TeamID != "" && s.teamService != nil {
+			if err := s.teamService.CheckOwned(userID, *req.TeamID); err != nil {
+				return err
+			}
+		}
+		updates["team_id"] = *req.TeamID
+	}
 	if req.Model != nil {
 		updates["model"] = *req.Model
 	}
@@ -242,9 +260,9 @@ func (s *ConversationService) GetDetail(ctx context.Context, id, userID string) 
 	return conv, nil
 }
 
-// List 查询对话列表
-func (s *ConversationService) List(ctx context.Context, userID string, page, pageSize int) ([]model.ChatConversation, int64, error) {
-	return s.repo.ListByUser(userID, page, pageSize)
+// List 查询对话列表（teamID 非空时按组过滤）
+func (s *ConversationService) List(ctx context.Context, userID, teamID string, page, pageSize int) ([]model.ChatConversation, int64, error) {
+	return s.repo.ListByUser(userID, teamID, page, pageSize)
 }
 
 // SaveMessage 保存消息

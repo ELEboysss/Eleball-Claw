@@ -13,6 +13,8 @@ type ChatConversation struct {
 	SearchProvider  string `gorm:"size:32;default:'baidu'" json:"search_provider"`
 	// AssistantID 会话绑定的助手 ID（空 = 不指定助手，Agent 执行注入全部已激活秘技）
 	AssistantID string `gorm:"size:64" json:"assistant_id,omitempty"`
+	// TeamID 会话所属的对话分组 ID（空 = 未分组，行为同现状）
+	TeamID          string `gorm:"size:32;index" json:"team_id,omitempty"`
 	DiskPath        string `gorm:"type:text" json:"-"`
 	CreatedAt    int64     `gorm:"not null" json:"created_at"`
 	UpdatedAt    int64     `gorm:"index:idx_chat_conv_user_updated;not null" json:"updated_at"`

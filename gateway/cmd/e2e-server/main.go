@@ -2700,6 +2700,7 @@ type E2EChatConversation struct {
 	EnableTools     bool              `json:"enable_tools"`
 	EnableWebSearch bool              `json:"enable_web_search"`
 	SearchProvider  string            `json:"search_provider"`
+	TeamID          string            `json:"team_id,omitempty"`
 	CreatedAt       int64             `json:"created_at"`
 	UpdatedAt       int64             `json:"updated_at"`
 	Messages        []*E2EChatMessage `json:"messages,omitempty"`
@@ -2732,8 +2733,9 @@ func e2eListConversationsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var items []*E2EChatConversation
+	teamID := r.URL.Query().Get("team_id")
 	for _, conv := range e2eConversations {
-		if conv.UserID == uid {
+		if conv.UserID == uid && (teamID == "" || conv.TeamID == teamID) {
 			items = append(items, conv)
 		}
 	}
@@ -2819,10 +2821,23 @@ func e2eUpdateConversationHandler(w http.ResponseWriter, r *http.Request, id str
 		SearchProvider  *string `json:"search_provider,omitempty"`
 		Model           *string `json:"model,omitempty"`
 		Provider        *string `json:"provider,omitempty"`
+		TeamID          *string `json:"team_id,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, 1001, "参数错误")
 		return
+	}
+	if req.TeamID != nil && *req.TeamID != "" {
+		// 归组：校验分组存在且归属当前用户（空字符串 = 移出分组）
+		team, ok := e2eTeams[*req.TeamID]
+		if !ok {
+			respondError(w, 3001, "组不存在")
+			return
+		}
+		if team.UserID != uid {
+			respondError(w, 3001, "无权访问该分组")
+			return
+		}
 	}
 	if req.Title != nil {
 		conv.Title = *req.Title
@@ -2841,6 +2856,9 @@ func e2eUpdateConversationHandler(w http.ResponseWriter, r *http.Request, id str
 	}
 	if req.Provider != nil {
 		conv.Provider = *req.Provider
+	}
+	if req.TeamID != nil {
+		conv.TeamID = *req.TeamID
 	}
 	conv.UpdatedAt = time.Now().Unix()
 	respondSuccess(w, nil)
@@ -2929,6 +2947,159 @@ func e2eGenerateTitle(content string) string {
 		return string(runes[:20]) + "…"
 	}
 	return text
+}
+
+// ============================================================================
+//  Teams（对话分组，E2E 内存实现）
+// ============================================================================
+
+// E2ETeam 对话分组（与云端 model.Team 字段对齐）
+type E2ETeam struct {
+	ID          string `json:"id"`
+	UserID      string `json:"user_id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   int64  `json:"updated_at"`
+}
+
+var e2eTeams = make(map[string]*E2ETeam)
+
+// e2eListTeamsHandler 分组列表（含 conversation_count 统计）
+func e2eListTeamsHandler(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r)
+	var items []map[string]interface{}
+	for _, team := range e2eTeams {
+		if team.UserID != uid {
+			continue
+		}
+		var convCount int64
+		for _, conv := range e2eConversations {
+			if conv.TeamID == team.ID {
+				convCount++
+			}
+		}
+		items = append(items, map[string]interface{}{
+			"id":                 team.ID,
+			"user_id":            team.UserID,
+			"name":               team.Name,
+			"description":        team.Description,
+			"created_at":         team.CreatedAt,
+			"updated_at":         team.UpdatedAt,
+			"conversation_count": convCount,
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i]["created_at"].(int64) > items[j]["created_at"].(int64)
+	})
+	if items == nil {
+		items = []map[string]interface{}{}
+	}
+	respondSuccess(w, items)
+}
+
+// e2eCreateTeamHandler 创建分组
+func e2eCreateTeamHandler(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r)
+	var req struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		respondError(w, 1001, "参数错误: name 必填")
+		return
+	}
+	now := time.Now().Unix()
+	team := &E2ETeam{
+		ID:          newUUID(),
+		UserID:      uid,
+		Name:        req.Name,
+		Description: req.Description,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	e2eTeams[team.ID] = team
+	respondSuccess(w, team)
+}
+
+// e2eGetTeamHandler 分组详情（含组内对话摘要列表）
+func e2eGetTeamHandler(w http.ResponseWriter, r *http.Request, id string) {
+	uid := userIDFrom(r)
+	team, ok := e2eTeams[id]
+	if !ok || team.UserID != uid {
+		respondError(w, 3001, "组不存在")
+		return
+	}
+	convs := []map[string]interface{}{}
+	for _, conv := range e2eConversations {
+		if conv.TeamID == id {
+			convs = append(convs, map[string]interface{}{
+				"id":         conv.ID,
+				"title":      conv.Title,
+				"model":      conv.Model,
+				"updated_at": conv.UpdatedAt,
+			})
+		}
+	}
+	sort.Slice(convs, func(i, j int) bool {
+		return convs[i]["updated_at"].(int64) > convs[j]["updated_at"].(int64)
+	})
+	respondSuccess(w, map[string]interface{}{
+		"id":            team.ID,
+		"user_id":       team.UserID,
+		"name":          team.Name,
+		"description":   team.Description,
+		"created_at":    team.CreatedAt,
+		"updated_at":    team.UpdatedAt,
+		"conversations": convs,
+	})
+}
+
+// e2eUpdateTeamHandler 更新分组名称/描述
+func e2eUpdateTeamHandler(w http.ResponseWriter, r *http.Request, id string) {
+	uid := userIDFrom(r)
+	team, ok := e2eTeams[id]
+	if !ok || team.UserID != uid {
+		respondError(w, 3001, "组不存在")
+		return
+	}
+	var req struct {
+		Name        *string `json:"name"`
+		Description *string `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, 1001, "参数错误")
+		return
+	}
+	if req.Name != nil {
+		if *req.Name == "" {
+			respondError(w, 3001, "组名称不能为空")
+			return
+		}
+		team.Name = *req.Name
+	}
+	if req.Description != nil {
+		team.Description = *req.Description
+	}
+	team.UpdatedAt = time.Now().Unix()
+	respondSuccess(w, team)
+}
+
+// e2eDeleteTeamHandler 删除分组：清 conversations.team_id，不删对话
+func e2eDeleteTeamHandler(w http.ResponseWriter, r *http.Request, id string) {
+	uid := userIDFrom(r)
+	team, ok := e2eTeams[id]
+	if !ok || team.UserID != uid {
+		respondError(w, 3001, "组不存在")
+		return
+	}
+	for _, conv := range e2eConversations {
+		if conv.TeamID == id {
+			conv.TeamID = ""
+		}
+	}
+	delete(e2eTeams, id)
+	respondSuccess(w, nil)
 }
 
 // ============================================================================
@@ -6839,6 +7010,35 @@ func main() {
 			} else {
 				respondError(w, 4004, "路径不存在")
 			}
+		default:
+			respondError(w, 1001, "方法不支持")
+		}
+	})))
+
+	// 对话分组（Agent Team）
+	mux.HandleFunc("/v1/teams", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			e2eListTeamsHandler(w, r)
+		case http.MethodPost:
+			e2eCreateTeamHandler(w, r)
+		default:
+			respondError(w, 1001, "方法不支持")
+		}
+	})))
+	mux.HandleFunc("/v1/teams/", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/v1/teams/")
+		if id == "" || strings.Contains(id, "/") {
+			respondError(w, 4004, "路径不存在")
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			e2eGetTeamHandler(w, r, id)
+		case http.MethodPatch:
+			e2eUpdateTeamHandler(w, r, id)
+		case http.MethodDelete:
+			e2eDeleteTeamHandler(w, r, id)
 		default:
 			respondError(w, 1001, "方法不支持")
 		}

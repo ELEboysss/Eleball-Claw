@@ -146,6 +146,7 @@ func main() {
 		&model.AgentUserCredential{},
 		&model.Assistant{},
 		&model.AssistantItem{},
+		&model.Team{},
 		&model.VisualGenerationTask{},
 		&model.VisualConversation{},
 	); err != nil {
@@ -192,6 +193,7 @@ func main() {
 	moduleRepo := repository.NewModuleRepo(db)
 	driverRepo := repository.NewDriverRepo(db)
 	assistantRepo := repository.NewAssistantRepo(db)
+	teamRepo := repository.NewTeamRepo(db)
 
 	// 6. 服务
 
@@ -311,7 +313,11 @@ func main() {
 		return client, nil
 	}
 
+	// 对话分组服务（Agent Team）
+	teamService := service.NewTeamService(db, teamRepo)
 	conversationService := service.NewConversationService(chatConversationRepo, vipService, cfg.Agent.BasePath)
+	// 对话归组（PATCH team_id）需校验分组归属
+	conversationService.SetTeamService(teamService)
 	visualUploadService := service.NewVisualUploadService(agentSandbox)
 	visualConversationService := service.NewVisualConversationService(visualConversationRepo, visualTaskRepo, visualUploadService)
 	settingService := service.NewSettingService(settingRepo)
@@ -369,6 +375,7 @@ func main() {
 	releaseHandler := handler.NewReleaseHandler(releaseService, logger)
 	clawConsoleHandler := handler.NewClawConsoleHandler(db)
 	assistantHandler := handler.NewAssistantHandler(assistantService)
+	teamHandler := handler.NewTeamHandler(teamService)
 	// 本地系统状态（docker/compose 可用性 + 模块自动上下线开关）
 	systemHandler := handler.NewSystemHandler(cfg.Modules)
 
@@ -378,7 +385,7 @@ func main() {
 		conversationHandler, moduleHandler, agentWorkflowHandler, agentHandler,
 		agentCredentialHandler, visualHandler, publicSettingHandler, releaseHandler,
 		clawConsoleHandler, cloudAccountService, adminEleAgentModelHandler, adminSettingHandler,
-		assistantHandler, systemHandler,
+		assistantHandler, teamHandler, systemHandler,
 	)
 
 	// 9. 启动
