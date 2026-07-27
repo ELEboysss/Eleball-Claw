@@ -32,6 +32,9 @@ type ToolCallingLoop struct {
 	maxSteps int
 	// maxRetries 上游可重试错误（5xx/429/网络错误）的最大尝试次数，默认 defaultUpstreamMaxAttempts
 	maxRetries int
+	// tokenBudget 单次执行 token 预算上限（0 表示不限制，AR-03）。
+	// 循环内每轮累计 usage 后校验，超限强制进入最终回答，防止单次执行耗尽用户余额。
+	tokenBudget int
 }
 
 // NewToolCallingLoop 创建循环控制器
@@ -49,14 +52,24 @@ func (l *ToolCallingLoop) SetMaxRetries(n int) {
 	}
 }
 
+// SetTokenBudget 设置单次执行的 token 预算上限（AR-03）。
+// 0 或负数表示不限制。对应 config agent.max_tokens_per_execute。
+func (l *ToolCallingLoop) SetTokenBudget(b int) {
+	if b > 0 {
+		l.tokenBudget = b
+	}
+}
+
 // RunResult 循环结果
 type RunResult struct {
-	Messages      []llm.Message
-	Records       []ToolCallRecord
-	FinalContent  string
-	ReachMaxSteps bool
-	LoopDetected  bool       // 检测到同工具同参数循环调用
-	Usage         *llm.Usage // 整个循环累计的 token 用量，用于计费
+	Messages         []llm.Message
+	Records          []ToolCallRecord
+	FinalContent     string
+	ReachMaxSteps    bool
+	LoopDetected     bool       // 检测到同工具同参数循环调用
+	ReachTokenBudget bool       // AR-03：达到 token 预算上限
+	BudgetExceeded   bool       // AR-03：执行中余额校验失败
+	Usage            *llm.Usage // 整个循环累计的 token 用量，用于计费
 }
 
 // AssistantOutput 工具循环中模型单轮非流式输出的中间内容（思考过程 / 说明文字）
@@ -129,6 +142,20 @@ func (l *ToolCallingLoop) RunWithRegistry(
 			return nil, friendlyModelCallError("模型调用失败", err, nil)
 		}
 		result.Usage = addUsage(result.Usage, resp.Usage)
+
+		// AR-03：token 预算校验，超限强制进入最终回答，防止单次执行耗尽用户余额
+		if l.tokenBudget > 0 && result.Usage != nil && result.Usage.TotalTokens >= l.tokenBudget {
+			result.ReachTokenBudget = true
+			break
+		}
+
+		// AR-03：执行中余额校验（节流由回调内部实现），余额不足强制结束循环
+		if env != nil && env.BudgetGuard != nil {
+			if gErr := env.BudgetGuard(); gErr != nil {
+				result.BudgetExceeded = true
+				break
+			}
+		}
 
 		// 兼容在正文输出内联函数调用标记（<|FunctionCallBegin|>...）而非结构化
 		// tool_calls 的模型：还原为真实 tool_calls 并剥离标记，否则标记会透传给用户
@@ -222,14 +249,19 @@ func (l *ToolCallingLoop) RunWithRegistry(
 			// 将工具结果追加到对话上下文
 			// 注意：OpenAI 标准 tool message 只需要 role/tool_call_id/content，
 			// 不传递 name 字段，避免某些严格的上游因额外字段拒绝请求。
+			// AR-01：tool 结果经 compactToolResult 提炼后回灌，避免长输出撑爆上下文。
 			result.Messages = append(result.Messages, llm.Message{
 				Role:       "tool",
 				ToolCallID: tc.ID,
-				Content:    toolResultToString(record.Output, record.Error),
+				Content:    compactToolResult(record.Output, record.Error),
 			})
 			toolCallCount++
 
 		}
+
+		// AR-01 滑动窗口：保留最近 recentToolKeep 个 tool message 完整内容，
+		// 更早的进一步压缩为短预算，控制 prompt tokens 随步数线性增长。
+		result.Messages = compactOldToolMessages(result.Messages, result.Records, recentToolKeep)
 
 		// 达到实际工具调用上限或检测到循环，强制进入最终回答
 		if toolCallCount >= l.maxSteps || result.LoopDetected {

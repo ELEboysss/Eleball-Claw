@@ -111,6 +111,9 @@ type AgentConfig struct {
 	KnowledgeBase string `mapstructure:"knowledge_base"`
 	Model         string `mapstructure:"model"`
 	MaxSteps      int    `mapstructure:"max_steps"`
+	// MaxTokensPerExecute AR-03：单次 Agent 执行的 token 预算上限（0 表示不限制）。
+	// 循环内累计 usage 超限则强制进入最终回答，防止单次执行耗尽用户余额。
+	MaxTokensPerExecute int `mapstructure:"max_tokens_per_execute"`
 	APIKey        string `mapstructure:"api_key"`
 	BaseURL       string `mapstructure:"base_url"`
 }

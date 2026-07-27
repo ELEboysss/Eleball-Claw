@@ -209,12 +209,25 @@ func (s *ChatProxyService) ChatStream(ctx context.Context, req *ChatRequest, w i
 
 	llmReq := toLLMChatRequest(*req, messages)
 
-	chunkChan, err := client.ChatStream(ctx, llmReq)
+	// AR-04 P0-3：建立流连接失败时按可重试上游错误（5xx/429/网络层）重试，重试可换 Key。
+	// 仅「建立连接失败」（ChatStream 返回 err）可重试；一旦开始返回 chunk 即不可重试。
+	var chunkChan <-chan llm.ChatChunk
+	err = callWithUpstreamRetry(ctx, s.maxRetries, func() error {
+		var cerr error
+		chunkChan, cerr = client.ChatStream(ctx, llmReq)
+		if cerr != nil {
+			if keyID != "" {
+				_ = s.keyManager.ReportFailureWithErr(keyID, cerr)
+			}
+			// 失败后尝试换 Key 重建客户端，供下一次重试使用（无可用 Key 时保留原 client）
+			if nc, nk, gerr := s.getClient(req.Provider); gerr == nil {
+				client, keyID = nc, nk
+			}
+		}
+		return cerr
+	})
 	if err != nil {
 		s.logger.Error("调用上游模型流式接口失败", zap.String("provider", req.Provider), zap.Error(err))
-		if keyID != "" {
-			_ = s.keyManager.ReportFailure(keyID, err.Error())
-		}
 		return nil, err
 	}
 

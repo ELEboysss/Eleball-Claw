@@ -39,6 +39,9 @@ type ToolEnv struct {
 	DelegateCalls *int
 	// Agent Team P3：子调用 token 用量累计钩子，挂到主循环 totalUsage（只经此钩子进账一次）
 	UsageAccumulator func(*llm.Usage)
+	// AR-03：执行中余额校验回调，循环每轮调用；返回非 nil error 表示余额不足，强制结束循环。
+	// 由 AgentService 装配（含节流，避免每轮查 DB）；子 agent env 不注入（计费由主循环统一管）。
+	BudgetGuard func() error
 }
 
 // SaveOutput 将工具产物登记为匿名资源

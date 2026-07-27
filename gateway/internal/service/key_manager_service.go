@@ -10,6 +10,7 @@ import (
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
 	"github.com/eleball/gateway/pkg/crypto"
+	"github.com/eleball/gateway/pkg/llm"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -71,6 +72,7 @@ type SelectedKey struct {
 // SelectKey 为指定 Provider 选择一个可用 Key
 // 算法：过滤未启用/超配额 → 按 Priority 升序 → 按 LastUsedAt 升序（轮询）
 func (s *KeyManagerService) SelectKey(provider string) (*SelectedKey, error) {
+	now := time.Now()
 	s.mu.RLock()
 	keys := s.keys[provider]
 	s.mu.RUnlock()
@@ -81,6 +83,10 @@ func (s *KeyManagerService) SelectKey(provider string) (*SelectedKey, error) {
 			continue
 		}
 		if k.DailyQuota > 0 && k.UsedTokens >= k.DailyQuota {
+			continue
+		}
+		// AR-04：冷却未过期的 Key 跳过（过期自动重新纳入候选）
+		if k.RateLimitedUntil != nil && k.RateLimitedUntil.After(now) {
 			continue
 		}
 		candidates = append(candidates, k)
@@ -117,13 +123,17 @@ func (s *KeyManagerService) SelectKey(provider string) (*SelectedKey, error) {
 }
 
 // ReportSuccess 报告调用成功，更新用量和最近使用时间
+// AR-04：成功后清除冷却与退避级别，重置连续失败计数。
 func (s *KeyManagerService) ReportSuccess(keyID string, usedTokens int64) error {
 	now := time.Now()
 	updates := map[string]interface{}{
-		"used_tokens":   gorm.Expr("used_tokens + ?", usedTokens),
-		"failure_count": 0,
-		"last_error":    "",
-		"last_used_at":  now,
+		"used_tokens":         gorm.Expr("used_tokens + ?", usedTokens),
+		"failure_count":       0,
+		"last_error":          "",
+		"last_error_type":     "",
+		"backoff_level":       0,
+		"rate_limited_until":  nil,
+		"last_used_at":        now,
 	}
 	if err := s.repo.UpdateFields(keyID, updates); err != nil {
 		return err
@@ -132,16 +142,114 @@ func (s *KeyManagerService) ReportSuccess(keyID string, usedTokens int64) error 
 	return s.reload()
 }
 
-// ReportFailure 报告调用失败，增加失败计数
+// ReportFailure 报告调用失败（向后兼容入口：按错误消息字符串粗分类）。
+// 优先使用 ReportFailureWithErr 传入原始 error，可拿到 HTTP 状态码精确分类。
 func (s *KeyManagerService) ReportFailure(keyID string, errMsg string) error {
-	updates := map[string]interface{}{
-		"failure_count": gorm.Expr("failure_count + 1"),
-		"last_error":    errMsg,
+	return s.ReportFailureWithErr(keyID, errors.New(errMsg))
+}
+
+// ReportFailureWithErr 报告调用失败并按错误类型设置冷却/退避/熔断（AR-04）。
+// 参考 providers/OmniRoute 三层 resilience：
+//   - rate_limit (429)：指数退避冷却，2s * 2^level，上限 5min
+//   - server_error (5xx)：1s * 2^level，上限 2min
+//   - network：500ms * 2^level，上限 1min
+//   - auth (401/403)：不冷却（Key 无效，重试无意义，靠连续失败阈值熔断）
+//   - 其他 4xx 语义错误：不冷却、不计退避（不应惩罚 Key）
+//
+// 连续失败达到 banThreshold（5 次）自动禁用该 Key（Circuit Breaker OPEN）。
+func (s *KeyManagerService) ReportFailureWithErr(keyID string, err error) error {
+	errType, baseCooldown, maxCooldown := classifyKeyError(err)
+
+	s.mu.RLock()
+	prev := s.cachedKey(keyID)
+	s.mu.RUnlock()
+	prevLevel := 0
+	prevFailures := 0
+	if prev != nil {
+		prevLevel = prev.BackoffLevel
+		prevFailures = prev.FailureCount
 	}
+
+	updates := map[string]interface{}{
+		"failure_count":   gorm.Expr("failure_count + 1"),
+		"last_error":      err.Error(),
+		"last_error_type": errType,
+	}
+	// 可冷却的错误类型才推进退避级别与冷却截止时间
+	if baseCooldown > 0 {
+		newLevel := prevLevel + 1
+		cooldown := exponentialCooldown(baseCooldown, newLevel, maxCooldown)
+		until := time.Now().Add(cooldown)
+		updates["backoff_level"] = newLevel
+		updates["rate_limited_until"] = until
+	}
+
+	// 连续失败达阈值：熔断，禁用 Key（success 会重置 failure_count，故"连续"语义成立）
+	const banThreshold = 5
+	if prevFailures+1 >= banThreshold {
+		updates["is_enabled"] = false
+	}
+
 	if err := s.repo.UpdateFields(keyID, updates); err != nil {
 		return err
 	}
 	return s.reload()
+}
+
+// cachedKey 从内存缓存按 ID 查 Key（调用方持读锁）。
+func (s *KeyManagerService) cachedKey(keyID string) *model.ProviderApiKey {
+	for _, keys := range s.keys {
+		for _, k := range keys {
+			if k.ID == keyID {
+				return k
+			}
+		}
+	}
+	return nil
+}
+
+// classifyKeyError 按上游错误类型返回 (errorType, baseCooldown, maxCooldown)。
+// baseCooldown=0 表示不冷却（auth 或不可重试的 4xx 语义错误）。
+// 实际冷却时长 = min(base * 2^newLevel, max)，由 ReportFailureWithErr 计算。
+func classifyKeyError(err error) (string, time.Duration, time.Duration) {
+	if err == nil {
+		return "unknown", 0, 0
+	}
+	code := llm.UpstreamStatusCode(err)
+	if code != 0 {
+		switch {
+		case code == 429:
+			return "rate_limit", 2 * time.Second, 5 * time.Minute
+		case code >= 500:
+			return "server_error", 1 * time.Second, 2 * time.Minute
+		case code == 401 || code == 403:
+			return "auth", 0, 0
+		default:
+			return "client_error", 0, 0
+		}
+	}
+	if llm.IsRetryableUpstreamErr(err) {
+		return "network", 500 * time.Millisecond, 1 * time.Minute
+	}
+	return "unknown", 0, 0
+}
+
+// backoffCapShift 限制 2^level 的最大位移，避免溢出。
+const backoffCapShift = 6 // 2^6 = 64 倍上限
+
+// exponentialCooldown 计算 base * 2^level（封顶 max）。
+func exponentialCooldown(base time.Duration, level int, max time.Duration) time.Duration {
+	if level < 0 {
+		level = 0
+	}
+	if level > backoffCapShift {
+		level = backoffCapShift
+	}
+	d := base * time.Duration(1<<level)
+	if d > max {
+		return max
+	}
+	return d
 }
 
 // CreateKey 新增一个 Key（自动加密）
@@ -311,19 +419,22 @@ func (s *KeyManagerService) backgroundReload() {
 // toListItem 转换为列表项（脱敏）
 func toListItem(key *model.ProviderApiKey) *model.ApiKeyListItem {
 	return &model.ApiKeyListItem{
-		ID:           key.ID,
-		Provider:     key.Provider,
-		Name:         key.Name,
-		BaseURL:      key.BaseURL,
-		KeyVersion:   key.KeyVersion,
-		IsEnabled:    key.IsEnabled,
-		Priority:     key.Priority,
-		DailyQuota:   key.DailyQuota,
-		UsedTokens:   key.UsedTokens,
-		FailureCount: key.FailureCount,
-		LastError:    key.LastError,
-		LastUsedAt:   key.LastUsedAt,
-		CreatedAt:    key.CreatedAt,
-		UpdatedAt:    key.UpdatedAt,
+		ID:               key.ID,
+		Provider:         key.Provider,
+		Name:             key.Name,
+		BaseURL:          key.BaseURL,
+		KeyVersion:       key.KeyVersion,
+		IsEnabled:        key.IsEnabled,
+		Priority:         key.Priority,
+		DailyQuota:       key.DailyQuota,
+		UsedTokens:       key.UsedTokens,
+		FailureCount:     key.FailureCount,
+		LastError:        key.LastError,
+		LastUsedAt:       key.LastUsedAt,
+		RateLimitedUntil: key.RateLimitedUntil,
+		BackoffLevel:     key.BackoffLevel,
+		LastErrorType:    key.LastErrorType,
+		CreatedAt:        key.CreatedAt,
+		UpdatedAt:        key.UpdatedAt,
 	}
 }

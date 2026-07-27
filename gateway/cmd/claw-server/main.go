@@ -335,6 +335,8 @@ func main() {
 	visualGenerationService := service.NewVisualGenerationService(visualTaskRepo, visualConversationService, billingService, eleAgentModelService, settingService, chatService, visualUploadService, logger)
 	agentWorkflowService := service.NewAgentService(conversationService, agentSessionRepo, userRepo, vipService, billingService, eleAgentModelService, agentSandbox, agentRegistry, agentSchemaBuilder, agentTrigger, agentClientResolver, cfg.Agent.Model, cfg.Agent.MaxSteps, logger)
 	agentWorkflowService.SetMaxRetries(cfg.LLM.MaxRetries)
+	// AR-03：单次 Agent 执行 token 预算上限（0 表示不限制）
+	agentWorkflowService.SetTokenBudget(cfg.Agent.MaxTokensPerExecute)
 	// claw 本地不限 Agent 模式（云端账户统一后跳过 VIP 门控，容忍无本地 user）
 	agentWorkflowService.SetUnrestricted(true)
 	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry(), moduleRegistry)

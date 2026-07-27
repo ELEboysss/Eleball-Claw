@@ -98,6 +98,13 @@ func (s *AgentService) SetMaxRetries(n int) {
 	}
 }
 
+// SetTokenBudget 设置单次 Agent 执行的 token 预算上限（AR-03，对应 agent.max_tokens_per_execute）
+func (s *AgentService) SetTokenBudget(b int) {
+	if s.toolLoop != nil {
+		s.toolLoop.SetTokenBudget(b)
+	}
+}
+
 // AgentExecuteRequest Agent 执行请求
 type AgentExecuteRequest struct {
 	SessionID       string            `json:"session_id"`
@@ -366,6 +373,9 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	messages := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID)
 
 	// 11. Function Calling 循环
+	// AR-03：执行中余额校验节流计数器（每 balanceCheckEvery 步查一次 DB，避免每轮查库）
+	balanceCheckStep := 0
+	const balanceCheckEvery = 5
 	env := &ToolEnv{
 		UserID:         userID,
 		ConversationID: conv.ID,
@@ -378,6 +388,17 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		DelegateCalls: new(int),
 		UsageAccumulator: func(u *llm.Usage) {
 			totalUsage = addUsage(totalUsage, u)
+		},
+		// AR-03：执行中余额校验，超支则优雅结束循环
+		BudgetGuard: func() error {
+			if s.billingService == nil {
+				return nil
+			}
+			balanceCheckStep++
+			if balanceCheckStep%balanceCheckEvery != 0 {
+				return nil
+			}
+			return s.billingService.CheckBalance(userID, billingProvider, billingModel, CurrencyDanwan)
 		},
 	}
 
@@ -468,6 +489,12 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	} else if result.ReachMaxSteps {
 		// 使用 warning 事件而非 error，避免前端把“已达上限”误判为失败并丢弃后续最终回答
 		s.writeEvent(w, "warning", map[string]string{"message": "工具调用次数已达上限，将基于已有结果生成回答"})
+	} else if result.ReachTokenBudget {
+		// AR-03：达到 token 预算上限
+		s.writeEvent(w, "warning", map[string]string{"message": "本次对话已达到 token 用量上限，将基于已有结果生成回答"})
+	} else if result.BudgetExceeded {
+		// AR-03：执行中余额不足
+		s.writeEvent(w, "warning", map[string]string{"message": "弹丸余额不足，已基于已有结果生成回答，请充值后继续"})
 	}
 
 	// 如果 Function Calling 循环已经得到了最终回答（例如模型在工具后直接给出文本，
