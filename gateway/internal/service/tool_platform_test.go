@@ -14,7 +14,7 @@ func TestWindowsToolRunner_Shell(t *testing.T) {
 	}
 
 	runner := &windowsToolRunner{}
-	out, err := runner.Shell(context.Background(), "echo", []string{"hello", "world"})
+	out, err := runner.Shell(context.Background(), "echo", []string{"hello", "world"}, "")
 	if err != nil {
 		t.Fatalf("Windows Shell 执行失败: %v", err)
 	}
@@ -30,7 +30,7 @@ func TestWindowsToolRunner_ShellSafety(t *testing.T) {
 	}
 
 	runner := &windowsToolRunner{}
-	_, err := runner.Shell(context.Background(), "echo", []string{"hello", "&", "dir"})
+	_, err := runner.Shell(context.Background(), "echo", []string{"hello", "&", "dir"}, "")
 	if err == nil {
 		t.Fatal("Windows Shell 应拦截 & 危险字符")
 	}
@@ -43,7 +43,7 @@ func TestDefaultPlatformRunner_ShellOnNonWindows(t *testing.T) {
 	}
 
 	runner := &defaultPlatformRunner{}
-	out, err := runner.Shell(context.Background(), "echo", []string{"hello"})
+	out, err := runner.Shell(context.Background(), "echo", []string{"hello"}, "")
 	if err != nil {
 		t.Fatalf("Linux/macOS Shell 执行失败: %v", err)
 	}

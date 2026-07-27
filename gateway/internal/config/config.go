@@ -114,6 +114,9 @@ type AgentConfig struct {
 	// MaxTokensPerExecute AR-03：单次 Agent 执行的 token 预算上限（0 表示不限制）。
 	// 循环内累计 usage 超限则强制进入最终回答，防止单次执行耗尽用户余额。
 	MaxTokensPerExecute int `mapstructure:"max_tokens_per_execute"`
+	// MaxCostPerTask AR-03：CallAssistant 子任务单次成本上限（弹丸，0 表示不限制）。
+	// 编排器据此装配 env.CostGuard，每轮按 EstimateCost 估算累计成本，超限中止子任务。
+	MaxCostPerTask int64 `mapstructure:"max_cost_per_task"`
 	APIKey        string `mapstructure:"api_key"`
 	BaseURL       string `mapstructure:"base_url"`
 }

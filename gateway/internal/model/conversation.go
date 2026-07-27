@@ -29,8 +29,11 @@ type TokenUsage struct {
 	CostAmount     int64  `json:"cost_amount"`                      // 实际扣费（分）
 	Currency       string `gorm:"default:'danwan'" json:"currency"` // 扣费货币：danwan / elegant
 	// Agent Team P5：用量来源（agent / chat / call_assistant:子session / visual），便于协同计费对账
-	Source    string    `gorm:"default:'agent'" json:"source"`
-	CreatedAt time.Time `json:"created_at"`
+	Source string `gorm:"default:'agent'" json:"source"`
+	// AR-03：会话/任务归集维度。主执行记会话 ID，CallAssistant 子任务记子 session ID，
+	// 供按会话/任务核算成本（AR-07 用量可见性消费）。GORM AutoMigrate 自动加列。
+	AgentTaskID string    `gorm:"index" json:"agent_task_id"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // BalanceTransaction 余额流水

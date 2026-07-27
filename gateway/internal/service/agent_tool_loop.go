@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/eleball/gateway/pkg/llm"
 )
@@ -24,6 +25,9 @@ type ToolCallRecord struct {
 	Arguments string                 `json:"arguments"`
 	Output    map[string]interface{} `json:"output,omitempty"`
 	Error     string                 `json:"error,omitempty"`
+	// AR-08：工具调用审计--延迟（毫秒）与输出大小（字节估算）
+	LatencyMs  int64 `json:"latency_ms,omitempty"`
+	OutputSize int   `json:"output_size,omitempty"`
 }
 
 // ToolCallingLoop Function Calling 循环
@@ -69,6 +73,8 @@ type RunResult struct {
 	LoopDetected     bool       // 检测到同工具同参数循环调用
 	ReachTokenBudget bool       // AR-03：达到 token 预算上限
 	BudgetExceeded   bool       // AR-03：执行中余额校验失败
+	ReachCostBudget  bool       // AR-03：达到 max_cost_per_task 成本上限
+	Cancelled        bool       // AR-02：客户端取消（ctx 取消）
 	Usage            *llm.Usage // 整个循环累计的 token 用量，用于计费
 }
 
@@ -120,6 +126,11 @@ func (l *ToolCallingLoop) RunWithRegistry(
 	const maxConsecutiveRepeats = 2
 
 	for step := 0; step < maxIterations; step++ {
+		// AR-02：客户端取消（断连）时立即结束循环，保留已产出供前端展示
+		if ctx.Err() != nil {
+			result.Cancelled = true
+			break
+		}
 		req := llm.ChatRequest{
 			Model:    model,
 			Messages: result.Messages,
@@ -153,6 +164,14 @@ func (l *ToolCallingLoop) RunWithRegistry(
 		if env != nil && env.BudgetGuard != nil {
 			if gErr := env.BudgetGuard(); gErr != nil {
 				result.BudgetExceeded = true
+				break
+			}
+		}
+
+		// AR-03：每步成本门控（max_cost_per_task），累计成本超限强制进入最终回答
+		if env != nil && env.CostGuard != nil && result.Usage != nil {
+			if gErr := env.CostGuard(result.Usage); gErr != nil {
+				result.ReachCostBudget = true
 				break
 			}
 		}
@@ -229,11 +248,18 @@ func (l *ToolCallingLoop) RunWithRegistry(
 				if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
 					record.Error = fmt.Sprintf("参数解析失败: %v", err)
 				} else {
+					// AR-08：工具调用审计--计时
+					start := time.Now()
 					output, err := tool.Func(ctx, input, env)
+					record.LatencyMs = time.Since(start).Milliseconds()
 					if err != nil {
 						record.Error = err.Error()
 					} else {
 						record.Output = output
+						// AR-08：输出大小估算（JSON 序列化字节数，失败则 0）
+						if sz, mErr := json.Marshal(output); mErr == nil {
+							record.OutputSize = len(sz)
+						}
 					}
 				}
 			}

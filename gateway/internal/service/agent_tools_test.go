@@ -26,7 +26,7 @@ func (m *mockRunner) OCR(ctx context.Context, imagePath string) (string, error) 
 	return m.ocrResult, m.ocrErr
 }
 
-func (m *mockRunner) Shell(ctx context.Context, command string, args []string) (string, error) {
+func (m *mockRunner) Shell(ctx context.Context, command string, args []string, cwd string) (string, error) {
 	m.lastShellCmd = command
 	m.lastShellArgs = args
 	return m.shellOutput, m.shellErr

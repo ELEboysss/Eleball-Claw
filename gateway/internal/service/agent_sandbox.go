@@ -13,6 +13,9 @@ import (
 type FileSandbox struct {
 	basePath      string
 	knowledgeBase string
+	// AR-06：claw 本地工作目录根（per-session，经 WithProjectRoot 克隆设置）。
+	// 空表示未启用 cwd（云端多租户）。ReadFile/WriteFile 据此放行第三根。
+	projectRoot string
 }
 
 // NewFileSandbox 创建沙箱
@@ -20,6 +23,16 @@ func NewFileSandbox(basePath, knowledgeBase string) *FileSandbox {
 	return &FileSandbox{
 		basePath:      basePath,
 		knowledgeBase: knowledgeBase,
+	}
+}
+
+// WithProjectRoot 返回带 projectRoot 的浅拷贝（AR-06 per-session，避免改共享单例）。
+// projectRoot 应为已 EvalSymlinks 的绝对路径。
+func (fs *FileSandbox) WithProjectRoot(projectRoot string) *FileSandbox {
+	return &FileSandbox{
+		basePath:      fs.basePath,
+		knowledgeBase: fs.knowledgeBase,
+		projectRoot:   projectRoot,
 	}
 }
 
@@ -44,6 +57,72 @@ func (fs *FileSandbox) ResolvePath(userID, conversationID, relPath string) (stri
 	}
 
 	return "", errors.New("访问路径超出允许范围")
+}
+
+// FileEntry 目录条目（AR-06，对齐 pi-web FileEntry，供 /cwd/browse 与文件浏览器用）
+type FileEntry struct {
+	Name     string `json:"name"`
+	IsDir    bool   `json:"is_dir"`
+	Size     int64  `json:"size"`
+	Modified int64  `json:"modified"` // unix seconds
+}
+
+// underDir 严格判断 path 是否在 dir 内（防前缀碰撞：/a/b 不算在 /a/bc 内）
+func underDir(path, dir string) bool {
+	if path == dir {
+		return true
+	}
+	return strings.HasPrefix(path, dir+string(filepath.Separator))
+}
+
+// ResolveProjectPath 将相对路径解析为 cwd 下的绝对路径（AR-06 claw cwd）。
+// 安全：filepath.Clean 规范化 + 拒绝 .. + EvalSymlinks 解析软链后必须仍在 cwd 下（防软链逃逸）。
+// cwd 应为已 EvalSymlinks 的绝对路径（由 /cwd/validate 校验）。
+func (fs *FileSandbox) ResolveProjectPath(cwd, relPath string) (string, error) {
+	if cwd == "" {
+		return "", errors.New("工作目录未配置")
+	}
+	if strings.Contains(relPath, "..") {
+		return "", errors.New("路径包含非法字符")
+	}
+	cwdClean := filepath.Clean(cwd)
+	absPath := filepath.Clean(filepath.Join(cwdClean, relPath))
+	// EvalSymlinks 解析软链；文件不存在时返回错误，用 Clean 后路径继续前缀校验（写场景文件尚未创建）
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		absPath = filepath.Clean(resolved)
+	}
+	if !underDir(absPath, cwdClean) {
+		return "", errors.New("访问路径超出工作目录范围")
+	}
+	return absPath, nil
+}
+
+// ListDir 列出 cwd 下子目录条目（AR-06，供 /cwd/browse 与文件浏览器用）。
+// relPath 为空或 "." 表示 cwd 自身。
+func (fs *FileSandbox) ListDir(cwd, relPath string) ([]FileEntry, error) {
+	absPath, err := fs.ResolveProjectPath(cwd, relPath)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("读取目录失败: %w", err)
+	}
+	result := make([]FileEntry, 0, len(entries))
+	for _, e := range entries {
+		var size, modified int64
+		if info, err := e.Info(); err == nil {
+			size = info.Size()
+			modified = info.ModTime().Unix()
+		}
+		result = append(result, FileEntry{
+			Name:     e.Name(),
+			IsDir:    e.IsDir(),
+			Size:     size,
+			Modified: modified,
+		})
+	}
+	return result, nil
 }
 
 // ConversationDir 获取 conversation 目录，若不存在则创建
@@ -105,13 +184,19 @@ func (fs *FileSandbox) ReadFile(path string) ([]byte, error) {
 			allowed = true
 		}
 	}
+	// AR-06：claw cwd 第三根（per-session 克隆时设置）
+	if !allowed && fs.projectRoot != "" {
+		if underDir(absPath, filepath.Clean(fs.projectRoot)) {
+			allowed = true
+		}
+	}
 	if !allowed {
 		return nil, errors.New("访问路径超出允许范围")
 	}
 	return os.ReadFile(absPath)
 }
 
-// WriteFile 写入沙箱内文件（接收绝对路径，需校验在 basePath 下）
+// WriteFile 写入沙箱内文件（接收绝对路径，需校验在 basePath 或 projectRoot 下）
 func (fs *FileSandbox) WriteFile(path string, data []byte) error {
 	if path == "" {
 		return errors.New("路径为空")
@@ -120,11 +205,20 @@ func (fs *FileSandbox) WriteFile(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	if fs.basePath == "" {
-		return errors.New("沙箱基础路径未配置")
+	allowed := false
+	if fs.basePath != "" {
+		baseAbs, _ := filepath.Abs(fs.basePath)
+		if strings.HasPrefix(absPath, baseAbs) {
+			allowed = true
+		}
 	}
-	baseAbs, _ := filepath.Abs(fs.basePath)
-	if !strings.HasPrefix(absPath, baseAbs) {
+	// AR-06：claw cwd 第三根
+	if !allowed && fs.projectRoot != "" {
+		if underDir(absPath, filepath.Clean(fs.projectRoot)) {
+			allowed = true
+		}
+	}
+	if !allowed {
 		return errors.New("访问路径超出允许范围")
 	}
 	if err := os.MkdirAll(filepath.Dir(absPath), 0750); err != nil {

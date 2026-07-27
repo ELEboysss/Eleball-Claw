@@ -137,7 +137,7 @@ func TestAgentService_ListSessions(t *testing.T) {
 	conv, err := convSvc.CreateConversation(ctx, "u2", CreateConversationReq{Title: "t"})
 	require.NoError(t, err)
 
-	_, err = agentSvc.createSession(ctx, "u2", conv.ID, "test")
+	_, err = agentSvc.createSession(ctx, "u2", conv.ID, "test", "")
 	require.NoError(t, err)
 
 	items, total, err := agentSvc.ListSessions(ctx, "u2", 1, 10)
@@ -151,7 +151,7 @@ func TestAgentService_GetSession_OwnerCheck(t *testing.T) {
 	ctx := context.Background()
 	conv, err := convSvc.CreateConversation(ctx, "u2", CreateConversationReq{Title: "t"})
 	require.NoError(t, err)
-	session, err := agentSvc.createSession(ctx, "u2", conv.ID, "test")
+	session, err := agentSvc.createSession(ctx, "u2", conv.ID, "test", "")
 	require.NoError(t, err)
 
 	_, err = agentSvc.GetSession(ctx, session.ID, "u1")
@@ -168,7 +168,7 @@ func TestAgentService_DeleteSession(t *testing.T) {
 	ctx := context.Background()
 	conv, err := convSvc.CreateConversation(ctx, "u2", CreateConversationReq{Title: "t"})
 	require.NoError(t, err)
-	session, err := agentSvc.createSession(ctx, "u2", conv.ID, "test")
+	session, err := agentSvc.createSession(ctx, "u2", conv.ID, "test", "")
 	require.NoError(t, err)
 
 	err = agentSvc.DeleteSession(ctx, session.ID, "u2")

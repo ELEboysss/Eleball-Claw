@@ -102,6 +102,23 @@ func (h *AgentWorkflowHandler) GetSession(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": item})
 }
 
+// GetSessionAudit 查询 Agent Session 统一审计视图（AR-08）。
+// 聚合工具调用记录（latency/output_size）与文件写审计（unified diff），供 claw-console/admin 展示。
+func (h *AgentWorkflowHandler) GetSessionAudit(c *gin.Context) {
+	userID, ok := h.getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 2001, "message": "未登录"})
+		return
+	}
+	id := c.Param("id")
+	audit, err := h.agentService.GetSessionAudit(c.Request.Context(), id, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 5000, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": audit})
+}
+
 // DeleteSession 删除 Agent Session 及其磁盘资源
 func (h *AgentWorkflowHandler) DeleteSession(c *gin.Context) {
 	userID, ok := h.getUserID(c)

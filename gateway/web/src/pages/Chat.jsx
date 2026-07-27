@@ -96,6 +96,7 @@ export default function Chat() {
   const [confirmState, setConfirmState] = useState({ open: false })
   const [models, setModels] = useState([])
   const [balance, setBalance] = useState(null)
+  const [lastUsage, setLastUsage] = useState(null) // AR-07：最近一次 Agent 执行用量（tokens/cost/步数/上下文规模）
   const [loginOpen, setLoginOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -248,6 +249,23 @@ export default function Chat() {
 
   // BYOK 模型不支持 Agent 工具，切换模型时自动关闭
   const supportsAgent = currentProfile?.provider === 'ELE_AGENT'
+  // AR-07：token 数值紧凑格式化（1234 -> 1.2k，1234567 -> 1.2M）
+  const formatTokens = (n) => {
+    if (n == null) return ''
+    if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M'
+    if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
+    return String(n)
+  }
+  // AR-05：aria-live 执行状态播报文本（思考中/调用工具/生成回答/出错），供屏幕阅读器感知 Agent 执行进度
+  const statusAnnouncement = agentStatus === 'error'
+    ? '生成出错'
+    : !loading
+      ? ''
+      : agentStatus === 'executing'
+        ? '正在调用工具'
+        : agentStatus === 'answering'
+          ? '正在生成回答'
+          : '正在思考'
   useEffect(() => {
     if (!supportsAgent && enableTools) {
       setEnableTools(false)
@@ -455,6 +473,7 @@ export default function Chat() {
     const next = [conv, ...conversations]
     updateConversations(next)
     switchConversation(conv.id)
+    setLastUsage(null) // AR-07：新对话清空用量状态条
   }
 
   const handleDeleteConversation = async (e, id) => {
@@ -771,6 +790,7 @@ export default function Chat() {
       setStreamingAgentMsgId(assistantMessage.id)
 
       let agentResult = null
+      setLastUsage(null) // AR-07：执行开始清空旧用量，避免流式期间显示陈旧数据
       try {
         agentResult = await executeAgent({
           conversationId: currentConversation.id,
@@ -799,6 +819,7 @@ export default function Chat() {
         }))
         setError(errorMsg)
       }
+      setLastUsage(agentResult?.usage || null) // AR-07：用量可见性（claw 无 cost_amount，状态条自动裁剪成本）
 
       // Agent 流式结束或失败后，统一用 agentResult 中的最终字段覆盖占位消息，
       // 并做最终持久化。toolSummary 拼入 content 作为历史上下文。
@@ -1279,6 +1300,27 @@ export default function Chat() {
           </div>
         </div>
 
+        {/* AR-07：用量可见性状态条（tokens/步数/成本/上下文规模），Agent 完成后展示；claw 无 cost_amount 自动裁剪成本 */}
+        {lastUsage && agentStatus === 'done' && !loading && (
+          <div className="flex-shrink-0 bg-eleball-surface/95 border-b border-eleball-outline-variant px-4 py-1 flex items-center gap-3 text-[11px] text-eleball-text-secondary overflow-x-auto">
+            <span className="inline-flex items-center gap-1 whitespace-nowrap">
+              <Check className="w-3 h-3 text-green-500" /> 完成
+            </span>
+            {lastUsage.total_tokens != null && (
+              <span className="whitespace-nowrap">{formatTokens(lastUsage.total_tokens)} tokens</span>
+            )}
+            {lastUsage.step_count > 0 && (
+              <span className="whitespace-nowrap">{lastUsage.step_count} 步</span>
+            )}
+            {lastUsage.prompt_tokens != null && (
+              <span className="whitespace-nowrap">上下文 {formatTokens(lastUsage.prompt_tokens)}</span>
+            )}
+            {lastUsage.cost_amount != null && (
+              <span className="whitespace-nowrap">{lastUsage.cost_amount} 弹丸</span>
+            )}
+          </div>
+        )}
+
         {/* Messages */}
         <div className="flex-1 overflow-y-auto min-h-0 px-4 py-4 space-y-4">
           {(currentConversation?.messages || []).map((message, idx) => (
@@ -1485,6 +1527,10 @@ export default function Chat() {
                 </div>
               </div>
             </div>
+          </div>
+          {/* AR-05：执行状态 aria-live 播报区（视觉隐藏，屏幕阅读器播报思考中/调用工具/生成回答/出错） */}
+          <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            {statusAnnouncement}
           </div>
           <p className="text-center text-xs text-eleball-text-tertiary mt-2">
             {user?.nickname || user?.username} · {currentLabel}

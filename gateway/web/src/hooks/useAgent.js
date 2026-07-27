@@ -279,6 +279,7 @@ export function useAgent() {
                   toolSummary: finalToolSummary,
                   warning: finalWarning,
                   sessionId: event.data?.session_id || '',
+                  usage: event.data?.usage || null, // AR-07：用量可见性（tokens/cost/步数/上下文规模）
                   steps: finalSteps
                 })
               }
@@ -290,7 +291,7 @@ export function useAgent() {
         // AR-02：用户主动取消（AbortError）不算错误，置为 done/cancelled 状态
         if (err.name === 'AbortError' || abortRef.current) {
           setStatus('done')
-          resolve({ answer: finalAnswer, toolSteps: finalToolSteps, reasoningContent: finalReasoning, intermediateAnswer: finalIntermediate, resources: finalResources, toolSummary: finalToolSummary, warning: finalWarning, sessionId: '', steps: finalSteps, cancelled: true })
+          resolve({ answer: finalAnswer, toolSteps: finalToolSteps, reasoningContent: finalReasoning, intermediateAnswer: finalIntermediate, resources: finalResources, toolSummary: finalToolSummary, warning: finalWarning, sessionId: '', usage: null, steps: finalSteps, cancelled: true })
           return
         }
         setStatus('error')

@@ -337,6 +337,8 @@ func main() {
 	agentWorkflowService.SetMaxRetries(cfg.LLM.MaxRetries)
 	// AR-03：单次 Agent 执行 token 预算上限（0 表示不限制）
 	agentWorkflowService.SetTokenBudget(cfg.Agent.MaxTokensPerExecute)
+	// AR-03：CallAssistant 子任务单次成本上限（0 表示不限制），每轮按估算成本门控
+	agentWorkflowService.SetMaxCostPerTask(cfg.Agent.MaxCostPerTask)
 	// claw 本地不限 Agent 模式（云端账户统一后跳过 VIP 门控，容忍无本地 user）
 	agentWorkflowService.SetUnrestricted(true)
 	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry(), moduleRegistry)
@@ -393,6 +395,7 @@ func main() {
 	adminSettingHandler := handler.NewAdminSettingHandler(settingService)
 	releaseHandler := handler.NewReleaseHandler(releaseService, logger)
 	clawConsoleHandler := handler.NewClawConsoleHandler(db)
+	clawCwdHandler := handler.NewClawCwdHandler()
 	assistantHandler := handler.NewAssistantHandler(assistantService)
 	teamHandler := handler.NewTeamHandler(teamService)
 	teamMemoryHandler := handler.NewTeamMemoryHandler(teamMemoryService)
@@ -404,7 +407,7 @@ func main() {
 		chatHandler, syncHandler, eleAgentHandler,
 		conversationHandler, moduleHandler, agentWorkflowHandler, agentHandler,
 		agentCredentialHandler, visualHandler, publicSettingHandler, releaseHandler,
-		clawConsoleHandler, cloudAccountService, adminEleAgentModelHandler, adminSettingHandler,
+		clawConsoleHandler, clawCwdHandler, cloudAccountService, adminEleAgentModelHandler, adminSettingHandler,
 		assistantHandler, teamHandler, teamMemoryHandler, systemHandler,
 	)
 

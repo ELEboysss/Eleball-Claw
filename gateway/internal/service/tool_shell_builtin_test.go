@@ -201,20 +201,20 @@ func TestWindowsRunnerShellUsesBuiltin(t *testing.T) {
 	runner := &windowsToolRunner{}
 
 	// Windows 无 grep/find 二进制时也必须可用
-	out, err := runner.Shell(context.Background(), "grep", []string{"aider", f})
+	out, err := runner.Shell(context.Background(), "grep", []string{"aider", f}, "")
 	if err != nil || !strings.Contains(out, "1:aider line") {
 		t.Fatalf("runner grep 失败: %q, err=%v", out, err)
 	}
-	out, err = runner.Shell(context.Background(), "find", []string{dir, "-name", "*note*"})
+	out, err = runner.Shell(context.Background(), "find", []string{dir, "-name", "*note*"}, "")
 	if err != nil || !strings.Contains(out, "note.txt") {
 		t.Fatalf("runner find 失败: %q, err=%v", out, err)
 	}
 
 	// 白名单与危险字符拦截仍然生效
-	if _, err = runner.Shell(context.Background(), "rm", []string{"-rf", "/"}); err == nil {
+	if _, err = runner.Shell(context.Background(), "rm", []string{"-rf", "/"}, ""); err == nil {
 		t.Fatal("非白名单命令应被拒绝")
 	}
-	if _, err = runner.Shell(context.Background(), "echo", []string{"a", "&", "b"}); err == nil {
+	if _, err = runner.Shell(context.Background(), "echo", []string{"a", "&", "b"}, ""); err == nil {
 		t.Fatal("危险字符应被拦截")
 	}
 }

@@ -42,6 +42,7 @@ func NewClawRouter(
 	publicSettingHandler *handler.PublicSettingHandler,
 	releaseHandler *handler.ReleaseHandler,
 	clawConsoleHandler *handler.ClawConsoleHandler,
+	clawCwdHandler *handler.ClawCwdHandler,
 	cloudAccount *service.CloudAccountService,
 	adminEleAgentModelHandler *handler.AdminEleAgentModelHandler,
 	adminSettingHandler *handler.AdminSettingHandler,
@@ -142,6 +143,7 @@ func NewClawRouter(
 				auth.GET("/agent/sessions", agentWorkflowHandler.ListSessions)
 				auth.DELETE("/agent/sessions", agentWorkflowHandler.DeleteSessions)
 				auth.GET("/agent/sessions/:id", agentWorkflowHandler.GetSession)
+				auth.GET("/agent/sessions/:id/audit", agentWorkflowHandler.GetSessionAudit)
 				auth.DELETE("/agent/sessions/:id", agentWorkflowHandler.DeleteSession)
 			}
 
@@ -230,6 +232,10 @@ func NewClawRouter(
 				// 本地设置（读写；页面已裁剪为本地生效项，云端运营类设置不在此暴露）
 				console.GET("/settings", adminSettingHandler.GetSettings)
 				console.PUT("/settings", adminSettingHandler.UpdateSettings)
+
+				// AR-06：本地工作目录选择与校验（DirectoryPicker 消费，仅 claw）
+				console.GET("/cwd/browse", clawCwdHandler.BrowseCwd)
+				console.POST("/cwd/validate", clawCwdHandler.ValidateCwd)
 			}
 		}
 

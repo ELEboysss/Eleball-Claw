@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -41,6 +43,7 @@ type AgentService struct {
 	clientResolver       AgentLLMClientResolver
 	model                string
 	maxSteps             int
+	maxCostPerTask       int64 // AR-03：CallAssistant 子任务单次成本上限（弹丸，0 不限制）
 	logger               *zap.Logger
 	// unrestricted=true 时跳过 VIP 门控（Agent 模式/文件工具/试用次数），并容忍本地 user 未命中。
 	// claw 本地不限 Agent 模式（云端账户统一后，本地无 users 行），置 true；云端 cmd/server 保持 false。
@@ -105,6 +108,14 @@ func (s *AgentService) SetTokenBudget(b int) {
 	}
 }
 
+// SetMaxCostPerTask 设置 CallAssistant 子任务的单次成本上限（AR-03，对应 agent.max_cost_per_task）。
+// 0 或负数表示不限制；编排器据此装配 env.CostGuard，每轮按 billingService.EstimateCost 估算累计成本并门控。
+func (s *AgentService) SetMaxCostPerTask(c int64) {
+	if c > 0 {
+		s.maxCostPerTask = c
+	}
+}
+
 // AgentExecuteRequest Agent 执行请求
 type AgentExecuteRequest struct {
 	SessionID       string            `json:"session_id"`
@@ -122,6 +133,9 @@ type AgentExecuteRequest struct {
 	SearchProvider  *string           `json:"search_provider,omitempty"`
 	// AssistantID 本次执行应用的助手（非空优先于会话绑定的 assistant_id）
 	AssistantID string `json:"assistant_id"`
+	// AR-06：claw 本地工作目录（用户授权的项目目录）。仅 claw（unrestricted=true）启用；
+	// 云端多租户忽略此字段，不启用 cwd 解析。
+	Cwd string `json:"cwd"`
 }
 
 // normalizeRequest 兼容前端可能使用的 content / message 字段
@@ -222,7 +236,9 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	var totalUsage *llm.Usage
 	defer func() {
 		if s.billingService != nil && totalUsage != nil {
-			if err := s.billingService.DeductWithSource(userID, billingProvider, billingModel, CurrencyDanwan, "agent", totalUsage); err != nil && s.logger != nil {
+			// AR-03：会话成本归集--主执行用量归属当前对话
+			attr := BillingAttribution{ConversationID: conv.ID}
+			if err := s.billingService.DeductWithAttribution(userID, billingProvider, billingModel, CurrencyDanwan, "agent", attr, totalUsage); err != nil && s.logger != nil {
 				s.logger.Warn("Agent 工作流扣费失败", zap.String("user_id", userID), zap.String("provider", billingProvider), zap.String("model", billingModel), zap.Error(err))
 			}
 		}
@@ -303,8 +319,23 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		return nil
 	}
 
+	// AR-06：claw cwd 解析（仅 unrestricted=true 即 claw 启用；云端忽略 req.Cwd 维持多租户隔离）。
+	// EvalSymlinks 防软链逃逸，Stat 校验为目录。无效时 cwd 留空，回退会话沙箱。
+	resolvedCwd := ""
+	if s.unrestricted && req.Cwd != "" {
+		if abs, aErr := filepath.Abs(req.Cwd); aErr == nil {
+			if info, statErr := os.Stat(abs); statErr == nil && info.IsDir() {
+				if resolved, eErr := filepath.EvalSymlinks(abs); eErr == nil {
+					resolvedCwd = filepath.Clean(resolved)
+				} else {
+					resolvedCwd = filepath.Clean(abs)
+				}
+			}
+		}
+	}
+
 	// 8. 创建 Agent Session
-	session, err := s.createSession(ctx, userID, conv.ID, req.Message)
+	session, err := s.createSession(ctx, userID, conv.ID, req.Message, resolvedCwd)
 	if err != nil {
 		s.writeEvent(w, "error", map[string]string{"message": err.Error()})
 		s.writeEvent(w, "done", nil)
@@ -314,12 +345,25 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	// 执行结束后更新 Session 状态；执行成功为 succeeded，任何错误事件发出后为 failed
 	execErr := error(nil)
 	toolChainJSON := ""
+	stepCount := 0 // AR-07：工具调用步数（result 声明在 defer 之后，无法在 defer 内引用，故用闭包变量暂存）
 	defer func() {
 		status := "succeeded"
 		if execErr != nil {
 			status = "failed"
 		}
-		if err := s.updateSessionStatus(session.ID, status, toolChainJSON); err != nil && s.logger != nil {
+		// AR-07：累计 token 与估算成本（弹丸）。totalUsage 在 defer 时已定型；claw 无 billing 时 costAmount=0
+		var totalTokens int64
+		var costAmount int64
+		if totalUsage != nil {
+			totalTokens = int64(totalUsage.TotalTokens)
+			if totalTokens == 0 {
+				totalTokens = int64(totalUsage.PromptTokens + totalUsage.CompletionTokens)
+			}
+			if s.billingService != nil {
+				costAmount = s.billingService.EstimateCost(billingProvider, billingModel, CurrencyDanwan, totalUsage)
+			}
+		}
+		if err := s.updateSessionStatus(session.ID, status, toolChainJSON, totalTokens, stepCount, costAmount); err != nil && s.logger != nil {
 			s.logger.Warn("更新 Agent Session 状态失败", zap.String("session_id", session.ID), zap.String("status", status), zap.Error(err))
 		}
 	}()
@@ -381,6 +425,7 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		ConversationID: conv.ID,
 		SessionID:      session.ID,
 		Sandbox:        s.sandbox,
+		Cwd:            resolvedCwd, // AR-06：claw 工作目录（空则文件工具回退会话沙箱）
 		SessionRepo:    s.sessionRepo,
 		SearchProvider: searchProvider,
 		// Agent Team P3：委派计数器（每次 execute 独立，上限 5）+ 子调用用量累计钩子
@@ -400,6 +445,10 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 			}
 			return s.billingService.CheckBalance(userID, billingProvider, billingModel, CurrencyDanwan)
 		},
+	}
+	// AR-06：cwd 非空时用带 projectRoot 的沙箱克隆（per-session，放行 cwd 第三根读写）
+	if resolvedCwd != "" {
+		env.Sandbox = s.sandbox.WithProjectRoot(resolvedCwd)
 	}
 
 	modelName := s.model
@@ -481,6 +530,7 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 			toolChainJSON = string(b)
 		}
 	}
+	stepCount = len(result.Records) // AR-07：工具步数供用量展示
 
 	// 11. 输出最终回答
 	if result.LoopDetected {
@@ -495,6 +545,19 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	} else if result.BudgetExceeded {
 		// AR-03：执行中余额不足
 		s.writeEvent(w, "warning", map[string]string{"message": "弹丸余额不足，已基于已有结果生成回答，请充值后继续"})
+	} else if result.ReachCostBudget {
+		// AR-03：子任务成本超限（max_cost_per_task）
+		s.writeEvent(w, "warning", map[string]string{"message": "子任务成本已达上限，将基于已有结果生成回答"})
+	}
+
+	// AR-02：客户端取消（断连）。连接已断，不再生成最终回答，仅持久化已产出的工具记录。
+	// session 状态由 defer 置为 failed；前端通过 aborted 状态区分「完成」与「已取消」。
+	if result.Cancelled {
+		execErr = fmt.Errorf("用户取消执行")
+		// writeEvent 在连接已断时会失败，忽略错误
+		s.writeEvent(w, "cancelled", map[string]string{"session_id": session.ID})
+		s.writeEvent(w, "done", map[string]string{"session_id": session.ID, "cancelled": "true"})
+		return nil
 	}
 
 	// 如果 Function Calling 循环已经得到了最终回答（例如模型在工具后直接给出文本，
@@ -505,7 +568,7 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		s.saveAgentAssistantMessage(ctx, conv.ID, userID, session.ID, result.Records, result.FinalContent)
 		// Agent Team P2：组内对话执行成功后异步提取组共享记忆（失败仅记日志）
 		s.extractTeamMemoryAsync(conv, userID, modelName, llmClient, req.Message, result.FinalContent)
-		s.writeEvent(w, "done", map[string]string{"session_id": session.ID})
+		s.writeEvent(w, "done", map[string]interface{}{"session_id": session.ID, "usage": s.buildUsagePayload(totalUsage, stepCount, billingProvider, billingModel)})
 		return nil
 	}
 
@@ -546,18 +609,18 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	s.saveAgentAssistantMessage(ctx, conv.ID, userID, session.ID, result.Records, finalAnswer)
 	// Agent Team P2：组内对话执行成功后异步提取组共享记忆（失败仅记日志）
 	s.extractTeamMemoryAsync(conv, userID, modelName, llmClient, req.Message, finalAnswer)
-	s.writeEvent(w, "done", map[string]string{"session_id": session.ID})
+	s.writeEvent(w, "done", map[string]interface{}{"session_id": session.ID, "usage": s.buildUsagePayload(totalUsage, stepCount, billingProvider, billingModel)})
 	return nil
 }
 
 // createSession 创建 Agent Session
-func (s *AgentService) createSession(ctx context.Context, userID, conversationID, message string) (*model.AgentSession, error) {
-	return s.createSessionWithParent(ctx, userID, conversationID, "", message)
+func (s *AgentService) createSession(ctx context.Context, userID, conversationID, message, cwd string) (*model.AgentSession, error) {
+	return s.createSessionWithParent(ctx, userID, conversationID, "", message, cwd)
 }
 
 // createSessionWithParent 创建 Agent Session；Agent Team P3：parentSessionID 非空时记录
 // 子调用 provenance（编排者触发 CallAssistant 时子 session 关联父 session）
-func (s *AgentService) createSessionWithParent(ctx context.Context, userID, conversationID, parentSessionID, message string) (*model.AgentSession, error) {
+func (s *AgentService) createSessionWithParent(ctx context.Context, userID, conversationID, parentSessionID, message, cwd string) (*model.AgentSession, error) {
 	if err := s.ensureSessionQuota(ctx, userID); err != nil {
 		return nil, err
 	}
@@ -579,6 +642,7 @@ func (s *AgentService) createSessionWithParent(ctx context.Context, userID, conv
 		Status:          "running",
 		Permissions:     "[]",
 		DiskPath:        sessionDir,
+		Cwd:             cwd, // AR-06：claw 工作目录（子 session 继承父 cwd）
 		CreatedAt:       time.Now().Unix(),
 		UpdatedAt:       time.Now().Unix(),
 	}
@@ -789,6 +853,28 @@ func (s *AgentService) writeEvent(w io.Writer, event string, data interface{}) {
 	}
 }
 
+// buildUsagePayload AR-07：构建 SSE done 事件 usage 负载（tokens/cost/步数/上下文规模）。
+// claw 无 billing 时省略 cost 字段（前端裁剪成本展示）；prompt_tokens 反映最近上下文规模供 contextUsage 展示。
+func (s *AgentService) buildUsagePayload(totalUsage *llm.Usage, stepCount int, billingProvider, billingModel string) map[string]interface{} {
+	payload := map[string]interface{}{
+		"step_count": stepCount,
+	}
+	if totalUsage != nil {
+		total := totalUsage.TotalTokens
+		if total == 0 {
+			total = totalUsage.PromptTokens + totalUsage.CompletionTokens
+		}
+		payload["total_tokens"] = total
+		payload["prompt_tokens"] = totalUsage.PromptTokens
+		payload["completion_tokens"] = totalUsage.CompletionTokens
+		if s.billingService != nil {
+			payload["cost_amount"] = s.billingService.EstimateCost(billingProvider, billingModel, CurrencyDanwan, totalUsage)
+			payload["currency"] = CurrencyDanwan
+		}
+	}
+	return payload
+}
+
 // writeToolSummaryEvent 下发工具摘要事件，供前端拼入 assistant content 后持久化
 func (s *AgentService) writeToolSummaryEvent(w io.Writer, records []ToolCallRecord) {
 	toolSummary := buildToolSummary(records)
@@ -836,9 +922,13 @@ type AgentSessionItem struct {
 	Title          string `json:"title"`
 	Status         string `json:"status"`
 	ToolChain      string `json:"tool_chain,omitempty"`
-	CreatedAt      int64  `json:"created_at"`
-	UpdatedAt      int64  `json:"updated_at"`
-	CompletedAt    *int64 `json:"completed_at,omitempty"`
+	// AR-07：用量统计（供前端用量可见性状态条展示）
+	TotalTokens int64  `json:"total_tokens,omitempty"`
+	StepCount   int    `json:"step_count,omitempty"`
+	CostAmount  int64  `json:"cost_amount,omitempty"`
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   int64  `json:"updated_at"`
+	CompletedAt *int64 `json:"completed_at,omitempty"`
 }
 
 // ListSessions 查询用户的 Agent Session 列表
@@ -861,6 +951,9 @@ func (s *AgentService) ListSessions(ctx context.Context, userID string, page, pa
 			Title:          sess.Title,
 			Status:         sess.Status,
 			ToolChain:      sess.ToolChain,
+			TotalTokens:    sess.TotalTokens,
+			StepCount:      sess.StepCount,
+			CostAmount:     sess.CostAmount,
 			CreatedAt:      sess.CreatedAt,
 			UpdatedAt:      sess.UpdatedAt,
 			CompletedAt:    sess.CompletedAt,
@@ -884,14 +977,35 @@ func (s *AgentService) GetSession(ctx context.Context, id, userID string) (*Agen
 		Title:          sess.Title,
 		Status:         sess.Status,
 		ToolChain:      sess.ToolChain,
+		TotalTokens:    sess.TotalTokens,
+		StepCount:      sess.StepCount,
+		CostAmount:     sess.CostAmount,
 		CreatedAt:      sess.CreatedAt,
 		UpdatedAt:      sess.UpdatedAt,
 		CompletedAt:    sess.CompletedAt,
 	}, nil
 }
 
-// updateSessionStatus 更新 Session 状态与完成时间
-func (s *AgentService) updateSessionStatus(sessionID, status, toolChainJSON string) error {
+// GetSessionAudit 读取会话统一审计视图（AR-08）。
+// 解析 Session.ToolChain（JSON 持久化的 []ToolCallRecord）并读 metadata.json 写审计，
+// 返回 SessionAudit 供 claw-console/admin 展示。仅校验所有权，不泄露跨用户数据。
+func (s *AgentService) GetSessionAudit(ctx context.Context, id, userID string) (SessionAudit, error) {
+	sess, err := s.sessionRepo.GetByID(id)
+	if err != nil {
+		return SessionAudit{}, err
+	}
+	if sess.UserID != userID {
+		return SessionAudit{}, fmt.Errorf("无权访问该 Session")
+	}
+	var records []ToolCallRecord
+	if sess.ToolChain != "" {
+		_ = json.Unmarshal([]byte(sess.ToolChain), &records)
+	}
+	return s.sandbox.ReadSessionAudit(userID, id, records)
+}
+
+// updateSessionStatus 更新 Session 状态、完成时间与用量统计（AR-07 持久化 totalTokens/stepCount/costAmount）
+func (s *AgentService) updateSessionStatus(sessionID, status, toolChainJSON string, totalTokens int64, stepCount int, costAmount int64) error {
 	session, err := s.sessionRepo.GetByID(sessionID)
 	if err != nil {
 		return err
@@ -900,6 +1014,10 @@ func (s *AgentService) updateSessionStatus(sessionID, status, toolChainJSON stri
 	if toolChainJSON != "" {
 		session.ToolChain = toolChainJSON
 	}
+	// AR-07：用量统计持久化（每次执行覆盖，反映最新一次执行的用量）
+	session.TotalTokens = totalTokens
+	session.StepCount = stepCount
+	session.CostAmount = costAmount
 	now := time.Now().Unix()
 	session.UpdatedAt = now
 	if status == "succeeded" || status == "failed" {

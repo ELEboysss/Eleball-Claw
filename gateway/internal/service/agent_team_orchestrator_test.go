@@ -200,7 +200,7 @@ func setupCallAssistant(t *testing.T, client AgentLLMClient) *callAssistantTestF
 	env.createAssistant(t, "a-target", "目标助手", true, "")
 	conv, err := env.convSvc.CreateConversation(ctx, orchestratorTestUser, CreateConversationReq{Title: "主对话"})
 	require.NoError(t, err)
-	parent, err := env.agentSvc.createSession(ctx, orchestratorTestUser, conv.ID, "主任务")
+	parent, err := env.agentSvc.createSession(ctx, orchestratorTestUser, conv.ID, "主任务", "")
 	require.NoError(t, err)
 
 	rt := &callAssistantRuntime{client: client, model: "test-model"}

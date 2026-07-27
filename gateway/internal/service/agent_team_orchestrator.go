@@ -298,22 +298,40 @@ func (s *AgentService) executeCallAssistant(ctx context.Context, input map[strin
 	if parentSession != nil {
 		parentSessionID = parentSession.ID
 	}
-	childSession, err := s.createSessionWithParent(ctx, env.UserID, env.ConversationID, parentSessionID, task)
+	childSession, err := s.createSessionWithParent(ctx, env.UserID, env.ConversationID, parentSessionID, task, env.Cwd)
 	if err != nil {
 		return nil, err
 	}
 
 	// 子 ToolEnv：UserID 相同、ConversationID 相同（同一对话沙箱，文件产物互相可见）、
 	// SessionID = 子 session、Depth+1；委派计数器不共享（子环境无 CallAssistant）
+
+	// AR-03：子任务每步成本门控（max_cost_per_task），累计估算成本超限则中止子任务
+	var taskCostGuard func(*llm.Usage) error
+	if s.maxCostPerTask > 0 && s.billingService != nil {
+		taskCostGuard = func(u *llm.Usage) error {
+			if u == nil {
+				return nil
+			}
+			cost := s.billingService.EstimateCost(billProvider, billModel, CurrencyDanwan, u)
+			if cost >= s.maxCostPerTask {
+				return fmt.Errorf("子任务成本超限（%d ≥ %d 弹丸）", cost, s.maxCostPerTask)
+			}
+			return nil
+		}
+	}
+
 	childEnv := &ToolEnv{
 		UserID:           env.UserID,
 		ConversationID:   env.ConversationID,
 		SessionID:        childSession.ID,
 		Sandbox:          env.Sandbox,
+		Cwd:              env.Cwd, // AR-06：子任务继承父工作目录
 		SessionRepo:      env.SessionRepo,
 		SearchProvider:   env.SearchProvider,
 		Depth:            env.Depth + 1,
 		UsageAccumulator: nil, // Agent Team P5：子用量即时扣费，不再经 accumulator（防双重计费）
+		CostGuard:        taskCostGuard,
 	}
 
 	// 子消息 = system（助手人格/默认专家模板）+ user(task + 可选背景)；不转发主对话历史
@@ -374,7 +392,23 @@ func (s *AgentService) executeCallAssistant(ctx context.Context, input map[strin
 			toolChainJSON = string(b)
 		}
 	}
-	if uerr := s.updateSessionStatus(childSession.ID, status, toolChainJSON); uerr != nil && s.logger != nil {
+	// AR-07：子 session 用量统计（totalTokens/stepCount/costAmount），与主 session 同构
+	var totalTokens int64
+	var stepCount int
+	var costAmount int64
+	if result != nil {
+		stepCount = len(result.Records)
+		if result.Usage != nil {
+			totalTokens = int64(result.Usage.TotalTokens)
+			if totalTokens == 0 {
+				totalTokens = int64(result.Usage.PromptTokens + result.Usage.CompletionTokens)
+			}
+			if s.billingService != nil {
+				costAmount = s.billingService.EstimateCost(billProvider, billModel, CurrencyDanwan, result.Usage)
+			}
+		}
+	}
+	if uerr := s.updateSessionStatus(childSession.ID, status, toolChainJSON, totalTokens, stepCount, costAmount); uerr != nil && s.logger != nil {
 		s.logger.Warn("更新子 Agent Session 状态失败", zap.String("session_id", childSession.ID), zap.Error(uerr))
 	}
 	if runErr != nil {
@@ -383,7 +417,7 @@ func (s *AgentService) executeCallAssistant(ctx context.Context, input map[strin
 
 	// Agent Team P5：子用量即时扣费（标注 call_assistant:子session），不再经 accumulator 进主 totalUsage（防双重计费）
 	if s.billingService != nil && result.Usage != nil {
-		if err := s.billingService.DeductWithSource(env.UserID, billProvider, billModel, CurrencyDanwan, "call_assistant:"+childSession.ID, result.Usage); err != nil && s.logger != nil {
+		if err := s.billingService.DeductWithAttribution(env.UserID, billProvider, billModel, CurrencyDanwan, "call_assistant:"+childSession.ID, BillingAttribution{ConversationID: env.ConversationID, AgentTaskID: childSession.ID}, result.Usage); err != nil && s.logger != nil {
 			s.logger.Warn("CallAssistant 子任务扣费失败", zap.String("user_id", env.UserID), zap.String("session_id", childSession.ID), zap.Error(err))
 		}
 	}

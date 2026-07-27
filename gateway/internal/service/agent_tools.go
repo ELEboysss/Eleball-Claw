@@ -28,6 +28,8 @@ type ToolEnv struct {
 	ConversationID string
 	SessionID      string
 	Sandbox        *FileSandbox
+	// AR-06：claw 本地工作目录（per-session，仅 claw 装配）。非空时文件工具优先解析到 cwd。
+	Cwd            string
 	SessionRepo    *repository.AgentSessionRepo
 	SearchProvider string // 当前 conversation 选择的搜索源，如 baidu / bing
 	// Credentials 当前工具声明的凭证字段定义，供驱动校验/注入
@@ -42,6 +44,17 @@ type ToolEnv struct {
 	// AR-03：执行中余额校验回调，循环每轮调用；返回非 nil error 表示余额不足，强制结束循环。
 	// 由 AgentService 装配（含节流，避免每轮查 DB）；子 agent env 不注入（计费由主循环统一管）。
 	BudgetGuard func() error
+	// AR-03：每步成本门控回调（max_cost_per_task）。传入循环累计用量，返回非 nil error 表示超限，强制结束。
+	// 由编排器装配（CallAssistant 子任务），用 billingService.EstimateCost 估算；主循环可不注入。
+	CostGuard func(usage *llm.Usage) error
+}
+
+// ResolveFilePath 解析文件工具路径（AR-06）：env.Cwd 非空时优先解析到 cwd，否则回退会话沙箱。
+func (env *ToolEnv) ResolveFilePath(path string) (string, error) {
+	if env.Cwd != "" {
+		return env.Sandbox.ResolveProjectPath(env.Cwd, path)
+	}
+	return env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
 }
 
 // SaveOutput 将工具产物登记为匿名资源
@@ -526,7 +539,7 @@ func extractTitle(html string) string {
 // toolReadFile 读文件工具
 func (r *ToolRegistry) toolReadFile(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
 	path, _ := input["path"].(string)
-	absPath, err := env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
+	absPath, err := env.ResolveFilePath(path)
 	if err != nil {
 		return nil, err
 	}
@@ -548,13 +561,20 @@ func (r *ToolRegistry) toolWriteFile(ctx context.Context, input map[string]inter
 	if path == "" {
 		return nil, errors.New("path 不能为空")
 	}
-	absPath, err := env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
+	absPath, err := env.ResolveFilePath(path)
 	if err != nil {
 		return nil, err
+	}
+	// AR-06 写审计：读旧内容（存在则）用于生成 diff
+	oldContent := ""
+	if oldData, rErr := env.Sandbox.ReadFile(absPath); rErr == nil {
+		oldContent = string(oldData)
 	}
 	if err := env.Sandbox.WriteFile(absPath, []byte(content)); err != nil {
 		return nil, err
 	}
+	// AR-06 写审计：追加 unified diff 到 session metadata.json（失败不阻断）
+	_ = env.Sandbox.AppendWriteAudit(env.UserID, env.SessionID, "WriteFile", path, oldContent, content)
 
 	fileName := filepath.Base(absPath)
 	mimeType := mime.TypeByExtension(filepath.Ext(absPath))
@@ -592,7 +612,7 @@ func (r *ToolRegistry) toolStrReplaceFile(ctx context.Context, input map[string]
 		return nil, errors.New("old_string 不能为空")
 	}
 
-	absPath, err := env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
+	absPath, err := env.ResolveFilePath(path)
 	if err != nil {
 		return nil, err
 	}
@@ -604,6 +624,8 @@ func (r *ToolRegistry) toolStrReplaceFile(ctx context.Context, input map[string]
 	if err := env.Sandbox.WriteFile(absPath, []byte(content)); err != nil {
 		return nil, err
 	}
+	// AR-06 写审计：追加 old->new unified diff 到 session metadata.json（失败不阻断）
+	_ = env.Sandbox.AppendWriteAudit(env.UserID, env.SessionID, "StrReplaceFile", path, string(data), content)
 
 	fileName := filepath.Base(absPath)
 	mimeType := mime.TypeByExtension(filepath.Ext(absPath))
@@ -644,7 +666,7 @@ func (r *ToolRegistry) toolGrep(ctx context.Context, input map[string]interface{
 		return nil, errors.New("pattern 不能为空")
 	}
 
-	absPath, err := env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
+	absPath, err := env.ResolveFilePath(path)
 	if err != nil {
 		return nil, err
 	}
@@ -705,7 +727,7 @@ func (r *ToolRegistry) toolShell(ctx context.Context, input map[string]interface
 		}
 	}
 
-	output, err := r.runner.Shell(ctx, command, args)
+	output, err := r.runner.Shell(ctx, command, args, env.Cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -719,7 +741,7 @@ func (r *ToolRegistry) toolShell(ctx context.Context, input map[string]interface
 // toolOCR OCR 工具
 func (r *ToolRegistry) toolOCR(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
 	path, _ := input["path"].(string)
-	absPath, err := env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
+	absPath, err := env.ResolveFilePath(path)
 	if err != nil {
 		return nil, err
 	}

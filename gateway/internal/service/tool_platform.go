@@ -14,7 +14,8 @@ import (
 // PlatformToolRunner 定义跨平台工具执行抽象
 type PlatformToolRunner interface {
 	OCR(ctx context.Context, imagePath string) (string, error)
-	Shell(ctx context.Context, command string, args []string) (string, error)
+	// Shell 执行白名单命令；cwd 非空时设 exec.Cmd.Dir=cwd（AR-06 claw 工作目录绑定），空则用进程 cwd。
+	Shell(ctx context.Context, command string, args []string, cwd string) (string, error)
 }
 
 // NewPlatformRunner 根据当前操作系统返回合适的运行器
@@ -84,7 +85,7 @@ func normalizeShellInput(command string, args []string) (string, []string, error
 }
 
 // Shell 执行受限 shell 命令（命令白名单 + 参数安全过滤）
-func (r *defaultPlatformRunner) Shell(ctx context.Context, command string, args []string) (string, error) {
+func (r *defaultPlatformRunner) Shell(ctx context.Context, command string, args []string, cwd string) (string, error) {
 	command, args, err := normalizeShellInput(command, args)
 	if err != nil {
 		return "", err
@@ -104,6 +105,9 @@ func (r *defaultPlatformRunner) Shell(ctx context.Context, command string, args 
 		}
 	}
 	cmd := exec.CommandContext(ctx, command, args...)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("shell 执行失败: %w", err)
@@ -142,7 +146,7 @@ func (r *windowsToolRunner) OCR(ctx context.Context, imagePath string) (string, 
 	return strings.TrimSpace(string(out)), nil
 }
 
-func (r *windowsToolRunner) Shell(ctx context.Context, command string, args []string) (string, error) {
+func (r *windowsToolRunner) Shell(ctx context.Context, command string, args []string, cwd string) (string, error) {
 	command, args, err := normalizeShellInput(command, args)
 	if err != nil {
 		return "", err
@@ -170,6 +174,9 @@ func (r *windowsToolRunner) Shell(ctx context.Context, command string, args []st
 	}
 	// 未覆盖的白名单命令（python/node/npm/npx 等）回退为外部进程调用
 	cmd := exec.CommandContext(ctx, command, args...)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("shell 执行失败: %w", err)
