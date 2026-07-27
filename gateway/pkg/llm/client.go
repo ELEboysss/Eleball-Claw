@@ -56,10 +56,17 @@ type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
-// ThinkingOptions Kimi / Moonshot 思考模式选项（OpenAI 兼容扩展字段）
+// ThinkingOptions 思考/推理模式统一选项。各协议客户端按自身能力消费对应字段：
+//   - Type/Keep：Kimi / Moonshot OpenAI 兼容扩展（thinking.type=enabled/disabled、keep=all 保留 reasoning_content）；
+//   - Effort：OpenAI o 系列 reasoning_effort（low/medium/high），由 OpenAIClient 提升为顶层 reasoning_effort；
+//   - BudgetTokens：Anthropic thinking.budget_tokens / Gemini thinkingConfig.thinkingBudget（显式推理 token 预算）。
+//
+// 未设置的字段不参与序列化，避免影响不识别的厂商。
 type ThinkingOptions struct {
-	Type string `json:"type"`          // enabled / disabled
-	Keep string `json:"keep,omitempty"` // 多轮对话中保留 reasoning_content，如 "all"
+	Type         string `json:"type"`                   // enabled / disabled
+	Keep         string `json:"keep,omitempty"`         // 多轮对话中保留 reasoning_content，如 "all"
+	Effort       string `json:"effort,omitempty"`       // AR-19 P2-3：OpenAI o 系列 reasoning effort（low/medium/high）
+	BudgetTokens int    `json:"budget_tokens,omitempty"` // AR-19 P2-3：Anthropic/Gemini 推理 token 预算
 }
 
 // ChatRequest 对话请求

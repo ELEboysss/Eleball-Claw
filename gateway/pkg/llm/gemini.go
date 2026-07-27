@@ -350,6 +350,10 @@ func (c *GeminiClient) toGeminiRequest(req ChatRequest, stream bool) (*geminiReq
 	}
 	if req.Thinking != nil && req.Thinking.Type == "enabled" {
 		geminiReq.GenerationConfig.ThinkingConfig = &geminiThinkingConfig{IncludeThoughts: true}
+		// AR-19 P2-3：显式推理 token 预算（BudgetTokens>0 时下发 thinkingBudget）
+		if req.Thinking.BudgetTokens > 0 {
+			geminiReq.GenerationConfig.ThinkingConfig.ThinkingBudget = req.Thinking.BudgetTokens
+		}
 	}
 	return geminiReq, nil
 }
@@ -686,6 +690,7 @@ type geminiGenerationConfig struct {
 
 type geminiThinkingConfig struct {
 	IncludeThoughts bool `json:"includeThoughts,omitempty"`
+	ThinkingBudget  int  `json:"thinkingBudget,omitempty"` // AR-19 P2-3：推理 token 预算（0 不下发，交由上游默认）
 }
 
 type geminiResponse struct {

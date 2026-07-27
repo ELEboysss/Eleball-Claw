@@ -372,3 +372,45 @@ func TestGeminiFetchImageToInlineData(t *testing.T) {
 		t.Errorf("data 不匹配")
 	}
 }
+
+// TestGeminiThinkingBudget 验证 AR-19 P2-3：Type=enabled + BudgetTokens -> thinkingConfig.thinkingBudget
+func TestGeminiThinkingBudget(t *testing.T) {
+	client := NewGeminiClient("test-key", "", 0)
+
+	// enabled + budget -> includeThoughts + thinkingBudget
+	req := ChatRequest{
+		Model:    "gemini-2.0-flash-thinking",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+		Thinking: &ThinkingOptions{Type: "enabled", BudgetTokens: 8192},
+	}
+	gr, err := client.toGeminiRequest(req, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gr.GenerationConfig == nil || gr.GenerationConfig.ThinkingConfig == nil {
+		t.Fatal("thinkingConfig 未下发")
+	}
+	if !gr.GenerationConfig.ThinkingConfig.IncludeThoughts {
+		t.Errorf("includeThoughts 应为 true")
+	}
+	if gr.GenerationConfig.ThinkingConfig.ThinkingBudget != 8192 {
+		t.Errorf("thinkingBudget 错误: got %d, want 8192", gr.GenerationConfig.ThinkingConfig.ThinkingBudget)
+	}
+
+	// enabled 但 BudgetTokens=0 -> includeThoughts 仍 true，thinkingBudget 不下发（0）
+	req.Thinking.BudgetTokens = 0
+	gr2, _ := client.toGeminiRequest(req, false)
+	if !gr2.GenerationConfig.ThinkingConfig.IncludeThoughts {
+		t.Errorf("includeThoughts 应为 true")
+	}
+	if gr2.GenerationConfig.ThinkingConfig.ThinkingBudget != 0 {
+		t.Errorf("BudgetTokens=0 时不应下发 thinkingBudget: got %d", gr2.GenerationConfig.ThinkingConfig.ThinkingBudget)
+	}
+
+	// disabled -> 不下发 thinkingConfig
+	req.Thinking = &ThinkingOptions{Type: "disabled", BudgetTokens: 8192}
+	gr3, _ := client.toGeminiRequest(req, false)
+	if gr3.GenerationConfig.ThinkingConfig != nil {
+		t.Errorf("disabled 时不应下发 thinkingConfig: %+v", gr3.GenerationConfig.ThinkingConfig)
+	}
+}

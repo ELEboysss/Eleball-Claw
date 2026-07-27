@@ -118,7 +118,7 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, req ChatRequest) (<-chan 
 	req.Stream = true
 	// 请求上游在最终 chunk 中返回 usage，否则无法精确计费
 	req.StreamOptions = &StreamOptions{IncludeUsage: true}
-	body, err := json.Marshal(req)
+	body, err := marshalOpenAIBody(req)
 	if err != nil {
 		return nil, err
 	}
@@ -249,8 +249,23 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, req ChatRequest) (<-chan 
 	return chunkChan, nil
 }
 
+// marshalOpenAIBody 将 ChatRequest 序列化为 OpenAI 兼容请求体。
+// AR-19 P2-3：当 Thinking.Effort 设置时，提升为顶层 reasoning_effort（OpenAI o 系列 Chat Completions
+// 识别字段，参考 OmniRoute / jcode openai-runtime 约定）；原 thinking 字段保留以兼容 Kimi/Moonshot。
+func marshalOpenAIBody(req ChatRequest) ([]byte, error) {
+	type wrapper struct {
+		ChatRequest
+		ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	}
+	w := wrapper{ChatRequest: req}
+	if req.Thinking != nil && req.Thinking.Effort != "" {
+		w.ReasoningEffort = req.Thinking.Effort
+	}
+	return json.Marshal(w)
+}
+
 func (c *OpenAIClient) doRequest(ctx context.Context, req ChatRequest) ([]byte, error) {
-	body, err := json.Marshal(req)
+	body, err := marshalOpenAIBody(req)
 	if err != nil {
 		return nil, err
 	}

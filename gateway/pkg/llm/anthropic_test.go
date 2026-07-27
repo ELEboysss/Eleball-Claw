@@ -376,3 +376,47 @@ func TestAnthropicStreamToolUse(t *testing.T) {
 		t.Errorf("Args 错误: got %s", toolCalls[0].Function.Arguments)
 	}
 }
+
+// TestAnthropicThinkingBudget 验证 AR-19 P2-3：Type=enabled + BudgetTokens -> thinking.budget_tokens 下发
+func TestAnthropicThinkingBudget(t *testing.T) {
+	client := NewAnthropicClient("test-key", "", 0)
+
+	// enabled + budget -> 下发 thinking 配置
+	req := ChatRequest{
+		Model:    "claude-3-7-sonnet",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+		Thinking: &ThinkingOptions{Type: "enabled", BudgetTokens: 8000},
+	}
+	ar, err := client.toAnthropicRequest(req, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ar.Thinking == nil {
+		t.Fatal("thinking 配置未下发")
+	}
+	if ar.Thinking.Type != "enabled" {
+		t.Errorf("thinking.type 错误: got %s", ar.Thinking.Type)
+	}
+	if ar.Thinking.BudgetTokens != 8000 {
+		t.Errorf("budget_tokens 错误: got %d, want 8000", ar.Thinking.BudgetTokens)
+	}
+	// 序列化后含 budget_tokens 字段
+	b, _ := json.Marshal(ar.Thinking)
+	if !strings.Contains(string(b), `"budget_tokens":8000`) {
+		t.Errorf("序列化缺少 budget_tokens: %s", string(b))
+	}
+
+	// enabled 但 BudgetTokens=0 -> 不下发（须显式预算）
+	req.Thinking.BudgetTokens = 0
+	ar2, _ := client.toAnthropicRequest(req, false)
+	if ar2.Thinking != nil {
+		t.Errorf("BudgetTokens=0 时不应下发 thinking: %+v", ar2.Thinking)
+	}
+
+	// disabled -> 不下发
+	req.Thinking = &ThinkingOptions{Type: "disabled", BudgetTokens: 8000}
+	ar3, _ := client.toAnthropicRequest(req, false)
+	if ar3.Thinking != nil {
+		t.Errorf("disabled 时不应下发 thinking: %+v", ar3.Thinking)
+	}
+}

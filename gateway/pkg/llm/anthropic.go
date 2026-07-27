@@ -366,6 +366,15 @@ func (c *AnthropicClient) toAnthropicRequest(req ChatRequest, stream bool) (*ant
 		anthropicReq.ToolChoice = &anthropicToolChoice{Type: "none"}
 	}
 
+	// AR-19 P2-3：extended thinking 预算。Anthropic 开启思考须显式 budget_tokens（>=1024），
+	// 仅当 Type=enabled 且 BudgetTokens>0 时下发，否则交由上游默认（修复此前完全不下发 thinking 配置的缺口）。
+	if req.Thinking != nil && req.Thinking.Type == "enabled" && req.Thinking.BudgetTokens > 0 {
+		anthropicReq.Thinking = &anthropicThinkingConfig{
+			Type:         "enabled",
+			BudgetTokens: req.Thinking.BudgetTokens,
+		}
+	}
+
 	return anthropicReq, nil
 }
 
@@ -542,6 +551,14 @@ type anthropicRequest struct {
 	Stream     bool                 `json:"stream,omitempty"`
 	Tools      []anthropicTool      `json:"tools,omitempty"`
 	ToolChoice *anthropicToolChoice `json:"tool_choice,omitempty"`
+	// AR-19 P2-3：extended thinking 预算（type=enabled 时需 budget_tokens）
+	Thinking *anthropicThinkingConfig `json:"thinking,omitempty"`
+}
+
+// anthropicThinkingConfig Anthropic extended thinking 配置
+type anthropicThinkingConfig struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens"`
 }
 
 // anthropicTool Anthropic 工具定义（由 OpenAI function schema 转换而来，AR-10）
