@@ -245,6 +245,9 @@ export const agentApi = {
   deleteAllSessions: () => client.delete('/agent/sessions'),
   deleteSessionsByConversation: (conversationId) =>
     client.delete(`/agent/sessions?conversation_id=${conversationId}`),
+  // AR-12 会话分叉：从分叉点消息 entryId 复制父 session 对话历史到新 session
+  forkSession: (id, entryId) =>
+    client.post(`/agent/sessions/${id}/fork`, { entry_id: entryId }),
   getResource: (id) => `${API_BASE}/agent/resources/${id}`,
   execute: async (body, onEvent) => {
     const token = getItem('token')

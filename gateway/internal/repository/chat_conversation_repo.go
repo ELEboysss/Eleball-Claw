@@ -156,3 +156,35 @@ func (r *ChatConversationRepo) CountMessages(conversationID string) (int64, erro
 	err := r.db.Model(&model.ChatMessage{}).Where("conversation_id = ?", conversationID).Count(&count).Error
 	return count, err
 }
+
+// ListMessagesUpTo 查询对话中从最早到 entryID（含）的全部消息，按 created_at ASC 排序。
+// AR-12 会话分叉用：复制父对话到分叉点为止的消息历史。entryID 不属于该对话或不存在时返回 ErrRecordNotFound。
+func (r *ChatConversationRepo) ListMessagesUpTo(conversationID, entryID string) ([]model.ChatMessage, error) {
+	var all []model.ChatMessage
+	if err := r.db.Where("conversation_id = ?", conversationID).
+		Order("created_at ASC, id ASC").
+		Find(&all).Error; err != nil {
+		return nil, err
+	}
+	out := make([]model.ChatMessage, 0, len(all))
+	for _, m := range all {
+		out = append(out, m)
+		if m.ID == entryID {
+			return out, nil
+		}
+	}
+	if len(out) == 0 {
+		return nil, gorm.ErrRecordNotFound
+	}
+	return nil, gorm.ErrRecordNotFound
+}
+
+// CreateConversation 创建对话（AR-12 fork 用：直接复制父对话字段建立新对话）
+func (r *ChatConversationRepo) CreateConversation(conv *model.ChatConversation) error {
+	return r.db.Create(conv).Error
+}
+
+// CreateMessage 创建消息（指定 ID，不去重；AR-12 fork 复制历史消息用）
+func (r *ChatConversationRepo) CreateMessage(msg *model.ChatMessage) error {
+	return r.db.Create(msg).Error
+}

@@ -156,6 +156,7 @@ func NewRouter(
 				auth.GET("/agent/sessions", agentWorkflowHandler.ListSessions)
 				auth.DELETE("/agent/sessions", agentWorkflowHandler.DeleteSessions)
 				auth.GET("/agent/sessions/:id", agentWorkflowHandler.GetSession)
+				auth.POST("/agent/sessions/:id/fork", agentWorkflowHandler.ForkSession)
 				auth.DELETE("/agent/sessions/:id", agentWorkflowHandler.DeleteSession)
 			}
 		}

@@ -102,6 +102,29 @@ func (h *AgentWorkflowHandler) GetSession(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": item})
 }
 
+// ForkSession 会话分叉（AR-12）：从分叉点消息 entry_id 复制父 session 对话历史到新 session。
+func (h *AgentWorkflowHandler) ForkSession(c *gin.Context) {
+	userID, ok := h.getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 2001, "message": "未登录"})
+		return
+	}
+	var req struct {
+		EntryID string `json:"entry_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "参数错误: " + err.Error()})
+		return
+	}
+	id := c.Param("id")
+	session, err := h.agentService.ForkSession(c.Request.Context(), id, userID, req.EntryID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 5000, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": session})
+}
+
 // GetSessionAudit 查询 Agent Session 统一审计视图（AR-08）。
 // 聚合工具调用记录（latency/output_size）与文件写审计（unified diff），供 claw-console/admin 展示。
 func (h *AgentWorkflowHandler) GetSessionAudit(c *gin.Context) {

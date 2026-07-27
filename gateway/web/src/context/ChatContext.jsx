@@ -229,6 +229,7 @@ export function ChatProvider({ children }) {
             }
           }
           return {
+            id: m.id,
             role: m.role,
             content: m.content,
             reasoningContent: m.reasoning_content || '',

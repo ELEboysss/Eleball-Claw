@@ -125,6 +125,76 @@ func (s *ConversationService) GetOrCreate(ctx context.Context, userID string, co
 	return conv, nil
 }
 
+// ForkConversation 复制源对话到分叉点 entryID（含）为止的消息历史到新对话，
+// 继承父对话的模型/工具/助手/分组等配置。AR-12 会话分叉用，返回新对话。
+// entryID 不属于该对话或不存在时返回错误。
+func (s *ConversationService) ForkConversation(ctx context.Context, userID, sourceConversationID, entryID string) (*model.ChatConversation, error) {
+	src, err := s.repo.GetByID(sourceConversationID)
+	if err != nil {
+		return nil, fmt.Errorf("源对话不存在")
+	}
+	if src.UserID != userID {
+		return nil, fmt.Errorf("无权访问该对话")
+	}
+
+	if err := s.EnsureQuota(ctx, userID); err != nil {
+		return nil, err
+	}
+
+	newID := generateID("conv")
+	now := time.Now().Unix()
+	title := src.Title
+	if title == "" {
+		title = "分叉对话"
+	} else {
+		title = title + " (分叉)"
+	}
+	conv := &model.ChatConversation{
+		ID:              newID,
+		UserID:          userID,
+		Title:           title,
+		Model:           src.Model,
+		Provider:        src.Provider,
+		Status:          "active",
+		EnableTools:     src.EnableTools,
+		EnableWebSearch: src.EnableWebSearch,
+		SearchProvider:  src.SearchProvider,
+		AssistantID:     src.AssistantID,
+		TeamID:          src.TeamID,
+		DiskPath:        filepath.Join(s.basePath, userID, "conversations", newID),
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if err := s.repo.CreateConversation(conv); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(conv.DiskPath, 0750); err != nil {
+		return nil, fmt.Errorf("创建对话目录失败: %w", err)
+	}
+
+	// 复制分叉点为止的消息历史（新消息 ID，保留角色/内容/思考/工具结果/附件/时间）
+	srcMsgs, err := s.repo.ListMessagesUpTo(sourceConversationID, entryID)
+	if err != nil {
+		return nil, fmt.Errorf("分叉点消息无效: %w", err)
+	}
+	for _, m := range srcMsgs {
+		cp := model.ChatMessage{
+			ID:               generateID("msg"),
+			ConversationID:   newID,
+			Role:             m.Role,
+			Content:          m.Content,
+			ReasoningContent: m.ReasoningContent,
+			ToolResults:      m.ToolResults,
+			Attachments:      m.Attachments,
+			CreatedAt:        m.CreatedAt,
+		}
+		if err := s.repo.CreateMessage(&cp); err != nil {
+			return nil, err
+		}
+	}
+	return conv, nil
+}
+
 // UpdateEnableTools 更新 Agent 工具开关
 func (s *ConversationService) UpdateEnableTools(ctx context.Context, conversationID string, enable bool) error {
 	return s.repo.UpdateEnableTools(conversationID, enable, time.Now().Unix())
@@ -178,9 +248,9 @@ type UpdateConversationReq struct {
 	TeamID *string `json:"team_id,omitempty"`
 	// Model / Provider 会话绑定的模型配置（profile.modelName + provider）。
 	// 切换对话时按此恢复 currentProfileId；对话中切模型时同步到此。
-	Model    *string `json:"model,omitempty"`
-	Provider *string `json:"provider,omitempty"`
-	UpdatedAt *int64 `json:"updated_at,omitempty"`
+	Model     *string `json:"model,omitempty"`
+	Provider  *string `json:"provider,omitempty"`
+	UpdatedAt *int64  `json:"updated_at,omitempty"`
 }
 
 // Update 更新对话元数据（带简单冲突检测：客户端 updated_at 小于服务端时拒绝）

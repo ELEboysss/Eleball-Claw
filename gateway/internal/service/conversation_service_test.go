@@ -6,9 +6,9 @@ import (
 
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
+	sqlite "github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	sqlite "github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -222,5 +222,52 @@ func TestConversationService_GetOrCreate(t *testing.T) {
 	assert.Equal(t, conv.ID, conv2.ID)
 
 	_, err = svc.GetOrCreate(ctx, "u2", conv.ID)
+	assert.Error(t, err)
+}
+
+// TestConversationService_ForkConversation AR-12：分叉复制父对话到 entry_id 为止的消息历史，
+// 继承模型/工具配置，重写消息 ID，校验所有权与无效分叉点。
+func TestConversationService_ForkConversation(t *testing.T) {
+	svc := setupConversationService(t)
+	ctx := context.Background()
+
+	conv, err := svc.CreateConversation(ctx, "u1", CreateConversationReq{Title: "主线", Model: "gpt-4", EnableTools: true})
+	require.NoError(t, err)
+
+	msgs := []model.ChatMessage{
+		{ID: "m1", ConversationID: conv.ID, Role: "user", Content: "问题1", CreatedAt: 1000},
+		{ID: "m2", ConversationID: conv.ID, Role: "assistant", Content: "回答1", CreatedAt: 2000},
+		{ID: "m3", ConversationID: conv.ID, Role: "user", Content: "问题2", CreatedAt: 3000},
+	}
+	for i := range msgs {
+		_, err := svc.SaveMessage(ctx, conv.ID, "u1", &msgs[i])
+		require.NoError(t, err)
+	}
+
+	// 从 m2 分叉：新对话应含 m1+m2（2 条），不含 m3
+	forked, err := svc.ForkConversation(ctx, "u1", conv.ID, "m2")
+	require.NoError(t, err)
+	assert.NotEqual(t, conv.ID, forked.ID)
+	assert.Contains(t, forked.Title, "主线")
+	assert.Contains(t, forked.Title, "分叉")
+	assert.Equal(t, "gpt-4", forked.Model)
+	assert.True(t, forked.EnableTools)
+
+	listed, total, err := svc.repo.ListMessages(forked.ID, 1, 50)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), total)
+	require.Len(t, listed, 2)
+	assert.Equal(t, "问题1", listed[0].Content)
+	assert.Equal(t, "回答1", listed[1].Content)
+	// 复制后消息 ID 重写，不同于父
+	assert.NotEqual(t, "m1", listed[0].ID)
+	assert.NotEqual(t, "m2", listed[1].ID)
+
+	// 无效分叉点
+	_, err = svc.ForkConversation(ctx, "u1", conv.ID, "nope")
+	assert.Error(t, err)
+
+	// 所有权校验：u2 不能分叉 u1 的对话
+	_, err = svc.ForkConversation(ctx, "u2", conv.ID, "m2")
 	assert.Error(t, err)
 }

@@ -7,11 +7,15 @@ type AgentSession struct {
 	ConversationID string `gorm:"index;size:32" json:"conversation_id,omitempty"`
 	// Agent Team P3：子调用 provenance——编排者触发 CallAssistant 时子 session 记录父 session
 	ParentSessionID string `gorm:"size:32;index" json:"parent_session_id,omitempty"`
-	Title           string `gorm:"type:text" json:"title"`
-	Status          string `gorm:"index:idx_agent_session_user_status;size:32;not null" json:"status"` // queued / running / succeeded / failed
-	ToolChain       string `gorm:"type:text" json:"tool_chain,omitempty"`                              // JSON 数组，记录实际 tool_calls
-	Permissions     string `gorm:"type:text" json:"permissions,omitempty"`                             // JSON 数组
-	DiskPath        string `gorm:"type:text" json:"-"`
+	// AR-12：会话分叉 provenance--fork 时记录分叉来源父 session 与分叉点消息 entry id。
+	// 复制父 session 对话到 entry_id 为止的消息历史到新 session，新 session 继承父 cwd/worktree。
+	ParentEntryID       string `gorm:"size:32;index" json:"parent_entry_id,omitempty"`
+	ForkedFromSessionID string `gorm:"size:32;index" json:"forked_from_session_id,omitempty"`
+	Title               string `gorm:"type:text" json:"title"`
+	Status              string `gorm:"index:idx_agent_session_user_status;size:32;not null" json:"status"` // queued / running / succeeded / failed
+	ToolChain           string `gorm:"type:text" json:"tool_chain,omitempty"`                              // JSON 数组，记录实际 tool_calls
+	Permissions         string `gorm:"type:text" json:"permissions,omitempty"`                             // JSON 数组
+	DiskPath            string `gorm:"type:text" json:"-"`
 	// AR-06：claw 本地工作目录（用户授权的项目目录绝对路径，EvalSymlinks 后）。
 	// 仅 claw（unrestricted=true）装配；云端多租户保持空，不启用 cwd 解析。
 	Cwd string `gorm:"type:text" json:"cwd,omitempty"`

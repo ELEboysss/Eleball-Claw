@@ -919,9 +919,14 @@ func (s *AgentService) saveAgentAssistantMessage(ctx context.Context, conversati
 type AgentSessionItem struct {
 	ID             string `json:"id"`
 	ConversationID string `json:"conversation_id,omitempty"`
-	Title          string `json:"title"`
-	Status         string `json:"status"`
-	ToolChain      string `json:"tool_chain,omitempty"`
+	// Agent Team P3：子调用 provenance
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	// AR-12：会话分叉 provenance
+	ParentEntryID       string `json:"parent_entry_id,omitempty"`
+	ForkedFromSessionID string `json:"forked_from_session_id,omitempty"`
+	Title               string `json:"title"`
+	Status              string `json:"status"`
+	ToolChain           string `json:"tool_chain,omitempty"`
 	// AR-07：用量统计（供前端用量可见性状态条展示）
 	TotalTokens int64  `json:"total_tokens,omitempty"`
 	StepCount   int    `json:"step_count,omitempty"`
@@ -946,17 +951,20 @@ func (s *AgentService) ListSessions(ctx context.Context, userID string, page, pa
 	items := make([]AgentSessionItem, 0, len(sessions))
 	for _, sess := range sessions {
 		items = append(items, AgentSessionItem{
-			ID:             sess.ID,
-			ConversationID: sess.ConversationID,
-			Title:          sess.Title,
-			Status:         sess.Status,
-			ToolChain:      sess.ToolChain,
-			TotalTokens:    sess.TotalTokens,
-			StepCount:      sess.StepCount,
-			CostAmount:     sess.CostAmount,
-			CreatedAt:      sess.CreatedAt,
-			UpdatedAt:      sess.UpdatedAt,
-			CompletedAt:    sess.CompletedAt,
+			ID:                  sess.ID,
+			ConversationID:      sess.ConversationID,
+			ParentSessionID:     sess.ParentSessionID,
+			ParentEntryID:       sess.ParentEntryID,
+			ForkedFromSessionID: sess.ForkedFromSessionID,
+			Title:               sess.Title,
+			Status:              sess.Status,
+			ToolChain:           sess.ToolChain,
+			TotalTokens:         sess.TotalTokens,
+			StepCount:           sess.StepCount,
+			CostAmount:          sess.CostAmount,
+			CreatedAt:           sess.CreatedAt,
+			UpdatedAt:           sess.UpdatedAt,
+			CompletedAt:         sess.CompletedAt,
 		})
 	}
 	return items, total, nil
@@ -972,17 +980,88 @@ func (s *AgentService) GetSession(ctx context.Context, id, userID string) (*Agen
 		return nil, fmt.Errorf("无权访问该 Session")
 	}
 	return &AgentSessionItem{
-		ID:             sess.ID,
-		ConversationID: sess.ConversationID,
-		Title:          sess.Title,
-		Status:         sess.Status,
-		ToolChain:      sess.ToolChain,
-		TotalTokens:    sess.TotalTokens,
-		StepCount:      sess.StepCount,
-		CostAmount:     sess.CostAmount,
-		CreatedAt:      sess.CreatedAt,
-		UpdatedAt:      sess.UpdatedAt,
-		CompletedAt:    sess.CompletedAt,
+		ID:                  sess.ID,
+		ConversationID:      sess.ConversationID,
+		ParentSessionID:     sess.ParentSessionID,
+		ParentEntryID:       sess.ParentEntryID,
+		ForkedFromSessionID: sess.ForkedFromSessionID,
+		Title:               sess.Title,
+		Status:              sess.Status,
+		ToolChain:           sess.ToolChain,
+		TotalTokens:         sess.TotalTokens,
+		StepCount:           sess.StepCount,
+		CostAmount:          sess.CostAmount,
+		CreatedAt:           sess.CreatedAt,
+		UpdatedAt:           sess.UpdatedAt,
+		CompletedAt:         sess.CompletedAt,
+	}, nil
+}
+
+// ForkSession 会话分叉（AR-12）：从父 session 的分叉点消息 entryID 处复制对话历史到新 session，
+// 继承父 cwd/project_root/permissions，记录 parent_entry_id / forked_from_session_id。
+// 返回新 session（关联新对话），供前端切换到分叉对话继续探索。
+func (s *AgentService) ForkSession(ctx context.Context, id, userID, entryID string) (*AgentSessionItem, error) {
+	parent, err := s.sessionRepo.GetByID(id)
+	if err != nil {
+		return nil, fmt.Errorf("Session 不存在")
+	}
+	if parent.UserID != userID {
+		return nil, fmt.Errorf("无权访问该 Session")
+	}
+	if parent.ConversationID == "" {
+		return nil, fmt.Errorf("该 Session 无关联对话，无法分叉")
+	}
+	if entryID == "" {
+		return nil, fmt.Errorf("缺少分叉点 entry_id")
+	}
+
+	// 复制父对话到分叉点为止的消息历史到新对话
+	conv, err := s.conversationSvc.ForkConversation(ctx, userID, parent.ConversationID, entryID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.ensureSessionQuota(ctx, userID); err != nil {
+		return nil, err
+	}
+
+	newID := generateID("as")
+	sessionDir, err := s.sandbox.SessionDir(userID, newID)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().Unix()
+	session := &model.AgentSession{
+		ID:                  newID,
+		UserID:              userID,
+		ConversationID:      conv.ID,
+		ParentEntryID:       entryID,
+		ForkedFromSessionID: parent.ID,
+		Title:               parent.Title,
+		Status:              "succeeded",
+		Permissions:         parent.Permissions,
+		ToolChain:           "[]",
+		DiskPath:            sessionDir,
+		Cwd:                 parent.Cwd,
+		ProjectRoot:         parent.ProjectRoot,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+		CompletedAt:         &now,
+	}
+	if err := s.sessionRepo.Create(session); err != nil {
+		return nil, err
+	}
+
+	return &AgentSessionItem{
+		ID:                  session.ID,
+		ConversationID:      session.ConversationID,
+		ParentEntryID:       session.ParentEntryID,
+		ForkedFromSessionID: session.ForkedFromSessionID,
+		Title:               session.Title,
+		Status:              session.Status,
+		CreatedAt:           session.CreatedAt,
+		UpdatedAt:           session.UpdatedAt,
+		CompletedAt:         session.CompletedAt,
 	}, nil
 }
 

@@ -7212,7 +7212,21 @@ func main() {
 		}
 	})))
 	mux.HandleFunc("/v1/agent/sessions/", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
-		_ = strings.TrimPrefix(r.URL.Path, "/v1/agent/sessions/")
+		rest := strings.TrimPrefix(r.URL.Path, "/v1/agent/sessions/")
+		// rest 形如 "{id}" / "{id}/audit" / "{id}/fork"
+		parts := strings.SplitN(rest, "/", 2)
+		if len(parts) == 2 && parts[1] == "fork" && r.Method == http.MethodPost {
+			// AR-12：e2e 不持久化 agent_sessions，返回桩 Session 保证 fork 契约兼容
+			respondSuccess(w, map[string]interface{}{
+				"id":                     "e2e-fork-" + parts[0],
+				"conversation_id":        "e2e-fork-conv-" + parts[0],
+				"parent_entry_id":        "e2e-entry",
+				"forked_from_session_id": parts[0],
+				"title":                  "E2E Fork",
+				"status":                 "succeeded",
+			})
+			return
+		}
 		switch r.Method {
 		case http.MethodGet:
 			respondError(w, 4004, "Session 不存在")

@@ -24,7 +24,8 @@ import {
   Globe,
   Wrench,
   Folders,
-  FolderInput
+  FolderInput,
+  GitFork
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { useChat } from '../context/ChatContext'
@@ -39,6 +40,7 @@ import AgentStream from '../components/AgentStream'
 import AgentSteps from '../components/AgentSteps'
 import AgentSessionList from '../components/AgentSessionList'
 import ConfirmDialog from '../components/ConfirmDialog'
+import BranchNavigator from '../components/BranchNavigator'
 import { useAgent } from '../hooks/useAgent'
 import { Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
@@ -62,7 +64,9 @@ import {
   deleteConversation,
   generateTitle,
   loadKeepThinking,
-  saveKeepThinking
+  saveKeepThinking,
+  loadForkLinks,
+  saveForkLinks
 } from '../utils/conversation'
 import {
   fileToContentPart,
@@ -114,6 +118,9 @@ export default function Chat() {
   const [keepThinking, setKeepThinking] = useState(() => loadKeepThinking(user?.user_id))
   // AR-13 O12：< sm 折叠次级工具开关到「更多」
   const [moreToolsOpen, setMoreToolsOpen] = useState(false)
+  // AR-12 会话分叉：分支链接图 { [convId]: { parent, children[] } }，持久化按 userId 隔离
+  const [forkLinks, setForkLinks] = useState(() => loadForkLinks(user?.user_id))
+  const [forkingMessageId, setForkingMessageId] = useState(null) // AR-12：分叉中状态（禁用按钮 + 指示）
   const [agentSessionRefresh, setAgentSessionRefresh] = useState(0)
   // 对话分组（Agent Team）：侧栏分组展示与「移动到组」用
   const [teams, setTeams] = useState([])
@@ -187,6 +194,7 @@ export default function Chat() {
       nextProfiles[0]?.id
     setCurrentProfileId(nextProfileId)
     setKeepThinking(loadKeepThinking(user.user_id))
+    setForkLinks(loadForkLinks(user.user_id))
 
     // 强制重新获取 Ele Agent 凭证，避免使用旧账户缓存
     nextProfiles.filter((p) => p.provider === 'ELE_AGENT').forEach((p) => clearCachedCredentials(p.id, user.user_id))
@@ -196,6 +204,11 @@ export default function Chat() {
   useEffect(() => {
     saveKeepThinking(keepThinking, user?.user_id)
   }, [keepThinking, user?.user_id])
+
+  // AR-12：分叉链接图变更后持久化
+  useEffect(() => {
+    saveForkLinks(forkLinks, user?.user_id)
+  }, [forkLinks, user?.user_id])
 
   // 拉取 Ele Agent 模型列表与余额；账户切换时也会重新拉取
   useEffect(() => {
@@ -446,6 +459,11 @@ export default function Chat() {
         })
       }
       const res = await conversationApi.saveMessage(conversationId, payload)
+      // AR-12：对齐服务端消息 ID（服务端生成 msg_xxx），供分叉 entry_id 解析；
+      // 本地占位 id（如 agent_xxx）过长且与服务端不一致，这里以服务端返回为准回写。
+      if (res?.message?.id) {
+        message.id = res.message.id
+      }
       return res?.title || null
     } catch (err) {
       console.error('保存消息失败:', err)
@@ -466,6 +484,67 @@ export default function Chat() {
     const conv = conversations.find((c) => c.id === session.conversation_id)
     if (!conv) return
     switchConversation(conv.id)
+  }
+
+  // AR-12：从分叉点消息复制父 session 对话历史到新 session，切换到新分叉对话继续探索。
+  // sessionId 优先取消息自带（assistant 消息携带 agentResult.sessionId），否则懒加载当前对话最近 session。
+  const handleFork = async (messageId, sessionIdHint) => {
+    if (loading || forkingMessageId) return
+    if (!currentConversationId || !messageId) return
+    setForkingMessageId(messageId)
+    try {
+      let sid = sessionIdHint
+      if (!sid) {
+        try {
+          const res = await agentApi.listSessions(1, 100)
+          const s = (res?.items || []).find((it) => it.conversation_id === currentConversationId)
+          sid = s?.id
+        } catch (e) { /* ignore，下方兜底报错 */ }
+      }
+      if (!sid) {
+        setError('无法分叉：未找到当前会话')
+        return
+      }
+      const res = await agentApi.forkSession(sid, messageId)
+      const newConvId = res?.conversation_id
+      if (!newConvId) {
+        setError('分叉失败：未返回新会话')
+        return
+      }
+      // 本地建立分叉对话占位，随后从服务端拉取复制的历史消息
+      const parent = currentConversation
+      setConversations((prev) => [
+        {
+          id: newConvId,
+          title: (parent?.title || '分叉对话') + ' (分叉)',
+          model: parent?.model || '',
+          provider: parent?.provider || '',
+          teamId: parent?.teamId || '',
+          messages: [],
+          status: 'active'
+        },
+        ...prev
+      ])
+      await refreshMessages(newConvId)
+      // 记录分支链接：新对话 -> 父；父 -> 新对话（去重）
+      setForkLinks((prev) => {
+        const next = { ...prev }
+        next[newConvId] = { parent: currentConversationId, children: next[newConvId]?.children || [] }
+        const p = next[currentConversationId] || { parent: null, children: [] }
+        next[currentConversationId] = {
+          ...p,
+          children: Array.from(new Set([...(p.children || []), newConvId]))
+        }
+        return next
+      })
+      switchConversation(newConvId)
+      setAgentSessionRefresh((n) => n + 1)
+    } catch (e) {
+      console.error('分叉失败:', e)
+      setError('分叉失败：' + (e?.message || '未知错误'))
+    } finally {
+      setForkingMessageId(null)
+    }
   }
 
   const handleNewChat = () => {
@@ -1324,6 +1403,16 @@ export default function Chat() {
           </div>
         )}
 
+        {/* AR-12：会话分叉分支导航（父对话/子分叉跳转）；无分叉关系时组件返回 null */}
+        <div className="flex-shrink-0 bg-eleball-surface border-b border-eleball-outline-variant px-4 py-1 flex items-center gap-2">
+          <BranchNavigator
+            currentConversationId={currentConversationId}
+            forkLinks={forkLinks}
+            conversations={conversations}
+            onNavigate={switchConversation}
+          />
+        </div>
+
         {/* Messages */}
         <div className="flex-1 overflow-y-auto min-h-0 px-4 py-4 space-y-4">
           {(currentConversation?.messages || []).map((message, idx) => (
@@ -1332,6 +1421,8 @@ export default function Chat() {
               message={message}
               isLast={idx === currentConversation.messages.length - 1}
               loading={loading}
+              onFork={handleFork}
+              forkingMessageId={forkingMessageId}
             />
           ))}
 
@@ -1725,7 +1816,7 @@ function ToolSummaryBlock({ summary }) {
   )
 }
 
-function MessageBubble({ message, isLast, loading }) {
+function MessageBubble({ message, isLast, loading, onFork, forkingMessageId }) {
   const isUser = message.role === 'user'
   const isAssistant = message.role === 'assistant'
 
@@ -1815,6 +1906,18 @@ function MessageBubble({ message, isLast, loading }) {
         )}
         {isAssistant && message.content && !loading && (
           <CopyButton text={message.content} />
+        )}
+        {/* AR-12：消息 hover「从此处分叉」按钮，复制到该消息为止的历史到新对话 */}
+        {message.id && !loading && onFork && (
+          <button
+            type="button"
+            onClick={() => onFork(message.id, message.sessionId)}
+            disabled={forkingMessageId === message.id}
+            aria-label="从此处分叉" title="从此处分叉"
+            className="absolute -bottom-2 -left-2 p-1 rounded-full bg-eleball-surface border border-eleball-outline-variant text-eleball-text-secondary opacity-0 group-hover:opacity-100 transition-opacity shadow-sm disabled:opacity-50"
+          >
+            <GitFork className="w-3 h-3" />
+          </button>
         )}
       </div>
     </div>
