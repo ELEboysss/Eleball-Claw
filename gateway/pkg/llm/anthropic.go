@@ -79,11 +79,12 @@ func (c *AnthropicClient) Chat(ctx context.Context, req ChatRequest) (*ChatChunk
 		return nil, fmt.Errorf("解析 Anthropic 响应失败: %w", err)
 	}
 
-	content, reasoning := c.extractContent(resp.Content)
+	content, reasoning, toolCalls := c.extractContent(resp.Content)
 	return &ChatChunk{
 		Delta:            content,
 		ReasoningContent: reasoning,
 		FinishReason:     resp.StopReason,
+		ToolCalls:        toolCalls,
 		Usage: &Usage{
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,
@@ -134,6 +135,13 @@ func (c *AnthropicClient) ChatStream(ctx context.Context, req ChatRequest) (<-ch
 		var lastUsage Usage
 		var usageEmitted bool
 		var lastLines []string
+		// AR-10：流式 tool_use 累积（index -> {id, name, args}）
+		type streamToolUse struct {
+			id, name string
+			args     strings.Builder
+		}
+		toolUses := map[int]*streamToolUse{}
+		var toolUseEmitted bool
 
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -166,6 +174,11 @@ func (c *AnthropicClient) ChatStream(ctx context.Context, req ChatRequest) (<-ch
 			}
 
 			switch event.Type {
+			case "content_block_start":
+				// AR-10：tool_use 块起始，记录 index -> {id, name}
+				if event.ContentBlock != nil && event.ContentBlock.Type == "tool_use" {
+					toolUses[event.Index] = &streamToolUse{id: event.ContentBlock.ID, name: event.ContentBlock.Name}
+				}
 			case "content_block_delta":
 				delta := event.Delta
 				if delta.Type == "text_delta" && delta.Text != "" {
@@ -184,6 +197,27 @@ func (c *AnthropicClient) ChatStream(ctx context.Context, req ChatRequest) (<-ch
 					case <-ctx.Done():
 						return
 					}
+				} else if delta.Type == "input_json_delta" && delta.PartialJSON != "" {
+					// AR-10：tool_use 参数增量累积
+					if tu := toolUses[event.Index]; tu != nil {
+						tu.args.WriteString(delta.PartialJSON)
+					}
+				}
+			case "content_block_stop":
+				// AR-10：tool_use 块结束，发出完整 ToolCall
+				if tu := toolUses[event.Index]; tu != nil {
+					toolUseEmitted = true
+					chunk := ChatChunk{ToolCalls: []ToolCall{{
+						ID:       tu.id,
+						Type:     "function",
+						Function: ToolCallFunction{Name: tu.name, Arguments: tu.args.String()},
+					}}}
+					select {
+					case chunkChan <- chunk:
+					case <-ctx.Done():
+						return
+					}
+					delete(toolUses, event.Index)
 				}
 			case "message_delta":
 				if event.Usage.CompletionTokens > 0 {
@@ -198,7 +232,7 @@ func (c *AnthropicClient) ChatStream(ctx context.Context, req ChatRequest) (<-ch
 			}
 		}
 
-		if accumulatedContent.Len() == 0 && accumulatedReasoning.Len() == 0 {
+		if accumulatedContent.Len() == 0 && accumulatedReasoning.Len() == 0 && !toolUseEmitted {
 			c.logger.Warn("Anthropic 上游流式响应未返回任何内容",
 				zap.String("baseURL", c.baseURL),
 				zap.Strings("last_lines", lastLines),
@@ -253,7 +287,10 @@ func (c *AnthropicClient) doRequest(ctx context.Context, anthropicReq interface{
 	return respBody, nil
 }
 
-// toAnthropicRequest 将 OpenAI 兼容请求转换为 Anthropic Messages API 请求
+// toAnthropicRequest 将 OpenAI 兼容请求转换为 Anthropic Messages API 请求（AR-10 补齐工具调用透传）：
+//   - req.Tools（OpenAI function schema）-> Anthropic tools（input_schema）；
+//   - assistant 消息的 ToolCalls -> tool_use content 块；
+//   - tool 角色消息 -> user 消息的 tool_result 块（连续 tool 消息合并到同一 user，满足角色交替约束）。
 func (c *AnthropicClient) toAnthropicRequest(req ChatRequest, stream bool) (*anthropicRequest, error) {
 	var systemParts []string
 	var messages []anthropicMessage
@@ -264,19 +301,45 @@ func (c *AnthropicClient) toAnthropicRequest(req ChatRequest, stream bool) (*ant
 			continue
 		}
 
+		// AR-10：工具结果消息 -> user + tool_result 块（连续 tool 合并到同一 user 消息）
+		if msg.Role == "tool" {
+			resultBlock := anthropicContentBlock{
+				Type:      "tool_result",
+				ToolUseID: msg.ToolCallID,
+				Content:   contentToString(msg.Content),
+			}
+			if n := len(messages); n > 0 && messages[n-1].Role == "user" &&
+				len(messages[n-1].Content) > 0 && messages[n-1].Content[0].Type == "tool_result" {
+				messages[n-1].Content = append(messages[n-1].Content, resultBlock)
+			} else {
+				messages = append(messages, anthropicMessage{Role: "user", Content: []anthropicContentBlock{resultBlock}})
+			}
+			continue
+		}
+
+		// AR-10：assistant 消息带 ToolCalls -> text 块 + tool_use 块
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			blocks, err := c.toAnthropicContent(msg.Content)
+			if err != nil {
+				return nil, err
+			}
+			for _, tc := range msg.ToolCalls {
+				blocks = append(blocks, anthropicContentBlock{
+					Type:  "tool_use",
+					ID:    tc.ID,
+					Name:  tc.Function.Name,
+					Input: parseToolCallInput(tc.Function.Arguments),
+				})
+			}
+			messages = append(messages, anthropicMessage{Role: "assistant", Content: blocks})
+			continue
+		}
+
 		blocks, err := c.toAnthropicContent(msg.Content)
 		if err != nil {
 			return nil, err
 		}
-		role := msg.Role
-		if role == "tool" {
-			// Anthropic 没有 tool role，临时降级为 user
-			role = "user"
-		}
-		messages = append(messages, anthropicMessage{
-			Role:    role,
-			Content: blocks,
-		})
+		messages = append(messages, anthropicMessage{Role: msg.Role, Content: blocks})
 	}
 
 	anthropicReq := &anthropicRequest{
@@ -291,8 +354,57 @@ func (c *AnthropicClient) toAnthropicRequest(req ChatRequest, stream bool) (*ant
 	if len(systemParts) > 0 {
 		anthropicReq.System = strings.Join(systemParts, "\n\n")
 	}
+	// AR-10：工具定义透传
+	anthropicReq.Tools = toAnthropicTools(req.Tools)
+	// AR-10：tool_choice 映射（auto/required/none -> auto/any/none）
+	switch req.ToolChoice {
+	case "auto":
+		anthropicReq.ToolChoice = &anthropicToolChoice{Type: "auto"}
+	case "required":
+		anthropicReq.ToolChoice = &anthropicToolChoice{Type: "any"}
+	case "none":
+		anthropicReq.ToolChoice = &anthropicToolChoice{Type: "none"}
+	}
 
 	return anthropicReq, nil
+}
+
+// toAnthropicTools 将 OpenAI 工具定义（{type:function, function:{name,description,parameters}}）
+// 转换为 Anthropic 工具（{name, description, input_schema}）。parameters 即 JSON Schema，结构互通。
+func toAnthropicTools(tools []map[string]interface{}) []anthropicTool {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]anthropicTool, 0, len(tools))
+	for _, t := range tools {
+		fn, _ := t["function"].(map[string]interface{})
+		if fn == nil {
+			continue
+		}
+		name, _ := fn["name"].(string)
+		if name == "" {
+			continue
+		}
+		desc, _ := fn["description"].(string)
+		params, _ := fn["parameters"].(map[string]interface{})
+		if params == nil {
+			params = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
+		}
+		out = append(out, anthropicTool{Name: name, Description: desc, InputSchema: params})
+	}
+	return out
+}
+
+// parseToolCallInput 将工具调用参数 JSON 字符串解析为 map；空串或解析失败返回空 map。
+func parseToolCallInput(arguments string) map[string]interface{} {
+	if arguments == "" {
+		return map[string]interface{}{}
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(arguments), &m); err != nil {
+		return map[string]interface{}{}
+	}
+	return m
 }
 
 // toAnthropicContent 将 OpenAI 兼容 content 转换为 Anthropic content blocks
@@ -382,19 +494,27 @@ func (c *AnthropicClient) parseImageURL(url string) (anthropicContentBlock, erro
 	return anthropicContentBlock{}, fmt.Errorf("Anthropic 暂不支持非 base64 图片 URL")
 }
 
-// extractContent 从 Anthropic 响应 content blocks 中提取文本与思考内容
-func (c *AnthropicClient) extractContent(blocks []anthropicContentBlock) (string, string) {
+// extractContent 从 Anthropic 响应 content blocks 中提取文本、思考内容与工具调用（AR-10 补 tool_use）
+func (c *AnthropicClient) extractContent(blocks []anthropicContentBlock) (string, string, []ToolCall) {
 	var contents []string
 	var reasoning []string
+	var toolCalls []ToolCall
 	for _, block := range blocks {
 		switch block.Type {
 		case "text":
 			contents = append(contents, block.Text)
 		case "thinking":
 			reasoning = append(reasoning, block.Thinking)
+		case "tool_use":
+			inputJSON, _ := json.Marshal(block.Input)
+			toolCalls = append(toolCalls, ToolCall{
+				ID:       block.ID,
+				Type:     "function",
+				Function: ToolCallFunction{Name: block.Name, Arguments: string(inputJSON)},
+			})
 		}
 	}
-	return strings.Join(contents, ""), strings.Join(reasoning, "")
+	return strings.Join(contents, ""), strings.Join(reasoning, ""), toolCalls
 }
 
 // parseDataURL 解析 data:image/png;base64,xxx 格式，返回 media_type 与 base64 数据字符串
@@ -415,23 +535,44 @@ func parseDataURL(dataURL string) (mediaType, data string, err error) {
 
 // anthropicRequest Anthropic Messages API 请求体
 type anthropicRequest struct {
-	Model     string              `json:"model"`
-	Messages  []anthropicMessage  `json:"messages"`
-	System    string              `json:"system,omitempty"`
-	MaxTokens int                 `json:"max_tokens"`
-	Stream    bool                `json:"stream,omitempty"`
+	Model      string               `json:"model"`
+	Messages   []anthropicMessage   `json:"messages"`
+	System     string               `json:"system,omitempty"`
+	MaxTokens  int                  `json:"max_tokens"`
+	Stream     bool                 `json:"stream,omitempty"`
+	Tools      []anthropicTool      `json:"tools,omitempty"`
+	ToolChoice *anthropicToolChoice `json:"tool_choice,omitempty"`
+}
+
+// anthropicTool Anthropic 工具定义（由 OpenAI function schema 转换而来，AR-10）
+type anthropicTool struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	InputSchema map[string]interface{} `json:"input_schema"`
+}
+
+// anthropicToolChoice 工具选择策略（OpenAI auto/required/none -> Anthropic auto/any/none）
+type anthropicToolChoice struct {
+	Type string `json:"type"`
 }
 
 type anthropicMessage struct {
-	Role    string                   `json:"role"`
-	Content []anthropicContentBlock  `json:"content"`
+	Role    string                  `json:"role"`
+	Content []anthropicContentBlock `json:"content"`
 }
 
 type anthropicContentBlock struct {
-	Type   string                 `json:"type"`
-	Text   string                 `json:"text,omitempty"`
-	Thinking string               `json:"thinking,omitempty"`
-	Source *anthropicImageSource  `json:"source,omitempty"`
+	Type     string                `json:"type"`
+	Text     string                `json:"text,omitempty"`
+	Thinking string                `json:"thinking,omitempty"`
+	Source   *anthropicImageSource `json:"source,omitempty"`
+	// AR-10：工具调用块（type=tool_use，assistant 消息/响应）
+	ID    string                 `json:"id,omitempty"`
+	Name  string                 `json:"name,omitempty"`
+	Input map[string]interface{} `json:"input,omitempty"`
+	// AR-10：工具结果块（type=tool_result，user 消息）
+	ToolUseID string      `json:"tool_use_id,omitempty"`
+	Content   interface{} `json:"content,omitempty"`
 }
 
 type anthropicImageSource struct {
@@ -454,19 +595,20 @@ type anthropicUsage struct {
 
 // anthropicStreamEvent 流式 SSE 事件
 type anthropicStreamEvent struct {
-	Type         string                  `json:"type"`
-	Index        int                     `json:"index,omitempty"`
-	Delta        anthropicStreamDelta    `json:"delta,omitempty"`
-	Usage        anthropicUsage          `json:"usage,omitempty"`
-	Message      *anthropicMessageStart  `json:"message,omitempty"`
-	ContentBlock *anthropicContentBlock  `json:"content_block,omitempty"`
+	Type         string                 `json:"type"`
+	Index        int                    `json:"index,omitempty"`
+	Delta        anthropicStreamDelta   `json:"delta,omitempty"`
+	Usage        anthropicUsage         `json:"usage,omitempty"`
+	Message      *anthropicMessageStart `json:"message,omitempty"`
+	ContentBlock *anthropicContentBlock `json:"content_block,omitempty"`
 }
 
 type anthropicStreamDelta struct {
-	Type       string `json:"type"`
-	Text       string `json:"text,omitempty"`
-	Thinking   string `json:"thinking,omitempty"`
-	StopReason string `json:"stop_reason,omitempty"`
+	Type        string `json:"type"`
+	Text        string `json:"text,omitempty"`
+	Thinking    string `json:"thinking,omitempty"`
+	StopReason  string `json:"stop_reason,omitempty"`
+	PartialJSON string `json:"partial_json,omitempty"` // AR-10：tool_use 参数增量
 }
 
 type anthropicMessageStart struct {
