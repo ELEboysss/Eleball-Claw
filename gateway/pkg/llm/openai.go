@@ -281,6 +281,57 @@ func (c *OpenAIClient) doRequest(ctx context.Context, req ChatRequest) ([]byte, 
 	return respBody, nil
 }
 
+// Embed 调用 OpenAI 兼容 /embeddings 端点获取向量（AR-09 记忆检索）。
+// model 为空时返回错误；inputs 为空时返回 nil；timeout 复用客户端配置作为整体超时。
+// 鉴权与 baseUrl 复用 Chat 的同套配置（EleAgent 模型中心 OpenAI 兼容）。
+func (c *OpenAIClient) Embed(ctx context.Context, model string, inputs []string) ([][]float32, error) {
+	if model == "" {
+		return nil, fmt.Errorf("embedding model 未配置")
+	}
+	if len(inputs) == 0 {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	body, err := json.Marshal(EmbeddingRequest{Model: model, Input: inputs})
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/embeddings", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.logger != nil {
+		c.logger.Debug("OpenAIClient 请求 embedding",
+			zap.String("baseURL", c.baseURL),
+			zap.String("model", model),
+			zap.Int("inputs", len(inputs)))
+	}
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer httpResp.Body.Close()
+	respBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, &UpstreamError{StatusCode: httpResp.StatusCode, Body: string(respBody)}
+	}
+	var resp EmbeddingResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return nil, fmt.Errorf("解析 embedding 响应失败: %w", err)
+	}
+	out := make([][]float32, len(resp.Data))
+	for i, d := range resp.Data {
+		out[i] = d.Embedding
+	}
+	return out, nil
+}
+
 // contentToString 将上游返回的 content（可能是 string 或数组）统一转为字符串。
 // 流式场景下 delta content 通常为 string；非流式完整响应中也可能出现数组形式。
 func contentToString(content interface{}) string {

@@ -326,6 +326,12 @@ func main() {
 	teamMemoryRepo := repository.NewTeamMemoryRepo(db)
 	teamService.SetTeamMemoryRepo(teamMemoryRepo)
 	teamMemoryService := service.NewTeamMemoryService(teamMemoryRepo, teamService)
+	// AR-09：记忆向量检索（EmbeddingModel 配置时启用；claw 默认不配置 -> 留空降级 LIKE）
+	if cfg.Agent.EmbeddingModel != "" {
+		embedClient := llm.NewOpenAIClient(cfg.Agent.APIKey, cfg.Agent.BaseURL, 30*time.Second)
+		embedClient.SetLogger(logger)
+		teamMemoryService.SetEmbedder(embedClient, cfg.Agent.EmbeddingModel)
+	}
 	conversationService := service.NewConversationService(chatConversationRepo, vipService, cfg.Agent.BasePath)
 	// 对话归组（PATCH team_id）需校验分组归属
 	conversationService.SetTeamService(teamService)

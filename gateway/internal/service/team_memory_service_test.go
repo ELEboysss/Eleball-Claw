@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -362,4 +364,158 @@ func TestTeamMemory_InjectedIntoSystemPrompt(t *testing.T) {
 	msgs = agentSvcBare.buildInitialMessages(ctx, AgentExecuteRequest{Message: "项目代号是什么"}, nil, teamMemoryTestUser, team.ID)
 	systemContent, _ = msgs[0].Content.(string)
 	assert.NotContains(t, systemContent, "组共享记忆")
+}
+
+// insertMemoryWithEmbedding 直接落一条带向量的 active 记忆（embedding 检索测试用，AR-09）
+func (e *teamMemoryTestEnv) insertMemoryWithEmbedding(t *testing.T, id, teamID, userID, content string, embedding []byte, createdAt int64) model.TeamMemory {
+	t.Helper()
+	m := model.TeamMemory{
+		ID:        id,
+		TeamID:    teamID,
+		UserID:    userID,
+		Content:   content,
+		Embedding: embedding,
+		Status:    "active",
+		LastHitAt: createdAt,
+		CreatedAt: createdAt,
+		UpdatedAt: createdAt,
+	}
+	require.NoError(t, e.db.Create(&m).Error)
+	return m
+}
+
+// fakeEmbedder 按输入文本返回固定向量（embedding 检索测试用，AR-09）：
+// 含「深度学习」->[1,0]，含「项目」->[0,1]，否则->[0.5,0.5]。
+type fakeEmbedder struct{}
+
+func (f *fakeEmbedder) Embed(ctx context.Context, model string, inputs []string) ([][]float32, error) {
+	out := make([][]float32, len(inputs))
+	for i, in := range inputs {
+		switch {
+		case strings.Contains(in, "深度学习"):
+			out[i] = []float32{1.0, 0.0}
+		case strings.Contains(in, "项目"):
+			out[i] = []float32{0.0, 1.0}
+		default:
+			out[i] = []float32{0.5, 0.5}
+		}
+	}
+	return out, nil
+}
+
+// TestTeamMemory_SearchByEmbedding embedding 检索优先，命中相似向量（AR-09）
+func TestTeamMemory_SearchByEmbedding(t *testing.T) {
+	env := setupTeamMemoryTest(t)
+	env.memory.SetEmbedder(&fakeEmbedder{}, "embed-model")
+	ctx := context.Background()
+	now := time.Now().Unix()
+
+	team, err := env.team.Create(teamMemoryTestUser, "组", "")
+	require.NoError(t, err)
+	env.insertMemoryWithEmbedding(t, "m-a", team.ID, teamMemoryTestUser, "深度学习模型", llm.EncodeFloat32Vector([]float32{1.0, 0.0}), now)
+	env.insertMemoryWithEmbedding(t, "m-b", team.ID, teamMemoryTestUser, "项目代号", llm.EncodeFloat32Vector([]float32{0.0, 1.0}), now)
+
+	// query 含「深度学习」-> 向量 [1,0] -> 命中 m-a（sim=1.0），不命中 m-b（sim=0）
+	hits := env.memory.SearchForInjection(ctx, teamMemoryTestUser, team.ID, "深度学习", 8)
+	require.Len(t, hits, 1)
+	assert.Equal(t, "m-a", hits[0].ID)
+
+	// query 含「项目」-> 向量 [0,1] -> 命中 m-b
+	hits = env.memory.SearchForInjection(ctx, teamMemoryTestUser, team.ID, "项目代号", 8)
+	require.Len(t, hits, 1)
+	assert.Equal(t, "m-b", hits[0].ID)
+}
+
+// TestTeamMemory_Search_EmbeddingNoHitFallsBackToLike 候选无向量时降级 LIKE（AR-09 降级路径）
+func TestTeamMemory_Search_EmbeddingNoHitFallsBackToLike(t *testing.T) {
+	env := setupTeamMemoryTest(t)
+	env.memory.SetEmbedder(&fakeEmbedder{}, "embed-model")
+	ctx := context.Background()
+	now := time.Now().Unix()
+
+	team, err := env.team.Create(teamMemoryTestUser, "组", "")
+	require.NoError(t, err)
+	// 记忆无向量 -> embedding 检索跳过全部 -> 无命中 -> 降级 LIKE
+	env.insertMemory(t, "m-a", team.ID, teamMemoryTestUser, "深度学习模型", "", now)
+	env.insertMemory(t, "m-b", team.ID, teamMemoryTestUser, "项目代号", "", now)
+
+	hits := env.memory.SearchForInjection(ctx, teamMemoryTestUser, team.ID, "深度学习", 8)
+	require.Len(t, hits, 1)
+	assert.Equal(t, "m-a", hits[0].ID)
+}
+
+// TestTeamMemory_LastHitWriteback 检索命中回写 LastHitAt（AR-09）
+func TestTeamMemory_LastHitWriteback(t *testing.T) {
+	env := setupTeamMemoryTest(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+
+	team, err := env.team.Create(teamMemoryTestUser, "组", "")
+	require.NoError(t, err)
+	env.insertMemory(t, "m-a", team.ID, teamMemoryTestUser, "深度学习模型", "", now)
+
+	var m model.TeamMemory
+	require.NoError(t, env.db.Where("id = ?", "m-a").First(&m).Error)
+	assert.Equal(t, int64(0), m.LastHitAt)
+
+	env.memory.SearchForInjection(ctx, teamMemoryTestUser, team.ID, "深度学习", 8)
+	require.NoError(t, env.db.Where("id = ?", "m-a").First(&m).Error)
+	assert.Greater(t, m.LastHitAt, int64(0))
+}
+
+// TestTeamMemory_Consolidate DROP/MERGE 合并、superseded 标记与新记忆创建（AR-09）
+func TestTeamMemory_Consolidate(t *testing.T) {
+	env := setupTeamMemoryTest(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+
+	team, err := env.team.Create(teamMemoryTestUser, "组", "")
+	require.NoError(t, err)
+	// 插入 26 条 active 记忆（>= 阈值 25），按 createdAt 倒序编号 1..26
+	for i := 0; i < 26; i++ {
+		env.insertMemory(t, fmt.Sprintf("m-%d", i), team.ID, teamMemoryTestUser, fmt.Sprintf("记忆条目 %d", i), "", now-int64(i)*86400)
+	}
+
+	// LLM 输出：DROP 1（冗余）；MERGE 2,3 | 合并后内容；NONE
+	fake := &fakeTeamMemoryLLM{response: "DROP 1\nMERGE 2,3 | 合并后的记忆\nNONE\n"}
+	require.NoError(t, env.memory.Consolidate(ctx, fake, "m", team.ID))
+
+	var superseded int64
+	require.NoError(t, env.db.Model(&model.TeamMemory{}).Where("team_id = ? AND status = ?", team.ID, "superseded").Count(&superseded).Error)
+	assert.Equal(t, int64(3), superseded) // m-0(idx1) + m-1(idx2) + m-2(idx3)
+
+	var active int64
+	require.NoError(t, env.db.Model(&model.TeamMemory{}).Where("team_id = ? AND status = ?", team.ID, "active").Count(&active).Error)
+	assert.Equal(t, int64(24), active) // 26 - 3 + 1 merged
+
+	var merged model.TeamMemory
+	require.NoError(t, env.db.Where("team_id = ? AND content = ?", team.ID, "合并后的记忆").First(&merged).Error)
+	assert.Equal(t, "active", merged.Status)
+}
+
+// TestTeamMemory_Forget 长期未命中的 active 记忆归档（AR-09）
+func TestTeamMemory_Forget(t *testing.T) {
+	env := setupTeamMemoryTest(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+
+	team, err := env.team.Create(teamMemoryTestUser, "组", "")
+	require.NoError(t, err)
+	// 100 天前创建、从未命中 -> 归档
+	env.insertMemory(t, "m-old", team.ID, teamMemoryTestUser, "古老记忆", "", now-100*86400)
+	// 100 天前创建但 5 天前命中过 -> 不归档
+	oldHit := env.insertMemory(t, "m-old-hit", team.ID, teamMemoryTestUser, "古老但最近命中", "", now-100*86400)
+	require.NoError(t, env.db.Model(&model.TeamMemory{}).Where("id = ?", oldHit.ID).Update("last_hit_at", now-5*86400).Error)
+	// 最近创建 -> 不归档
+	env.insertMemory(t, "m-new", team.ID, teamMemoryTestUser, "新记忆", "", now)
+
+	require.NoError(t, env.memory.Forget(ctx, team.ID))
+
+	var archived int64
+	require.NoError(t, env.db.Model(&model.TeamMemory{}).Where("team_id = ? AND status = ?", team.ID, "archived").Count(&archived).Error)
+	assert.Equal(t, int64(1), archived) // 仅 m-old
+
+	var active int64
+	require.NoError(t, env.db.Model(&model.TeamMemory{}).Where("team_id = ? AND status = ?", team.ID, "active").Count(&active).Error)
+	assert.Equal(t, int64(2), active) // m-old-hit + m-new
 }

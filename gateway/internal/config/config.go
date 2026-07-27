@@ -119,6 +119,9 @@ type AgentConfig struct {
 	MaxCostPerTask int64 `mapstructure:"max_cost_per_task"`
 	APIKey        string `mapstructure:"api_key"`
 	BaseURL       string `mapstructure:"base_url"`
+	// EmbeddingModel AR-09：记忆检索 embedding 模型名（EleAgent 模型中心 OpenAI 兼容 /embeddings，
+	// 复用 Agent.APIKey/BaseURL 鉴权）。留空则禁用向量检索，降级 LIKE（claw 本地无 embedding 服务时留空）。
+	EmbeddingModel string `mapstructure:"embedding_model"`
 }
 
 // AgentReachConfig 集市模块客户端配置
