@@ -20,7 +20,7 @@ export default function AssistantPicker({ open, onClose, assistants, currentId, 
 
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center px-4 bg-black/40 backdrop-blur-sm"
+      className="fixed inset-0 z-[100] flex items-center justify-center px-4 bg-black/50"
       onClick={onClose}
     >
       <div

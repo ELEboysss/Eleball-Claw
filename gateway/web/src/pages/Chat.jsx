@@ -3,6 +3,7 @@ import useSEO from '../hooks/useSEO'
 import { useNavigate } from 'react-router-dom'
 import {
   Send,
+  MoreHorizontal,
   Square,
   Bot,
   User as UserIcon,
@@ -111,6 +112,8 @@ export default function Chat() {
   // 助手切换弹窗：以独立按钮触发、弹窗内切换，避免下拉浮层被输入框 overflow-hidden 裁切
   const [assistantPickerOpen, setAssistantPickerOpen] = useState(false)
   const [keepThinking, setKeepThinking] = useState(() => loadKeepThinking(user?.user_id))
+  // AR-13 O12：< sm 折叠次级工具开关到「更多」
+  const [moreToolsOpen, setMoreToolsOpen] = useState(false)
   const [agentSessionRefresh, setAgentSessionRefresh] = useState(0)
   // 对话分组（Agent Team）：侧栏分组展示与「移动到组」用
   const [teams, setTeams] = useState([])
@@ -1133,7 +1136,7 @@ export default function Chat() {
   }
 
   return (
-    <div className="relative h-[calc(100vh-64px)] flex overflow-hidden bg-eleball-bg">
+    <div className="relative h-[calc(100dvh-64px)] flex overflow-hidden bg-eleball-bg">
       {/* 侧边栏：对话历史 */}
       {sidebarOpen && (
         <div
@@ -1142,7 +1145,7 @@ export default function Chat() {
         />
       )}
       <aside
-        className={`fixed md:static left-0 top-16 md:top-0 bottom-0 w-64 bg-eleball-surface border-r border-eleball-outline-variant z-50 flex flex-col overflow-y-auto transition-transform duration-200 md:h-[calc(100vh-64px)] ${
+        className={`fixed md:static left-0 top-16 md:top-0 bottom-0 w-64 bg-eleball-surface border-r border-eleball-outline-variant z-50 flex flex-col overflow-y-auto transition-transform duration-200 md:h-[calc(100dvh-64px)] ${
           sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0 md:block'
         }`}
       >
@@ -1245,7 +1248,7 @@ export default function Chat() {
       {/* 主对话区 */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Chat Header - 粘顶 */}
-        <div className="flex-shrink-0 z-30 bg-eleball-surface/95 backdrop-blur border-b border-eleball-outline-variant px-4 py-3 flex items-center justify-between">
+        <div className="flex-shrink-0 z-30 bg-eleball-surface border-b border-eleball-outline-variant px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <button
               onClick={() => setSidebarOpen(true)}
@@ -1342,7 +1345,7 @@ export default function Chat() {
         </div>
 
         {/* Input */}
-        <div className="flex-shrink-0 bg-eleball-surface border-t border-eleball-outline-variant p-3">
+        <div className="flex-shrink-0 bg-eleball-surface border-t border-eleball-outline-variant px-3 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
           <div className="max-w-3xl mx-auto">
             <div className="border border-eleball-outline rounded-2xl bg-white shadow-sm overflow-hidden focus-within:border-eleball-primary/40 focus-within:shadow-md transition-colors">
               <textarea
@@ -1412,6 +1415,17 @@ export default function Chat() {
                     onChange={setEnableTools}
                     disabled={!supportsAgent || loading}
                   />
+                  {/* AR-13 O12：< sm 折叠次级工具开关到「更多」popover */}
+                  <button
+                    type="button"
+                    onClick={() => setMoreToolsOpen((v) => !v)}
+                    aria-label={moreToolsOpen ? '收起工具' : '更多工具'} title={moreToolsOpen ? '收起工具' : '更多工具'}
+                    className="sm:hidden inline-flex items-center gap-1 px-2 py-1.5 rounded-full text-xs font-medium border bg-transparent text-eleball-text-secondary border-eleball-outline hover:bg-gray-50 hover:text-eleball-text transition-colors"
+                  >
+                    <MoreHorizontal className="w-3.5 h-3.5" />
+                    <span>{moreToolsOpen ? '收起' : '更多'}</span>
+                  </button>
+                  <div className={`${moreToolsOpen ? 'flex' : 'hidden'} sm:flex items-center gap-2 flex-wrap`}>
                   <button
                     type="button"
                     onClick={() => setKeepThinking((v) => !v)}
@@ -1477,6 +1491,7 @@ export default function Chat() {
                       <ChevronDown className="w-3 h-3" />
                     </button>
                   )}
+                  </div>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
                   {supportsVisualGeneration && (
