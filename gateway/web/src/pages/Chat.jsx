@@ -25,11 +25,13 @@ import {
   Wrench,
   Folders,
   FolderInput,
-  GitFork
+  GitFork,
+  Folder,
+  PanelRight
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { useChat } from '../context/ChatContext'
-import { modelApi, billingApi, eleAgentApi, conversationApi, agentApi, assistantApi, teamApi } from '../api/client'
+import { modelApi, billingApi, eleAgentApi, conversationApi, agentApi, assistantApi, teamApi, clawFilesApi } from '../api/client'
 import { streamChat } from '../utils/sse'
 import LoginModal from '../components/LoginModal'
 import ModelSettings from '../components/ModelSettings'
@@ -41,6 +43,9 @@ import AgentSteps from '../components/AgentSteps'
 import AgentSessionList from '../components/AgentSessionList'
 import ConfirmDialog from '../components/ConfirmDialog'
 import BranchNavigator from '../components/BranchNavigator'
+import DirectoryPicker from '../components/DirectoryPicker'
+import FileExplorer from '../components/FileExplorer'
+import FileViewer from '../components/FileViewer'
 import { useAgent } from '../hooks/useAgent'
 import { Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
@@ -113,6 +118,13 @@ export default function Chat() {
   // 会话绑定的助手（'' = 默认，全部已激活工具）与我的助手列表
   const [assistantId, setAssistantId] = useState('')
   const [assistants, setAssistants] = useState([])
+  // AR-11：本地工作目录（cwd）+ 文件浏览器/预览侧栏
+  const [cwd, setCwd] = useState('')
+  const [cwdPickerOpen, setCwdPickerOpen] = useState(false)
+  const [filePanelOpen, setFilePanelOpen] = useState(false)
+  const [selectedFile, setSelectedFile] = useState(null) // 相对 cwd 的路径
+  const [gitStatus, setGitStatus] = useState(null)
+  const [fileRefreshKey, setFileRefreshKey] = useState(0)
   // 助手切换弹窗：以独立按钮触发、弹窗内切换，避免下拉浮层被输入框 overflow-hidden 裁切
   const [assistantPickerOpen, setAssistantPickerOpen] = useState(false)
   const [keepThinking, setKeepThinking] = useState(() => loadKeepThinking(user?.user_id))
@@ -434,6 +446,16 @@ export default function Chat() {
       })
       .catch(() => {})
   }, [enableTools, enableWebSearch, searchProvider, assistantId, currentConversation?.id, isLoggedIn])
+
+  // AR-11：cwd 变化或手动刷新时拉取 Git 状态，供 FileExplorer 色标
+  useEffect(() => {
+    if (!cwd) { setGitStatus(null); return }
+    let cancelled = false
+    clawFilesApi.gitStatus(cwd)
+      .then((d) => { if (!cancelled) setGitStatus(d) })
+      .catch(() => { if (!cancelled) setGitStatus(null) })
+    return () => { cancelled = true }
+  }, [cwd, fileRefreshKey])
 
   const updateConversations = (next) => {
     setConversations(next)
@@ -886,7 +908,8 @@ export default function Chat() {
           enableTools: true,
           enableWebSearch,
           searchProvider,
-          assistantId
+          assistantId,
+          cwd
         })
       } catch (err) {
         const errorMsg = err.message || 'Agent 执行失败'
@@ -1371,6 +1394,23 @@ export default function Chat() {
               <ChevronDown className="w-3.5 h-3.5 text-eleball-primary absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             </div>
 
+            {/* AR-11：工作目录选择 + 文件浏览器侧栏开关（仅 claw 本地） */}
+            <button
+              onClick={() => setCwdPickerOpen(true)}
+              className="hidden sm:inline-flex items-center gap-1 text-xs font-medium text-eleball-text-secondary bg-eleball-surface hover:bg-eleball-surface-variant px-2.5 py-1.5 rounded-full border border-eleball-outline transition-colors max-w-[140px]"
+              aria-label="选择工作目录" title={cwd || '选择工作目录'}
+            >
+              <Folder className="w-3.5 h-3.5 flex-shrink-0" />
+              <span className="truncate">{cwd ? cwd.split(/[\\/]/).pop() : '工作目录'}</span>
+            </button>
+            <button
+              onClick={() => setFilePanelOpen((v) => !v)}
+              className={`hidden sm:inline-flex flex-shrink-0 p-1.5 rounded-full transition-colors ${filePanelOpen ? 'text-eleball-primary bg-eleball-primary-light' : 'text-eleball-text-secondary bg-eleball-surface hover:bg-eleball-surface-variant'}`}
+              aria-label="文件浏览器" title="文件浏览器"
+            >
+              <PanelRight className="w-4 h-4" />
+            </button>
+
             {/* 模型配置入口：固定尺寸，防止被 flex 压缩导致显示不全 */}
             <button
               onClick={() => setSettingsOpen(true)}
@@ -1643,6 +1683,33 @@ export default function Chat() {
           </p>
         </div>
       </div>
+
+      {/* AR-11：文件浏览器/预览侧栏（仅 claw 本地，可折叠右栏；选中文件时切到 FileViewer） */}
+      {filePanelOpen && (
+        <aside className="hidden sm:flex flex-col w-80 lg:w-96 flex-shrink-0 border-l border-eleball-outline-variant bg-eleball-surface min-h-0">
+          {selectedFile ? (
+            <FileViewer cwd={cwd} path={selectedFile} onClose={() => setSelectedFile(null)} />
+          ) : (
+            <FileExplorer
+              cwd={cwd}
+              onOpenFile={(p) => setSelectedFile(p)}
+              gitStatus={gitStatus}
+              refreshKey={fileRefreshKey}
+            />
+          )}
+        </aside>
+      )}
+
+      {/* AR-11：工作目录选择弹窗（选定后自动打开文件侧栏） */}
+      <DirectoryPicker
+        open={cwdPickerOpen}
+        onClose={() => setCwdPickerOpen(false)}
+        onSelect={(resolvedCwd) => {
+          setCwd(resolvedCwd)
+          setSelectedFile(null)
+          setFilePanelOpen(true)
+        }}
+      />
 
       {/* AR-05-O5：确认弹窗（替代原生 confirm/alert） */}
       <ConfirmDialog

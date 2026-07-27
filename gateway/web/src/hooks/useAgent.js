@@ -34,7 +34,7 @@ export function useAgent() {
     abortControllerRef.current = null
   }, [])
 
-  const execute = useCallback(({ conversationId, message, attachments = [], history = [], model, provider, baseUrl, apiKey, enableTools, enableWebSearch, searchProvider, assistantId }) => {
+  const execute = useCallback(({ conversationId, message, attachments = [], history = [], model, provider, baseUrl, apiKey, enableTools, enableWebSearch, searchProvider, assistantId, cwd }) => {
     reset()
     setStatus('executing')
     abortRef.current = false
@@ -67,6 +67,8 @@ export function useAgent() {
           enable_tools: enableTools,
           enable_web_search: enableWebSearch,
           search_provider: searchProvider,
+          // AR-11：claw 本地工作目录（cwd），文件工具/Shell 据此解析；空时不传
+          cwd: cwd || undefined,
           // 会话绑定的助手；空字符串时不传该字段，后端回退到会话值/全部已激活工具
           assistant_id: assistantId || undefined
         },

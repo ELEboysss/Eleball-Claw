@@ -206,6 +206,26 @@ export const systemApi = {
   status: () => client.get('/claw-console/system/status')
 }
 
+// ====== 工作目录 API（本地 claw：AR-06，DirectoryPicker 消费）======
+export const cwdApi = {
+  // 列出目录条目（path 空默认用户主目录）-> { path, entries: [{name,is_dir,size,modified}] }
+  browse: (path = '') => client.get('/claw-console/cwd/browse', { params: { path } }),
+  // 校验路径为目录 -> { cwd, path }
+  validate: (path) => client.post('/claw-console/cwd/validate', { path })
+}
+
+// ====== 文件浏览器/预览 API（本地 claw：AR-11，FileExplorer/FileViewer 消费）======
+export const clawFilesApi = {
+  // 列出 cwd 下条目 -> { path, entries: [{name,is_dir,size,modified}] }
+  list: (cwd, path = '.') =>
+    client.get('/claw-console/files', { params: { cwd, path, type: 'list' } }),
+  // 下载文件内容（返回 Blob，带 JWT）-> Blob
+  fetch: (cwd, path) =>
+    client.get('/claw-console/files', { params: { cwd, path, type: 'download' }, responseType: 'blob' }),
+  // 查询 Git 状态 -> { is_repo, branch, ahead, behind, clean, entries: [{path,x,y,status}] }
+  gitStatus: (cwd) => client.get('/claw-console/git/status', { params: { cwd } })
+}
+
 // ====== 对话历史 API（本地 claw：本地存储）======
 export const conversationApi = {
   // teamId 非空时按组过滤；空串 = 全部对话

@@ -43,6 +43,7 @@ func NewClawRouter(
 	releaseHandler *handler.ReleaseHandler,
 	clawConsoleHandler *handler.ClawConsoleHandler,
 	clawCwdHandler *handler.ClawCwdHandler,
+	clawFilesHandler *handler.ClawFilesHandler,
 	cloudAccount *service.CloudAccountService,
 	adminEleAgentModelHandler *handler.AdminEleAgentModelHandler,
 	adminSettingHandler *handler.AdminSettingHandler,
@@ -236,6 +237,10 @@ func NewClawRouter(
 				// AR-06：本地工作目录选择与校验（DirectoryPicker 消费，仅 claw）
 				console.GET("/cwd/browse", clawCwdHandler.BrowseCwd)
 				console.POST("/cwd/validate", clawCwdHandler.ValidateCwd)
+
+				// AR-11：文件浏览器/预览（FileExplorer/FileViewer 消费，仅 claw）
+				console.GET("/files", clawFilesHandler.Files)
+				console.GET("/git/status", clawFilesHandler.GitStatus)
 			}
 		}
 
