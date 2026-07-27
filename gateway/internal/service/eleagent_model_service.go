@@ -731,7 +731,7 @@ const EleAgentModelExportUsage = "本文件由 Ele Agent 模型配置导出，�
 // eleAgentModelFieldNotes 逐字段含义与取值范围说明，随导出文件带出，便于人工编辑
 var eleAgentModelFieldNotes = map[string]string{
 	"provider":                    "平台标识（自定义，用于配置匹配与统计），如 kimi / volcengine / agnes / qwen；与 model_name 组成唯一匹配键",
-	"protocol":                    "上游协议：openai_compatible（对话）/ anthropic_messages（对话）/ agnes_image（图片）/ agnes_video（视频）/ seedance（火山视频）/ seedream（火山方舟·即梦图片）/ openai_image、openai_video（预留）；缺省为 openai_compatible",
+	"protocol":                    "上游协议：openai_compatible（对话）/ anthropic_messages（对话）/ gemini_generative（对话，Gemini 原生）/ agnes_image（图片）/ agnes_video（视频）/ seedance（火山视频）/ seedream（火山方舟·即梦图片）/ openai_image、openai_video（预留）；缺省为 openai_compatible",
 	"model_name":                  "上游模型 ID，如 k3、doubao-seedream-4-0-250828、doubao-seedance-1-0-pro-250528",
 	"display_name":                "展示名称（可选），客户端模型列表中显示",
 	"base_url":                    "上游 API 地址；新建必填，更新时省略表示保持原值",
@@ -1082,7 +1082,7 @@ func (s *EleAgentModelService) ImportConfigs(items []EleAgentModelExportItem) (*
 // validateProtocolCapabilities 校验模型的协议与能力标识是否一致。规则：
 //  1. 对话/图片/视频至少支持一项，否则模型没有任何可用入口；
 //  2. 视觉生成协议（agnes_image/seedream 为图片，agnes_video/seedance 为视频）与媒体能力必须匹配；
-//  3. 对话协议（openai_compatible/anthropic_messages 等）不允许声明图片/视频生成能力；
+//  3. 对话协议（openai_compatible/anthropic_messages/gemini_generative 等）不允许声明图片/视频生成能力；
 //  4. 视觉协议不限制 supports_chat，预留多模态模型既对话又生成的可能。
 //
 // 避免管理后台把视频模型配成 agnes_image 等错误组合，导致用户生成时提示不支持 media_type；

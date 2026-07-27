@@ -13,6 +13,8 @@ const (
 	EleAgentUpstreamOpenAICompatible EleAgentUpstreamProtocol = "openai_compatible"
 	// EleAgentUpstreamAnthropicMessages Anthropic Messages API
 	EleAgentUpstreamAnthropicMessages EleAgentUpstreamProtocol = "anthropic_messages"
+	// EleAgentUpstreamGeminiGenerative Google Gemini generateContent / streamGenerateContent 原生协议
+	EleAgentUpstreamGeminiGenerative EleAgentUpstreamProtocol = "gemini_generative"
 	// EleAgentUpstreamAgnesImage Agnes Image 文生图/图生图协议
 	EleAgentUpstreamAgnesImage EleAgentUpstreamProtocol = "agnes_image"
 	// EleAgentUpstreamAgnesVideo Agnes Video 文生视频/图生视频协议

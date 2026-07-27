@@ -11,6 +11,7 @@ import { eleAgentModelApi } from '../api/client'
 const PROTOCOLS = [
   { value: 'openai_compatible', label: 'OpenAI 兼容' },
   { value: 'anthropic_messages', label: 'Anthropic Messages' },
+  { value: 'gemini_generative', label: 'Gemini Generative' },
   { value: 'seedream', label: 'Seedream（即梦图片）' },
   { value: 'seedance', label: 'Seedance（火山视频）' },
   { value: 'agnes_image', label: 'Agnes Image' },

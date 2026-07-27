@@ -45,7 +45,7 @@ func (f *ClientFactory) Create(provider, apiKey, baseURL string) (llm.Client, er
 }
 
 // CreateByProtocol 根据协议类型创建 LLM 客户端
-// protocol: openai_compatible / anthropic_messages
+// protocol: openai_compatible / anthropic_messages / gemini_generative
 // apiKey: 明文 API Key
 // baseURL: 可选，为空时使用协议默认地址
 //
@@ -66,6 +66,13 @@ func (f *ClientFactory) CreateByProtocol(protocol, apiKey, baseURL string) (llm.
 			baseURL = "https://api.anthropic.com/v1"
 		}
 		client := llm.NewAnthropicClient(apiKey, baseURL, f.defaultTimeout)
+		client.SetLogger(f.logger)
+		return client, nil
+	case string(model.EleAgentUpstreamGeminiGenerative):
+		if baseURL == "" {
+			baseURL = "https://generativelanguage.googleapis.com/v1beta"
+		}
+		client := llm.NewGeminiClient(apiKey, baseURL, f.defaultTimeout)
 		client.SetLogger(f.logger)
 		return client, nil
 	default:
