@@ -15,6 +15,8 @@ export function useAgent() {
   // 按真实时间顺序维护的 Agent 执行步骤，用于线性展示 thinking / tool / answer
   const [steps, setSteps] = useState([])
   const abortRef = useRef(false)
+  // AR-02：AbortController 真正断连，让服务端 ctx 取消停止后续工具调用与 token 消耗
+  const abortControllerRef = useRef(null)
 
   const reset = useCallback(() => {
     setStatus('idle')
@@ -29,12 +31,16 @@ export function useAgent() {
     setWarning('')
     setSteps([])
     abortRef.current = false
+    abortControllerRef.current = null
   }, [])
 
   const execute = useCallback(({ conversationId, message, attachments = [], history = [], model, provider, baseUrl, apiKey, enableTools, enableWebSearch, searchProvider, assistantId }) => {
     reset()
     setStatus('executing')
     abortRef.current = false
+    // AR-02：为本次执行创建 AbortController，abort() 调 controller.abort() 真正断连
+    const controller = new AbortController()
+    abortControllerRef.current = controller
 
     return new Promise((resolve, reject) => {
       let finalAnswer = ''
@@ -252,6 +258,13 @@ export function useAgent() {
               setSteps(prev => [...prev, { type: 'error', message: finalError }])
               break
             }
+            case 'cancelled': {
+              // AR-02：服务端确认取消（ctx 取消后尽力下发，连接可能已断无法收到）
+              setStatus('done')
+              finalSteps = [...finalSteps, { type: 'cancelled' }]
+              setSteps(prev => [...prev, { type: 'cancelled' }])
+              break
+            }
             case 'done':
               setStatus('done')
               if (finalError) {
@@ -271,8 +284,15 @@ export function useAgent() {
               }
               break
           }
-        }
+        },
+        controller.signal // AR-02：传入 AbortController.signal
       ).catch(err => {
+        // AR-02：用户主动取消（AbortError）不算错误，置为 done/cancelled 状态
+        if (err.name === 'AbortError' || abortRef.current) {
+          setStatus('done')
+          resolve({ answer: finalAnswer, toolSteps: finalToolSteps, reasoningContent: finalReasoning, intermediateAnswer: finalIntermediate, resources: finalResources, toolSummary: finalToolSummary, warning: finalWarning, sessionId: '', steps: finalSteps, cancelled: true })
+          return
+        }
         setStatus('error')
         setError(err.message || '请求失败')
         reject(err)
@@ -282,6 +302,11 @@ export function useAgent() {
 
   const abort = useCallback(() => {
     abortRef.current = true
+    // AR-02：真正断连，触发服务端 ctx 取消，停止后续工具调用与 token 消耗
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      abortControllerRef.current = null
+    }
   }, [])
 
   return {

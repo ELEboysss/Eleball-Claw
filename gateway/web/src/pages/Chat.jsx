@@ -3,6 +3,7 @@ import useSEO from '../hooks/useSEO'
 import { useNavigate } from 'react-router-dom'
 import {
   Send,
+  Square,
   Bot,
   User as UserIcon,
   AlertCircle,
@@ -36,6 +37,7 @@ import AgentSwitch from '../components/AgentSwitch'
 import AgentStream from '../components/AgentStream'
 import AgentSteps from '../components/AgentSteps'
 import AgentSessionList from '../components/AgentSessionList'
+import ConfirmDialog from '../components/ConfirmDialog'
 import { useAgent } from '../hooks/useAgent'
 import { Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
@@ -90,6 +92,8 @@ export default function Chat() {
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState([])
   const [loading, setLoading] = useState(false)
+  // AR-05-O5：替代原生 confirm() 的确认弹窗状态
+  const [confirmState, setConfirmState] = useState({ open: false })
   const [models, setModels] = useState([])
   const [balance, setBalance] = useState(null)
   const [loginOpen, setLoginOpen] = useState(false)
@@ -129,7 +133,8 @@ export default function Chat() {
     resources: agentResources,
     error: agentError,
     warning: agentWarning,
-    steps: agentSteps
+    steps: agentSteps,
+    abort: abortAgent
   } = useAgent()
 
   // 模型 Profile 状态（与 App 端 ModelProfile 对齐），按当前登录用户隔离
@@ -475,7 +480,18 @@ export default function Chat() {
   }
 
   const handleDeleteAllConversations = async () => {
-    if (!confirm('确定删除所有对话吗？此操作不可恢复。')) return
+    // AR-05-O5：用 ConfirmDialog 替代原生 confirm()
+    const ok = await new Promise((resolve) => {
+      setConfirmState({
+        open: true,
+        title: '删除全部对话',
+        message: '确定删除所有对话吗？此操作不可恢复。',
+        confirmText: '删除',
+        onConfirm: () => { setConfirmState({ open: false }); resolve(true) },
+        onCancel: () => { setConfirmState({ open: false }); resolve(false) }
+      })
+    })
+    if (!ok) return
     // 串行删除，避免并发过多请求；未同步到后端的对话删除会失败，忽略即可
     for (const conv of conversations) {
       try {
@@ -487,7 +503,17 @@ export default function Chat() {
     const welcome = createConversation()
     updateConversations([welcome])
     switchConversation(welcome.id)
-    alert('对话历史已清空')
+    // AR-05-O5：用 ConfirmDialog 替代原生 alert()
+    setConfirmState({
+      open: true,
+      title: '已完成',
+      message: '对话历史已清空',
+      danger: false,
+      confirmText: '好的',
+      cancelText: '关闭',
+      onConfirm: () => setConfirmState({ open: false }),
+      onCancel: () => setConfirmState({ open: false })
+    })
   }
 
   const updateCurrentMessages = (updater) => {
@@ -780,9 +806,12 @@ export default function Chat() {
       const finalSteps = agentResult?.steps || assistantMessage.steps || []
       const finalAnswer = agentResult?.answer || agentResult?.intermediateAnswer || assistantMessage.answer || ''
       const finalToolSummary = agentResult?.toolSummary || assistantMessage.toolSummary || ''
+      const isCancelled = agentResult?.cancelled === true
       const hasErrorStep = finalSteps.some((s) => s.type === 'error')
       const hasWarningStep = finalSteps.some((s) => s.type === 'warning')
-      const fallbackContent = hasErrorStep
+      const fallbackContent = isCancelled
+        ? '已停止生成'
+        : hasErrorStep
         ? 'Agent 执行出错'
         : hasWarningStep
         ? 'Agent 已完成，但未生成有效回答'
@@ -1102,21 +1131,21 @@ export default function Chat() {
             <button
               onClick={handleNewChat}
               className="p-1.5 rounded-lg text-eleball-primary hover:bg-eleball-primary-light transition-colors"
-              title="新对话"
+              aria-label="新对话" title="新对话"
             >
               <Plus className="w-4 h-4" />
             </button>
             <button
               onClick={() => setTeamModalOpen(true)}
               className="p-1.5 rounded-lg text-eleball-text-secondary hover:bg-eleball-surface-variant transition-colors"
-              title="分组管理"
+              aria-label="分组管理" title="分组管理"
             >
               <Folders className="w-4 h-4" />
             </button>
             <button
               onClick={handleDeleteAllConversations}
               className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors"
-              title="删除全部对话"
+              aria-label="删除全部对话" title="删除全部对话"
             >
               <Trash2 className="w-4 h-4" />
             </button>
@@ -1138,7 +1167,7 @@ export default function Chat() {
                 <button
                   onClick={() => navigate(`/teams/${team.id}`)}
                   className="flex items-center gap-1 px-2 py-1 w-full text-left hover:bg-eleball-surface-variant rounded-lg transition-colors"
-                  title="查看分组详情"
+                  aria-label="查看分组详情" title="查看分组详情"
                 >
                   <ChevronRight className="w-3 h-3 text-eleball-text-tertiary flex-shrink-0" />
                   <span className="text-xs font-medium text-eleball-text-secondary truncate">{team.name}</span>
@@ -1200,7 +1229,7 @@ export default function Chat() {
             <button
               onClick={() => setSidebarOpen(true)}
               className="md:hidden p-1.5 rounded-full text-eleball-text-secondary hover:bg-eleball-surface-variant transition-colors"
-              title="对话列表"
+              aria-label="对话列表" title="对话列表"
             >
               <Menu className="w-4 h-4" />
             </button>
@@ -1212,7 +1241,7 @@ export default function Chat() {
             <button
               onClick={handleNewChat}
               className="hidden sm:inline-flex items-center gap-1 text-xs font-medium text-eleball-primary bg-eleball-primary-light/50 hover:bg-eleball-primary-light px-3 py-1.5 rounded-full transition-colors"
-              title="新对话"
+              aria-label="新对话" title="新对话"
             >
               <Plus className="w-3.5 h-3.5" />
               新对话
@@ -1243,7 +1272,7 @@ export default function Chat() {
             <button
               onClick={() => setSettingsOpen(true)}
               className="flex-shrink-0 p-1.5 rounded-full text-eleball-primary bg-eleball-primary-light/50 hover:bg-eleball-primary-light transition-colors"
-              title="模型配置"
+              aria-label="模型配置" title="模型配置"
             >
               <Settings className="w-3.5 h-3.5" />
             </button>
@@ -1308,7 +1337,7 @@ export default function Chat() {
                         onClick={() => handleAttachmentChange({ type: 'remove', id: att.id })}
                         disabled={loading}
                         className="p-0.5 rounded hover:bg-eleball-primary/20 text-eleball-text-secondary disabled:opacity-50"
-                        title="移除"
+                        aria-label="移除" title="移除"
                       >
                         <X className="w-3 h-3" />
                       </button>
@@ -1344,7 +1373,7 @@ export default function Chat() {
                   <button
                     type="button"
                     onClick={() => setKeepThinking((v) => !v)}
-                    title="开启后将把模型的思考过程一并保存到对话历史"
+                    aria-label="开启后将把模型的思考过程一并保存到对话历史" title="开启后将把模型的思考过程一并保存到对话历史"
                     className={[
                       'inline-flex items-center gap-1 px-2 py-1.5 rounded-full text-xs font-medium border transition-colors',
                       keepThinking
@@ -1359,7 +1388,7 @@ export default function Chat() {
                     <button
                       type="button"
                       onClick={() => setEnableWebSearch((v) => !v)}
-                      title="启用后 Agent 可调用 SearchWeb / FetchURL 联网工具"
+                      aria-label="启用后 Agent 可调用 SearchWeb / FetchURL 联网工具" title="启用后 Agent 可调用 SearchWeb / FetchURL 联网工具"
                       className={[
                         'inline-flex items-center gap-1 px-2 py-1.5 rounded-full text-xs font-medium border transition-colors',
                         enableWebSearch
@@ -1377,7 +1406,7 @@ export default function Chat() {
                         value={searchProvider}
                         onChange={(e) => setSearchProvider(e.target.value)}
                         disabled={loading}
-                        title="选择联网搜索源"
+                        aria-label="选择联网搜索源" title="选择联网搜索源"
                         className="appearance-none bg-blue-50 hover:bg-blue-100 text-blue-600 text-xs font-medium pl-2.5 pr-7 py-1.5 rounded-full border border-blue-200 outline-none cursor-pointer transition-colors max-w-[120px] truncate disabled:opacity-50"
                       >
                         {availableSearchProviders.map((p) => (
@@ -1395,7 +1424,7 @@ export default function Chat() {
                       type="button"
                       onClick={() => setAssistantPickerOpen(true)}
                       disabled={loading}
-                      title="选择本会话使用的助手（已激活秘技的组合）"
+                      aria-label="选择本会话使用的助手（已激活秘技的组合）" title="选择本会话使用的助手（已激活秘技的组合）"
                       className="inline-flex items-center gap-1 px-2 py-1.5 rounded-full text-xs font-medium border transition-colors bg-purple-50 text-purple-600 border-purple-200 hover:bg-purple-100 disabled:opacity-50"
                     >
                       <span className="max-w-[96px] truncate">
@@ -1417,7 +1446,7 @@ export default function Chat() {
                         navigate(`/visual?tab=${tab}${prompt ? `&prompt=${encodeURIComponent(prompt)}` : ''}`)
                       }}
                       className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-sm text-eleball-primary hover:bg-eleball-primary-light/30 transition-colors"
-                      title="去视觉页创作"
+                      aria-label="去视觉页创作" title="去视觉页创作"
                     >
                       {supportsVideo ? <Film className="w-4 h-4" /> : <Image className="w-4 h-4" />}
                       视觉创作
@@ -1427,21 +1456,32 @@ export default function Chat() {
                     type="button"
                     onClick={() => setSettingsOpen(true)}
                     className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-sm text-eleball-text-secondary hover:bg-eleball-surface-variant hover:text-eleball-text transition-colors"
-                    title="切换模型"
+                    aria-label="切换模型" title="切换模型"
                   >
                     <span className="max-w-[120px] truncate">
                       {currentProfile?.name || currentProfile?.modelName || '未配置模型'}
                     </span>
                     <ChevronDown className="w-4 h-4" />
                   </button>
-                  <button
-                    onClick={handleSend}
-                    disabled={loading || (!input.trim() && attachments.length === 0)}
-                    className="btn-primary p-3 rounded-full disabled:opacity-50"
-                    aria-label="发送消息"
-                  >
-                    <Send className="w-5 h-5" />
-                  </button>
+                  {/* AR-02：Agent 模式执行中显示停止按钮，调 abort 真正断连停止服务端工具循环 */}
+                  {loading && enableTools && supportsAgent && (agentStatus === 'executing' || agentStatus === 'answering') ? (
+                    <button
+                      onClick={abortAgent}
+                      className="p-3 rounded-full bg-red-500 hover:bg-red-600 text-white"
+                      aria-label="停止生成" title="停止生成"
+                    >
+                      <Square className="w-5 h-5" />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleSend}
+                      disabled={loading || (!input.trim() && attachments.length === 0)}
+                      className="btn-primary p-3 rounded-full disabled:opacity-50"
+                      aria-label="发送消息"
+                    >
+                      <Send className="w-5 h-5" />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -1451,6 +1491,18 @@ export default function Chat() {
           </p>
         </div>
       </div>
+
+      {/* AR-05-O5：确认弹窗（替代原生 confirm/alert） */}
+      <ConfirmDialog
+        open={confirmState.open}
+        title={confirmState.title}
+        message={confirmState.message}
+        danger={confirmState.danger !== false}
+        confirmText={confirmState.confirmText}
+        cancelText={confirmState.cancelText}
+        onConfirm={confirmState.onConfirm}
+        onCancel={confirmState.onCancel}
+      />
 
       <ModelSettings
         open={settingsOpen}
@@ -1561,7 +1613,7 @@ function ConversationItem({ conv, isActive, onSelect, onDelete, onMove }) {
             ? 'hover:bg-eleball-primary/20 text-eleball-primary'
             : 'hover:bg-eleball-outline text-eleball-text-secondary'
         }`}
-        title="移动到分组"
+        aria-label="移动到分组" title="移动到分组"
       >
         <FolderInput className="w-3.5 h-3.5" />
       </button>
@@ -1572,7 +1624,7 @@ function ConversationItem({ conv, isActive, onSelect, onDelete, onMove }) {
             ? 'hover:bg-eleball-primary/20 text-eleball-primary'
             : 'hover:bg-eleball-outline text-eleball-text-secondary'
         }`}
-        title="删除对话"
+        aria-label="删除对话" title="删除对话"
       >
         <Trash2 className="w-3.5 h-3.5" />
       </button>
@@ -1803,7 +1855,7 @@ function CopyButton({ text }) {
     <button
       onClick={handleCopy}
       className="absolute -bottom-2 -right-2 p-1 rounded-full bg-eleball-surface border border-eleball-outline-variant text-eleball-text-secondary opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"
-      title="复制内容"
+      aria-label="复制内容" title="复制内容"
     >
       {copied ? (
         <Check className="w-3 h-3 text-eleball-success" />
@@ -1840,14 +1892,14 @@ function CodeBlock({ language, code }) {
           <button
             onClick={handleDownload}
             className="p-1 rounded hover:text-white"
-            title="下载文件"
+            aria-label="下载文件" title="下载文件"
           >
             <Download className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={handleCopy}
             className="p-1 rounded hover:text-white"
-            title="复制"
+            aria-label="复制" title="复制"
           >
             {copied ? <Check className="w-3.5 h-3.5 text-eleball-success" /> : <Copy className="w-3.5 h-3.5" />}
           </button>
