@@ -215,7 +215,7 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	var totalUsage *llm.Usage
 	defer func() {
 		if s.billingService != nil && totalUsage != nil {
-			if err := s.billingService.Deduct(userID, billingProvider, billingModel, CurrencyDanwan, totalUsage); err != nil && s.logger != nil {
+			if err := s.billingService.DeductWithSource(userID, billingProvider, billingModel, CurrencyDanwan, "agent", totalUsage); err != nil && s.logger != nil {
 				s.logger.Warn("Agent 工作流扣费失败", zap.String("user_id", userID), zap.String("provider", billingProvider), zap.String("model", billingModel), zap.Error(err))
 			}
 		}
@@ -345,14 +345,13 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	}
 
 	// Agent Team P3：构建协作助手能力目录；目录非空时注入 CallAssistant 编排工具
-	// （随 dynamicTools 进 schema 与注册表），目录区块在下一步拼入 system prompt。
+	// （随 dynamicTools 进 schema 与注册表）。能力清单写入工具 description（见 buildCallAssistantTool），
+	// 不再注入 system prompt，避免每轮把「可委派」推到 LLM 眼前而挤占 SearchWeb/FetchURL 等既有工具。
 	// callRT 由下方客户端解析后填充，CallAssistant 闭包在实际被工具循环调用时读取。
 	var callRT callAssistantRuntime
-	catalogBlock := ""
 	if s.assistantSvc != nil && s.agentToolLoader != nil {
 		catalog := s.assistantSvc.BuildCapabilityCatalog(ctx, userID, assistantID, conv.TeamID)
 		if len(catalog) > 0 {
-			catalogBlock = FormatCatalogBlock(catalog)
 			dynamicTools = append(dynamicTools, s.buildCallAssistantTool(catalog, session, &callRT))
 		}
 	}
@@ -364,7 +363,7 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	availableTools := s.schemaBuilder.BuildWithOptionsAndDynamic(hasFileTools, enableWebSearch, dynamicTools)
 
 	// 10. 构建初始消息（Agent Team P2：组内对话注入组共享记忆区块；P3：能力目录区块）
-	messages := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID, catalogBlock)
+	messages := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID)
 
 	// 11. Function Calling 循环
 	env := &ToolEnv{
@@ -400,8 +399,12 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	modelName = normalizeAgentModelName(req.Provider, modelName)
 
 	// Agent Team P3：填充编排运行时（CallAssistant 被工具循环调用时读取）
+	// Agent Team P5：透传 SSE writer（子任务进度流式）+ 主对话计费口径（follow 模式复用）
 	callRT.client = llmClient
 	callRT.model = modelName
+	callRT.writer = w
+	callRT.billingProvider = billingProvider
+	callRT.billingModel = billingModel
 
 	result, err := s.toolLoop.RunWithRegistry(ctx, registry, llmClient, modelName, availableTools, messages, env,
 		func(record ToolCallRecord) error {
@@ -591,24 +594,21 @@ func (s *AgentService) ensureSessionQuota(ctx context.Context, userID string) er
 // Agent Team P2：teamID 非空且 teamMemorySvc 已装配时，检索组共享记忆并把
 // 「组共享记忆」区块拼入 system 消息内容尾部（不新增消息，避免弱模型角色混乱）；
 // userID/teamID 传空则跳过注入（如工具关闭的普通对话路径）。
-// Agent Team P3：catalogBlock 非空时把协作助手能力目录区块拼入 system 尾部（组记忆区块之后）。
-func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID, catalogBlock string) []llm.Message {
+func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID string) []llm.Message {
 	messages := make([]llm.Message, 0, len(req.History)+2)
 	systemContent := "你是一个有用的 AI 助手。\n" +
 		"规则：\n" +
 		"1. 当用户问题涉及实时信息、搜索网络、读取文件、处理图片/OCR 或生成视频时，你必须调用对应工具获取结果，禁止只回复“我要查询/请稍等”而不调用工具。\n" +
 		"2. 请直接输出工具调用，拿到工具结果后再给出最终回答。\n" +
-		"3. 如果工具返回失败或没有有效结果，如实告知用户，不要编造。"
+		"3. 如果工具返回失败或没有有效结果，如实告知用户，不要编造。\n" +
+		"4. 必须使用工具列表中的准确工具名（区分大小写），不得自创或变形；若返回未知工具，按其列出的可用工具名重新调用。\n" +
+		"5. 调用工具前，先查看可用工具列表及其描述，确认工具能力与用户需求匹配后再调用；不确定时查看工具描述而非猜测。"
 	// Agent Team P2：组共享记忆注入（区块预算 4000 字符 ≈ 2000 tokens，超出按相关度截断）
 	if teamID != "" && s.teamMemorySvc != nil {
 		memories := s.teamMemorySvc.SearchForInjection(ctx, userID, teamID, req.Message, 8)
 		if block := s.teamMemorySvc.FormatInjectionBlock(memories, TeamMemoryInjectMaxChars); block != "" {
 			systemContent += "\n\n" + block
 		}
-	}
-	// Agent Team P3：协作助手能力目录注入（组记忆区块之后）
-	if catalogBlock != "" {
-		systemContent += "\n\n" + catalogBlock
 	}
 	messages = append(messages, llm.Message{
 		Role:    "system",
@@ -673,8 +673,8 @@ func (s *AgentService) chatStream(ctx context.Context, req AgentExecuteRequest, 
 	// Ele Agent 模型名为 subProvider/subModel，上游真实请求只使用 subModel
 	modelName = normalizeAgentModelName(req.Provider, modelName)
 
-	// 工具关闭的普通对话路径不注入组共享记忆与能力目录（userID/teamID/catalogBlock 传空跳过；保持与历史行为一致）
-	messages := s.buildInitialMessages(ctx, req, req.Attachments, "", "", "")
+	// 工具关闭的普通对话路径不注入组共享记忆（userID/teamID 传空跳过；保持与历史行为一致）
+	messages := s.buildInitialMessages(ctx, req, req.Attachments, "", "")
 	stream, err := llmClient.ChatStream(ctx, llm.ChatRequest{
 		Model:    modelName,
 		Messages: messages,
@@ -804,14 +804,14 @@ func (s *AgentService) saveAgentAssistantMessage(ctx context.Context, conversati
 
 // AgentSessionItem Session 列表项（脱敏，不暴露磁盘路径）
 type AgentSessionItem struct {
-	ID             string  `json:"id"`
-	ConversationID string  `json:"conversation_id,omitempty"`
-	Title          string  `json:"title"`
-	Status         string  `json:"status"`
-	ToolChain      string  `json:"tool_chain,omitempty"`
-	CreatedAt      int64   `json:"created_at"`
-	UpdatedAt      int64   `json:"updated_at"`
-	CompletedAt    *int64  `json:"completed_at,omitempty"`
+	ID             string `json:"id"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	Title          string `json:"title"`
+	Status         string `json:"status"`
+	ToolChain      string `json:"tool_chain,omitempty"`
+	CreatedAt      int64  `json:"created_at"`
+	UpdatedAt      int64  `json:"updated_at"`
+	CompletedAt    *int64 `json:"completed_at,omitempty"`
 }
 
 // ListSessions 查询用户的 Agent Session 列表

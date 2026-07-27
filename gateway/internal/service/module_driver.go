@@ -110,11 +110,22 @@ func (d *moduleDriver) Execute(ctx context.Context, action string, params map[st
 
 	result, err := d.registry.Execute(moduleID, action, cleanParams, env.UserID)
 	if err != nil {
-		return ToolResult{
-			Content:   "",
-			Error:     fmt.Sprintf("%s 模块调用失败: %v", moduleID, err),
-			ErrorCode: "module_call_failed",
-		}.ToMap(), nil
+		// 优先采用模块返回的结构化错误码（credential_missing / credential_invalid /
+		// upstream_error / parameter_invalid 等），便于 LLM 与调试者精确理解失败原因；
+		// 模块未返回 error_code 时回落 module_call_failed。
+		code := "module_call_failed"
+		msg := fmt.Sprintf("%s 模块调用失败: %v", moduleID, err)
+		if result != nil {
+			if c, ok := result["error_code"].(string); ok && c != "" {
+				code = c
+			}
+			if m, ok := result["error_message"].(string); ok && m != "" {
+				msg = fmt.Sprintf("%s: %s", moduleID, m)
+			} else if detail, ok := result["detail"].(string); ok && detail != "" {
+				msg = fmt.Sprintf("%s: %s", moduleID, detail) // 兼容旧模块的 FastAPI detail
+			}
+		}
+		return ToolResult{Content: "", Error: msg, ErrorCode: code}.ToMap(), nil
 	}
 	return result, nil
 }

@@ -63,12 +63,18 @@ func (h *AssistantHandler) GetAssistant(c *gin.Context) {
 
 // UpdateAssistantRequest 更新助手请求（指针字段，缺省不更新）
 // Agent Team P3：扩展 system_prompt / shared / team_id（team_id 非空校验组归属）
+// Agent Team P5：扩展 llm_mode / llm_provider / llm_model / llm_base_url / llm_api_key
 type UpdateAssistantRequest struct {
 	Name         *string `json:"name"`
 	Description  *string `json:"description"`
 	SystemPrompt *string `json:"system_prompt"`
 	Shared       *bool   `json:"shared"`
 	TeamID       *string `json:"team_id"`
+	LLMMode      *string `json:"llm_mode"`     // follow|eleagent|byok
+	LLMProvider  *string `json:"llm_provider"` // byok
+	LLMModel     *string `json:"llm_model"`    // byok 或 eleagent 的 "subProvider/subModel"
+	LLMBaseURL   *string `json:"llm_base_url"` // byok
+	LLMAPIKey    *string `json:"llm_api_key"`  // 仅写：明文进请求，服务端加密入库；从不回读，空=清除
 }
 
 // UpdateAssistant 更新助手名称/描述/编排协作字段
@@ -85,6 +91,11 @@ func (h *AssistantHandler) UpdateAssistant(c *gin.Context) {
 		SystemPrompt: req.SystemPrompt,
 		Shared:       req.Shared,
 		TeamID:       req.TeamID,
+		LLMMode:      req.LLMMode,
+		LLMProvider:  req.LLMProvider,
+		LLMModel:     req.LLMModel,
+		LLMBaseURL:   req.LLMBaseURL,
+		LLMAPIKey:    req.LLMAPIKey,
 	})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 3001, "message": err.Error()})

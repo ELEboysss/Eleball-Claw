@@ -208,8 +208,9 @@ export const systemApi = {
 
 // ====== 对话历史 API（本地 claw：本地存储）======
 export const conversationApi = {
-  list: (page = 1, pageSize = 20) =>
-    client.get(`/conversations?page=${page}&page_size=${pageSize}`),
+  // teamId 非空时按组过滤；空串 = 全部对话
+  list: (page = 1, pageSize = 20, teamId = '') =>
+    client.get(`/conversations?page=${page}&page_size=${pageSize}${teamId ? `&team_id=${encodeURIComponent(teamId)}` : ''}`),
   create: (data) => client.post('/conversations', data),
   get: (id) => client.get(`/conversations/${id}`),
   update: (id, data) => client.patch(`/conversations/${id}`, data),
@@ -217,6 +218,21 @@ export const conversationApi = {
   listMessages: (id, page = 1, pageSize = 50) =>
     client.get(`/conversations/${id}/messages?page=${page}&page_size=${pageSize}`),
   saveMessage: (id, data) => client.post(`/conversations/${id}/messages`, data)
+}
+
+// ====== 对话分组 API（Agent Team；组严格按 user_id 隔离）======
+// 组内对话共享记忆，组内助手可被编排者经 CallAssistant 委派。
+export const teamApi = {
+  list: () => client.get('/teams'),                          // -> [{ id, name, description, conversation_count, ... }]
+  create: (data) => client.post('/teams', data),             // { name, description? }
+  get: (id) => client.get(`/teams/${id}`),                   // -> { ...team, conversations: [...] }
+  update: (id, data) => client.patch(`/teams/${id}`, data),  // { name?, description? }
+  remove: (id) => client.delete(`/teams/${id}`),
+  // 组共享记忆（scope = user + team）
+  listMemories: (id, page = 1, pageSize = 20) =>
+    client.get(`/teams/${id}/memories?page=${page}&page_size=${pageSize}`), // -> { items, total }
+  createMemory: (id, data) => client.post(`/teams/${id}/memories`, data),   // { content, tags? }
+  removeMemory: (teamId, memoryId) => client.delete(`/teams/${teamId}/memories/${memoryId}`)
 }
 
 // ====== Agent 工作流 API（本地 claw）======

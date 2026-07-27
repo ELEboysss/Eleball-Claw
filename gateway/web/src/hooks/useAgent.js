@@ -68,11 +68,13 @@ export function useAgent() {
           if (abortRef.current) return
           switch (event.event) {
             case 'tool_call': {
+              const sessionId = event.data.session_id || ''
               const callStep = {
                 step: event.data.step,
                 tool: event.data.tool,
                 arguments: event.data.arguments,
-                status: 'running'
+                status: 'running',
+                sessionId
               }
               finalToolSteps.push(callStep)
               finalSteps = [...finalSteps, { type: 'tool_call', ...callStep }]
@@ -83,7 +85,10 @@ export function useAgent() {
             }
             case 'tool_result': {
               const { step, tool, status, output, error_message } = event.data
-              const resultIndex = finalToolSteps.findIndex(s => s.step === step)
+              // Agent Team P5：子循环 step 编号从 1 重启，按 (sessionId, step) 匹配避免与主循环撞号
+              const sessionId = event.data.session_id || ''
+              const matchKey = (s) => s.step === step && (s.sessionId || '') === sessionId
+              const resultIndex = finalToolSteps.findIndex(matchKey)
               if (resultIndex >= 0) {
                 finalToolSteps[resultIndex] = {
                   ...finalToolSteps[resultIndex],
@@ -92,8 +97,7 @@ export function useAgent() {
                   error: error_message
                 }
               }
-              // 同步更新 finalSteps，确保 resolve 时一定拿到最新状态
-              const stepIndex = finalSteps.findIndex(s => (s.type === 'tool_call' || s.type === 'tool_result') && s.step === step)
+              const stepIndex = finalSteps.findIndex(s => (s.type === 'tool_call' || s.type === 'tool_result') && matchKey(s))
               if (stepIndex >= 0) {
                 finalSteps = finalSteps.map((s, idx) =>
                   idx === stepIndex
@@ -101,16 +105,15 @@ export function useAgent() {
                     : s
                 )
               } else {
-                finalSteps = [...finalSteps, { type: 'tool_result', step, tool, status, output, error: error_message }]
+                finalSteps = [...finalSteps, { type: 'tool_result', step, tool, status, output, error: error_message, sessionId }]
               }
-              // 函数式更新 React state，避免闭包被覆盖
               setToolSteps(prev => prev.map(s =>
-                s.step === step
+                matchKey(s)
                   ? { ...s, status, output, error: error_message }
                   : s
               ))
               setSteps(prev => {
-                const idx = prev.findIndex(s => (s.type === 'tool_call' || s.type === 'tool_result') && s.step === step)
+                const idx = prev.findIndex(s => (s.type === 'tool_call' || s.type === 'tool_result') && matchKey(s))
                 if (idx >= 0) {
                   return prev.map((s, i) =>
                     i === idx
@@ -118,61 +121,65 @@ export function useAgent() {
                       : s
                   )
                 }
-                return [...prev, { type: 'tool_result', step, tool, status, output, error: error_message }]
+                return [...prev, { type: 'tool_result', step, tool, status, output, error: error_message, sessionId }]
               })
               break
             }
             case 'reasoning': {
+              const sessionId = event.data.session_id || ''
               const delta = event.data.delta || ''
-              finalReasoning += delta
+              // Agent Team P5：子 agent 推理不污染主对话 reasoning（仅主循环 sessionId='' 累入）
+              if (sessionId === '') finalReasoning += delta
               const last = finalSteps[finalSteps.length - 1]
-              if (last && last.type === 'thinking') {
+              if (last && last.type === 'thinking' && (last.sessionId || '') === sessionId) {
                 finalSteps = finalSteps.map((s, idx) =>
                   idx === finalSteps.length - 1
                     ? { ...s, content: s.content + delta }
                     : s
                 )
               } else {
-                finalSteps = [...finalSteps, { type: 'thinking', content: delta }]
+                finalSteps = [...finalSteps, { type: 'thinking', content: delta, sessionId }]
               }
-              setReasoningContent(prev => prev + delta)
+              if (sessionId === '') setReasoningContent(prev => prev + delta)
               setSteps(prev => {
                 const lastStep = prev[prev.length - 1]
-                if (lastStep && lastStep.type === 'thinking') {
+                if (lastStep && lastStep.type === 'thinking' && (lastStep.sessionId || '') === sessionId) {
                   return prev.map((s, idx) =>
                     idx === prev.length - 1
                       ? { ...s, content: s.content + delta }
                       : s
                   )
                 }
-                return [...prev, { type: 'thinking', content: delta }]
+                return [...prev, { type: 'thinking', content: delta, sessionId }]
               })
               break
             }
             case 'intermediate_answer': {
+              const sessionId = event.data.session_id || ''
               const delta = event.data.delta || ''
-              finalIntermediate += delta
+              // Agent Team P5：子 agent 中间回答不污染主对话 intermediate（仅主循环累入）
+              if (sessionId === '') finalIntermediate += delta
               const last = finalSteps[finalSteps.length - 1]
-              if (last && last.type === 'intermediate') {
+              if (last && last.type === 'intermediate' && (last.sessionId || '') === sessionId) {
                 finalSteps = finalSteps.map((s, idx) =>
                   idx === finalSteps.length - 1
                     ? { ...s, content: s.content + delta }
                     : s
                 )
               } else {
-                finalSteps = [...finalSteps, { type: 'intermediate', content: delta }]
+                finalSteps = [...finalSteps, { type: 'intermediate', content: delta, sessionId }]
               }
-              setIntermediateAnswer(prev => prev + delta)
+              if (sessionId === '') setIntermediateAnswer(prev => prev + delta)
               setSteps(prev => {
                 const lastStep = prev[prev.length - 1]
-                if (lastStep && lastStep.type === 'intermediate') {
+                if (lastStep && lastStep.type === 'intermediate' && (lastStep.sessionId || '') === sessionId) {
                   return prev.map((s, idx) =>
                     idx === prev.length - 1
                       ? { ...s, content: s.content + delta }
                       : s
                   )
                 }
-                return [...prev, { type: 'intermediate', content: delta }]
+                return [...prev, { type: 'intermediate', content: delta, sessionId }]
               })
               break
             }

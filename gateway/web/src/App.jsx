@@ -8,6 +8,7 @@ import Models from './pages/Models'
 import AgentMarket from './pages/AgentMarket'
 import VisualStudio from './pages/VisualStudio'
 import ClawGuide from './pages/ClawGuide'
+import TeamDetail from './pages/TeamDetail'
 
 function App() {
   const location = useLocation()
@@ -30,6 +31,7 @@ function App() {
           <Route path="/visual" element={<VisualStudio />} />
           <Route path="/video" element={<Navigate to="/visual?tab=video" replace />} />
           <Route path="/claw-guide" element={<ClawGuide />} />
+          <Route path="/teams/:teamId" element={<TeamDetail />} />
         </Routes>
       </main>
       {!isFullView && <Footer />}

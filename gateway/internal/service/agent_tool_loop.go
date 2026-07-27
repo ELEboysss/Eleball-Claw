@@ -28,8 +28,8 @@ type ToolCallRecord struct {
 
 // ToolCallingLoop Function Calling 循环
 type ToolCallingLoop struct {
-	registry  *ToolRegistry
-	maxSteps  int
+	registry *ToolRegistry
+	maxSteps int
 	// maxRetries 上游可重试错误（5xx/429/网络错误）的最大尝试次数，默认 defaultUpstreamMaxAttempts
 	maxRetries int
 }
@@ -55,7 +55,7 @@ type RunResult struct {
 	Records       []ToolCallRecord
 	FinalContent  string
 	ReachMaxSteps bool
-	LoopDetected  bool // 检测到同工具同参数循环调用
+	LoopDetected  bool       // 检测到同工具同参数循环调用
 	Usage         *llm.Usage // 整个循环累计的 token 用量，用于计费
 }
 
@@ -191,7 +191,12 @@ func (l *ToolCallingLoop) RunWithRegistry(
 
 			tool, ok := registry.Get(tc.Function.Name)
 			if !ok {
-				record.Error = fmt.Sprintf("未知工具: %s", tc.Function.Name)
+				// 工具名未命中：列出可用工具名，提示 LLM 用准确名字重试（不为其做模糊适配）
+				avail := make([]string, 0, 8)
+				for _, t := range registry.List() {
+					avail = append(avail, t.Name)
+				}
+				record.Error = fmt.Sprintf("未知工具: %s。可用工具：%s", tc.Function.Name, strings.Join(avail, ", "))
 			} else {
 				var input map[string]interface{}
 				if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {

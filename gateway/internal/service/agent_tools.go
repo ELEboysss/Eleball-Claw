@@ -181,8 +181,10 @@ func (r *ToolRegistry) Clone() *ToolRegistry {
 	return cloned
 }
 
-// registerDefaults 注册默认工具
-func (r *ToolRegistry) registerDefaults() {
+// RegisterBuiltinSearchWeb 注册内置 SearchWeb 工具（读 env BAIDU_API_KEY/BING_SEARCH_API_KEY）。
+// 仅云端调用：云端用内置搜索实现；claw 由外置 search-web 模块（千帆/Bing SKU）提供搜索，不注册此项，
+// 避免 LLM 感知到无凭证的内置工具而报「搜索服务未配置」。
+func (r *ToolRegistry) RegisterBuiltinSearchWeb() {
 	r.Register(&Tool{
 		Name:        "SearchWeb",
 		Description: "联网搜索，获取实时信息。国内云服务器推荐配置 baidu（每日 100 次免费额度）或 bing",
@@ -210,7 +212,10 @@ func (r *ToolRegistry) registerDefaults() {
 		},
 		Func: r.toolSearchWeb,
 	})
+}
 
+// registerDefaults 注册默认工具（不含 SearchWeb：云端显式注册，claw 用外置 search-web 模块）
+func (r *ToolRegistry) registerDefaults() {
 	r.Register(&Tool{
 		Name:        "FetchURL",
 		Description: "抓取指定网页的正文内容，用于深度阅读搜索结果页面",

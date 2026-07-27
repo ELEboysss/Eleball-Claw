@@ -43,10 +43,15 @@ type BalanceInfo struct {
 	Elegant int64 `json:"elegant"`
 }
 
-// Deduct 按用量扣费
+// Deduct 按用量扣费（默认 source=agent，向后兼容；协同委派用 DeductWithSource 标注来源）
+func (s *BillingService) Deduct(userID, provider, modelName, currency string, usage *llm.Usage) error {
+	return s.DeductWithSource(userID, provider, modelName, currency, "agent", usage)
+}
+
+// DeductWithSource 按用量扣费并标注来源（agent / chat / call_assistant:子session / visual）。
 // 仅对 Ele Agent 代理的模型收费；用户使用自带 API Key 的直连模型不扣费。
 // currency 指定扣费货币：danwan / elegant，默认 danwan
-func (s *BillingService) Deduct(userID, provider, modelName, currency string, usage *llm.Usage) error {
+func (s *BillingService) DeductWithSource(userID, provider, modelName, currency, source string, usage *llm.Usage) error {
 	if currency == "" {
 		currency = CurrencyDanwan
 	}
@@ -130,6 +135,7 @@ func (s *BillingService) Deduct(userID, provider, modelName, currency string, us
 		OutputTokens: usage.CompletionTokens,
 		CostAmount:   totalCost,
 		Currency:     currency,
+		Source:       source,
 	}
 	if err := s.billRepo.CreateTokenUsage(tokenUsage); err != nil {
 		// 用量记录失败不阻断主流程，但记录日志

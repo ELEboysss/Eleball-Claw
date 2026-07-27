@@ -29,7 +29,7 @@ type EleAgentModelService struct {
 	// 存储的 API Key 仅作无请求上下文场景（如后台任务恢复）的兜底，免于登录态过期后手动换 Key。
 	cloudAPIBase string
 
-	mu   sync.RWMutex
+	mu    sync.RWMutex
 	items []*model.EleAgentModelConfig // 内存缓存，按 provider/model 分组
 }
 
@@ -294,26 +294,26 @@ func (s *EleAgentModelService) GetCredential(provider, modelName string) (*EleAg
 
 // EleAgentModelConfigInput 创建模型配置的参数
 type EleAgentModelConfigInput struct {
-	Provider             string
-	Protocol             string
-	ModelName            string
-	DisplayName          string
-	BaseURL              string
-	APIKey               string
-	Priority             int
-	InputPricePerCall    int64
-	PricePerCall         int64
-	PricePerGeneration   int64 // 按次附加费（弹丸/次），与 token 费用相加，适用于对话/图片/视频模型
-	VideoMinDuration     int   // 视频最小时长（秒），0 表示不限制
-	VideoMaxDuration     int   // 视频最大时长（秒），0 表示不限制
-	VideoDurationStep    int   // 视频时长步长（秒）
-	SupportsChat         bool
-	SupportsVision       bool
-	SupportsImage        bool
-	SupportsVideo        bool
-	SupportsImageInput   bool
+	Provider                  string
+	Protocol                  string
+	ModelName                 string
+	DisplayName               string
+	BaseURL                   string
+	APIKey                    string
+	Priority                  int
+	InputPricePerCall         int64
+	PricePerCall              int64
+	PricePerGeneration        int64 // 按次附加费（弹丸/次），与 token 费用相加，适用于对话/图片/视频模型
+	VideoMinDuration          int   // 视频最小时长（秒），0 表示不限制
+	VideoMaxDuration          int   // 视频最大时长（秒），0 表示不限制
+	VideoDurationStep         int   // 视频时长步长（秒）
+	SupportsChat              bool
+	SupportsVision            bool
+	SupportsImage             bool
+	SupportsVideo             bool
+	SupportsImageInput        bool
 	SupportsContinuousContext bool
-	SupportsTools        bool
+	SupportsTools             bool
 }
 
 // CreateConfig 创建配置
@@ -348,15 +348,15 @@ func (s *EleAgentModelService) CreateConfig(in EleAgentModelConfigInput) (*model
 	}
 
 	config := &model.EleAgentModelConfig{
-		ID:           uuid.New().String(),
-		Provider:     in.Provider,
-		Protocol:     model.EleAgentUpstreamProtocol(protocol),
-		ModelName:    in.ModelName,
-		DisplayName:  in.DisplayName,
-		BaseURL:      in.BaseURL,
-		EncryptedKey: ciphertext,
-		Nonce:        nonce,
-		KeyVersion:   version,
+		ID:                        uuid.New().String(),
+		Provider:                  in.Provider,
+		Protocol:                  model.EleAgentUpstreamProtocol(protocol),
+		ModelName:                 in.ModelName,
+		DisplayName:               in.DisplayName,
+		BaseURL:                   in.BaseURL,
+		EncryptedKey:              ciphertext,
+		Nonce:                     nonce,
+		KeyVersion:                version,
 		IsEnabled:                 true,
 		SupportsChat:              in.SupportsChat,
 		SupportsVision:            in.SupportsVision,
@@ -366,12 +366,12 @@ func (s *EleAgentModelService) CreateConfig(in EleAgentModelConfigInput) (*model
 		SupportsContinuousContext: in.SupportsContinuousContext,
 		SupportsTools:             in.SupportsTools,
 		Priority:                  in.Priority,
-		InputPricePerCall:  in.InputPricePerCall,
-		PricePerCall:       in.PricePerCall,
-		PricePerGeneration: in.PricePerGeneration,
-		VideoMinDuration:   in.VideoMinDuration,
-		VideoMaxDuration:   in.VideoMaxDuration,
-		VideoDurationStep:  in.VideoDurationStep,
+		InputPricePerCall:         in.InputPricePerCall,
+		PricePerCall:              in.PricePerCall,
+		PricePerGeneration:        in.PricePerGeneration,
+		VideoMinDuration:          in.VideoMinDuration,
+		VideoMaxDuration:          in.VideoMaxDuration,
+		VideoDurationStep:         in.VideoDurationStep,
 	}
 
 	if err := s.repo.Create(config); err != nil {
@@ -415,26 +415,26 @@ func (s *EleAgentModelService) UpdateConfig(id string, patch EleAgentModelConfig
 	}
 
 	updates := map[string]interface{}{
-		"provider":        existing.Provider,
-		"protocol":        existing.Protocol,
-		"model_name":      existing.ModelName,
-		"display_name":    existing.DisplayName,
-		"base_url":        existing.BaseURL,
-		"is_enabled":      existing.IsEnabled,
-		"supports_chat":              existing.SupportsChat,
+		"provider":                    existing.Provider,
+		"protocol":                    existing.Protocol,
+		"model_name":                  existing.ModelName,
+		"display_name":                existing.DisplayName,
+		"base_url":                    existing.BaseURL,
+		"is_enabled":                  existing.IsEnabled,
+		"supports_chat":               existing.SupportsChat,
 		"supports_vision":             existing.SupportsVision,
 		"supports_image":              existing.SupportsImage,
 		"supports_video":              existing.SupportsVideo,
 		"supports_image_input":        existing.SupportsImageInput,
 		"supports_continuous_context": existing.SupportsContinuousContext,
 		"supports_tools":              existing.SupportsTools,
-		"priority":             existing.Priority,
-		"input_price_per_call": existing.InputPricePerCall,
-		"price_per_call":       existing.PricePerCall,
-		"price_per_generation": existing.PricePerGeneration,
-		"video_min_duration":   existing.VideoMinDuration,
-		"video_max_duration":   existing.VideoMaxDuration,
-		"video_duration_step":  existing.VideoDurationStep,
+		"priority":                    existing.Priority,
+		"input_price_per_call":        existing.InputPricePerCall,
+		"price_per_call":              existing.PricePerCall,
+		"price_per_generation":        existing.PricePerGeneration,
+		"video_min_duration":          existing.VideoMinDuration,
+		"video_max_duration":          existing.VideoMaxDuration,
+		"video_duration_step":         existing.VideoDurationStep,
 	}
 	if patch.Provider != "" {
 		updates["provider"] = patch.Provider
@@ -717,12 +717,12 @@ func (item *EleAgentModelExportItem) Has(field string) bool {
 // EleAgentModelExportData 导出文件整体结构；导入接口同样接受该结构或纯数组。
 // Usage 与 FieldNotes 仅供人工阅读（JSON 不支持注释），导入时被忽略。
 type EleAgentModelExportData struct {
-	Version     int                        `json:"version"`
-	ExportedAt  string                     `json:"exported_at"`
-	IncludeKeys bool                       `json:"include_keys"`
-	Usage       string                     `json:"usage"`
-	FieldNotes  map[string]string          `json:"field_notes"`
-	Items       []EleAgentModelExportItem  `json:"items"`
+	Version     int                       `json:"version"`
+	ExportedAt  string                    `json:"exported_at"`
+	IncludeKeys bool                      `json:"include_keys"`
+	Usage       string                    `json:"usage"`
+	FieldNotes  map[string]string         `json:"field_notes"`
+	Items       []EleAgentModelExportItem `json:"items"`
 }
 
 // EleAgentModelExportUsage 导出文件顶部的导入规则说明
@@ -730,27 +730,27 @@ const EleAgentModelExportUsage = "本文件由 Ele Agent 模型配置导出，�
 
 // eleAgentModelFieldNotes 逐字段含义与取值范围说明，随导出文件带出，便于人工编辑
 var eleAgentModelFieldNotes = map[string]string{
-	"provider":                  "平台标识（自定义，用于配置匹配与统计），如 kimi / volcengine / agnes / qwen；与 model_name 组成唯一匹配键",
-	"protocol":                  "上游协议：openai_compatible（对话）/ anthropic_messages（对话）/ agnes_image（图片）/ agnes_video（视频）/ seedance（火山视频）/ seedream（火山方舟·即梦图片）/ openai_image、openai_video（预留）；缺省为 openai_compatible",
-	"model_name":                "上游模型 ID，如 k3、doubao-seedream-4-0-250828、doubao-seedance-1-0-pro-250528",
-	"display_name":              "展示名称（可选），客户端模型列表中显示",
-	"base_url":                  "上游 API 地址；新建必填，更新时省略表示保持原值",
-	"api_key":                   "明文 API Key；新建必填；更新时省略=保留原 Key，提供=轮换 Key",
-	"is_enabled":                "是否启用；更新时省略表示保持原启用状态",
-	"supports_chat":             "能力开关：支持文字对话（对话页）；纯图片/纯视频生成模型应为 false，对话/图片/视频至少需开启一项",
-	"supports_vision":           "能力开关：支持视觉理解（图片输入）",
-	"supports_image":            "能力开关：支持图片生成（需搭配 agnes_image / seedream 协议）",
-	"supports_video":            "能力开关：支持视频生成（需搭配 agnes_video / seedance 协议）",
-	"supports_image_input":      "能力开关：支持上传图片作为生成输入（图生图/图生视频）",
+	"provider":                    "平台标识（自定义，用于配置匹配与统计），如 kimi / volcengine / agnes / qwen；与 model_name 组成唯一匹配键",
+	"protocol":                    "上游协议：openai_compatible（对话）/ anthropic_messages（对话）/ agnes_image（图片）/ agnes_video（视频）/ seedance（火山视频）/ seedream（火山方舟·即梦图片）/ openai_image、openai_video（预留）；缺省为 openai_compatible",
+	"model_name":                  "上游模型 ID，如 k3、doubao-seedream-4-0-250828、doubao-seedance-1-0-pro-250528",
+	"display_name":                "展示名称（可选），客户端模型列表中显示",
+	"base_url":                    "上游 API 地址；新建必填，更新时省略表示保持原值",
+	"api_key":                     "明文 API Key；新建必填；更新时省略=保留原 Key，提供=轮换 Key",
+	"is_enabled":                  "是否启用；更新时省略表示保持原启用状态",
+	"supports_chat":               "能力开关：支持文字对话（对话页）；纯图片/纯视频生成模型应为 false，对话/图片/视频至少需开启一项",
+	"supports_vision":             "能力开关：支持视觉理解（图片输入）",
+	"supports_image":              "能力开关：支持图片生成（需搭配 agnes_image / seedream 协议）",
+	"supports_video":              "能力开关：支持视频生成（需搭配 agnes_video / seedance 协议）",
+	"supports_image_input":        "能力开关：支持上传图片作为生成输入（图生图/图生视频）",
 	"supports_continuous_context": "能力开关（产品声明）：支持连续上下文创作，运行时由 protocol 决定",
-	"supports_tools":            "能力开关：支持 Agent 工具调用（Function Call）",
-	"priority":                  "优先级（整数 ≥0，越小越靠前），用于客户端模型列表排序",
-	"input_price_per_call":      "输入单价（弹丸 / 1M tokens，≥0），0 表示免费",
-	"price_per_call":            "输出单价（弹丸 / 1M tokens，≥0），0 表示免费",
-	"price_per_generation":      "按次附加费（弹丸/次，≥0），与输入/输出 token 费用相加，适用于对话/图片/视频模型，0 表示不附加",
-	"video_min_duration":        "视频最小时长（秒，≥0），0 表示不限制；不能超过 video_max_duration",
-	"video_max_duration":        "视频最大时长（秒，≥0），0 表示不限制；示例：Seedance 1.0 Pro 支持 5~10 秒",
-	"video_duration_step":       "视频时长步长（秒，≥1），前端按 min~max 以步长生成可选档位；示例：5~10 秒步长 5 → 可选 5s / 10s",
+	"supports_tools":              "能力开关：支持 Agent 工具调用（Function Call）",
+	"priority":                    "优先级（整数 ≥0，越小越靠前），用于客户端模型列表排序",
+	"input_price_per_call":        "输入单价（弹丸 / 1M tokens，≥0），0 表示免费",
+	"price_per_call":              "输出单价（弹丸 / 1M tokens，≥0），0 表示免费",
+	"price_per_generation":        "按次附加费（弹丸/次，≥0），与输入/输出 token 费用相加，适用于对话/图片/视频模型，0 表示不附加",
+	"video_min_duration":          "视频最小时长（秒，≥0），0 表示不限制；不能超过 video_max_duration",
+	"video_max_duration":          "视频最大时长（秒，≥0），0 表示不限制；示例：Seedance 1.0 Pro 支持 5~10 秒",
+	"video_duration_step":         "视频时长步长（秒，≥1），前端按 min~max 以步长生成可选档位；示例：5~10 秒步长 5 → 可选 5s / 10s",
 }
 
 // EleAgentModelImportFailure 单行导入失败信息
@@ -828,6 +828,7 @@ func (s *EleAgentModelService) ExportConfigs(includeKeys bool) (*EleAgentModelEx
 //     协议-能力一致性、时长范围等交叉校验按「出现取文件值、未出现取现有值」的有效值进行，
 //     避免部分更新把配置改成不一致状态；
 //   - 不存在：创建（必须提供完整字段与 api_key）。
+//
 // 逐行处理，单行失败不影响其他行。
 func (s *EleAgentModelService) ImportConfigs(items []EleAgentModelExportItem) (*EleAgentModelImportResult, error) {
 	if s.repo == nil {
@@ -918,16 +919,16 @@ func (s *EleAgentModelService) ImportConfigs(items []EleAgentModelExportItem) (*
 				continue
 			}
 			newCfg := &model.EleAgentModelConfig{
-				ID:           uuid.New().String(),
-				Provider:     item.Provider,
-				Protocol:     model.EleAgentUpstreamProtocol(protocol),
-				ModelName:    item.ModelName,
-				DisplayName:  item.DisplayName,
-				BaseURL:      item.BaseURL,
-				EncryptedKey: ciphertext,
-				Nonce:        nonce,
-				KeyVersion:   version,
-				IsEnabled:    isEnabled,
+				ID:                        uuid.New().String(),
+				Provider:                  item.Provider,
+				Protocol:                  model.EleAgentUpstreamProtocol(protocol),
+				ModelName:                 item.ModelName,
+				DisplayName:               item.DisplayName,
+				BaseURL:                   item.BaseURL,
+				EncryptedKey:              ciphertext,
+				Nonce:                     nonce,
+				KeyVersion:                version,
+				IsEnabled:                 isEnabled,
 				SupportsChat:              item.SupportsChat,
 				SupportsVision:            item.SupportsVision,
 				SupportsImage:             item.SupportsImage,
@@ -1113,13 +1114,13 @@ func validateProtocolCapabilities(protocol string, supportsChat, supportsImage, 
 // toEleAgentModelListItem 转换为列表项（脱敏）
 func toEleAgentModelListItem(config *model.EleAgentModelConfig) *model.EleAgentModelListItem {
 	return &model.EleAgentModelListItem{
-		ID:             config.ID,
-		Provider:       config.Provider,
-		Protocol:       config.Protocol,
-		ModelName:      config.ModelName,
-		DisplayName:    config.DisplayName,
-		BaseURL:        config.BaseURL,
-		KeyVersion:     config.KeyVersion,
+		ID:                        config.ID,
+		Provider:                  config.Provider,
+		Protocol:                  config.Protocol,
+		ModelName:                 config.ModelName,
+		DisplayName:               config.DisplayName,
+		BaseURL:                   config.BaseURL,
+		KeyVersion:                config.KeyVersion,
 		IsEnabled:                 config.IsEnabled,
 		SupportsChat:              config.SupportsChat,
 		SupportsVision:            config.SupportsVision,
@@ -1129,14 +1130,14 @@ func toEleAgentModelListItem(config *model.EleAgentModelConfig) *model.EleAgentM
 		SupportsContinuousContext: config.SupportsContinuousContext,
 		SupportsTools:             config.SupportsTools,
 		Priority:                  config.Priority,
-		InputPricePerCall:  config.InputPricePerCall,
-		PricePerCall:       config.PricePerCall,
-		PricePerGeneration: config.PricePerGeneration,
-		VideoMinDuration:   config.VideoMinDuration,
-		VideoMaxDuration:   config.VideoMaxDuration,
-		VideoDurationStep:  config.VideoDurationStep,
-		CreatedAt:          config.CreatedAt,
-		UpdatedAt:          config.UpdatedAt,
+		InputPricePerCall:         config.InputPricePerCall,
+		PricePerCall:              config.PricePerCall,
+		PricePerGeneration:        config.PricePerGeneration,
+		VideoMinDuration:          config.VideoMinDuration,
+		VideoMaxDuration:          config.VideoMaxDuration,
+		VideoDurationStep:         config.VideoDurationStep,
+		CreatedAt:                 config.CreatedAt,
+		UpdatedAt:                 config.UpdatedAt,
 	}
 }
 

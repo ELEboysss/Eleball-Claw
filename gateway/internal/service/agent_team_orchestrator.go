@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -76,13 +77,13 @@ func (s *AssistantService) BuildCapabilityCatalog(ctx context.Context, userID, c
 	return catalog
 }
 
-// FormatCatalogBlock 按文档 §4.2 格式生成注入 system prompt 的协作助手目录区块（含使用指引）
+// FormatCatalogBlock 生成可委派助手清单（每行：ID / 名称 / 描述 / 技能），嵌入 CallAssistant 工具
+// description 供 LLM 决策；不再注入 system prompt，避免每轮把「可委派」推到 LLM 眼前而挤占既有工具。
 func FormatCatalogBlock(catalog []AssistantCapability) string {
 	if len(catalog) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("你可以委派任务的协作助手（经 CallAssistant 工具调用，传入 task 与必要背景）：")
 	for _, c := range catalog {
 		skills := "无"
 		if len(c.Skills) > 0 {
@@ -91,6 +92,28 @@ func FormatCatalogBlock(catalog []AssistantCapability) string {
 		fmt.Fprintf(&b, "\n- %s: %s — %s（技能：%s）", c.ID, c.Name, c.Description, skills)
 	}
 	return b.String()
+}
+
+// callAssistantDescription 构造 CallAssistant 工具描述：明确「仅当子任务明显更适合交给专门助手时才用」，
+// 常规搜索/抓取/文件/问答请直接用既有工具或直接回答；附可委派助手清单，与 SearchWeb/FetchURL 平级可选。
+func callAssistantDescription(catalog []AssistantCapability) string {
+	desc := "将子任务委派给协作助手执行，返回其结果摘要。仅当某子任务明显更适合交给专门助手时才调用；常规搜索、抓取、文件处理、问答请直接使用 SearchWeb、FetchURL 等既有工具或直接回答，多数情况下无需委派。assistant_id 与 task 均必填、不能为空。"
+	if list := FormatCatalogBlock(catalog); list != "" {
+		desc += "可委派助手（assistant_id 取下列之一）：" + list
+	}
+	return desc
+}
+
+// formatCatalogIDsForError 错误提示中列出可委派助手 ID 与名称，便于 LLM 在空参/误调后自我纠正重试
+func formatCatalogIDsForError(catalog []AssistantCapability) string {
+	if len(catalog) == 0 {
+		return "（当前无可委派助手）"
+	}
+	parts := make([]string, 0, len(catalog))
+	for _, c := range catalog {
+		parts = append(parts, fmt.Sprintf("%s(%s)", c.ID, c.Name))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // skillItemsFor 展开助手条目的秘技完整记录（Agent Team P3：构建子 agent system prompt 用）
@@ -111,8 +134,51 @@ func (s *AssistantService) skillItemsFor(assistantID string) []*model.AgentItem 
 // callAssistantRuntime 编排执行期依赖：Execute 在解析 LLM 客户端后填充，
 // CallAssistant 闭包在实际被工具循环调用时读取（工具装配早于客户端解析）。
 type callAssistantRuntime struct {
-	client AgentLLMClient
-	model  string
+	client          AgentLLMClient
+	model           string
+	writer          io.Writer // Agent Team P5：子任务进度流式下发（= Execute 的 SSE writer）
+	billingProvider string    // Agent Team P5：主对话计费口径（follow 模式复用）
+	billingModel    string    //   未归一化的 subProvider/subModel（供 P5-3 逐次计费）
+}
+
+// resolveSubClient 按助手 LLM 配置解析子 agent 客户端（Agent Team P5）：
+// follow/空 -> 回落主对话 client/model；eleagent -> 复用服务端凭据解析指定 Ele Agent 模型；
+// byok -> 解密 api_key 后按 provider/model/base_url 直连。
+// 返回 (client, model, billingProvider, billingModel)；billing 口径供 P5-3 逐次计费用。
+func (s *AgentService) resolveSubClient(ctx context.Context, a *model.Assistant, rt *callAssistantRuntime) (AgentLLMClient, string, string, string, error) {
+	mode := a.LLMMode
+	if mode == "" {
+		mode = "follow"
+	}
+	switch mode {
+	case "follow":
+		return rt.client, rt.model, rt.billingProvider, rt.billingModel, nil
+	case "eleagent":
+		if a.LLMModel == "" {
+			return nil, "", "", "", errors.New("助手未配置 Ele Agent 模型")
+		}
+		subReq := AgentExecuteRequest{Provider: "eleagent", Model: a.LLMModel}
+		c, err := s.resolveClient(ctx, subReq, a.LLMModel)
+		if err != nil {
+			return nil, "", "", "", err
+		}
+		return c, normalizeAgentModelName("eleagent", a.LLMModel), "eleagent", a.LLMModel, nil
+	case "byok":
+		if a.LLMProvider == "" || a.LLMModel == "" || a.LLMBaseURL == "" {
+			return nil, "", "", "", errors.New("助手 BYOK 配置不完整（需 provider/model/base_url）")
+		}
+		apiKey, err := s.assistantSvc.DecryptAPIKey(a)
+		if err != nil {
+			return nil, "", "", "", err
+		}
+		subReq := AgentExecuteRequest{Provider: a.LLMProvider, Model: a.LLMModel, BaseURL: a.LLMBaseURL, APIKey: apiKey}
+		c, err := s.resolveClient(ctx, subReq, a.LLMModel)
+		if err != nil {
+			return nil, "", "", "", err
+		}
+		return c, a.LLMModel, a.LLMProvider, a.LLMModel, nil
+	}
+	return rt.client, rt.model, rt.billingProvider, rt.billingModel, nil
 }
 
 // buildCallAssistantTool 构造 CallAssistant 编排工具（Agent Team P3，文档 §4.3）。
@@ -124,7 +190,7 @@ func (s *AgentService) buildCallAssistantTool(catalog []AssistantCapability, par
 	}
 	return &Tool{
 		Name:        "CallAssistant",
-		Description: "将子任务委派给协作助手执行，返回其结果摘要。当任务明显属于某个助手的能力域时使用；context 中传入完成子任务必需的背景。",
+		Description: callAssistantDescription(catalog),
 		ServerSide:  false,
 		Driver:      string(model.ToolDriverBuiltin),
 		Parameters: map[string]interface{}{
@@ -133,11 +199,11 @@ func (s *AgentService) buildCallAssistantTool(catalog []AssistantCapability, par
 				"assistant_id": map[string]interface{}{
 					"type":        "string",
 					"enum":        ids,
-					"description": "目标协作助手 ID（取自能力目录）",
+					"description": "目标协作助手 ID（取自本工具说明中列出的可委派助手，不能为空）",
 				},
 				"task": map[string]interface{}{
 					"type":        "string",
-					"description": "委派给助手的独立子任务描述",
+					"description": "委派给助手的具体子任务（用一句话写清要助手完成什么，不能为空）",
 				},
 				"context": map[string]interface{}{
 					"type":        "string",
@@ -175,7 +241,7 @@ func (s *AgentService) executeCallAssistant(ctx context.Context, input map[strin
 	task, _ := input["task"].(string)
 	bgCtx, _ := input["context"].(string)
 	if assistantID == "" || task == "" {
-		return nil, errors.New("assistant_id 与 task 不能为空")
+		return nil, fmt.Errorf("CallAssistant 参数不完整：assistant_id 与 task 均不能为空。请从能力目录照抄一个助手 ID 填入 assistant_id，并用一句话写清 task。可委派助手：%s", formatCatalogIDsForError(catalog))
 	}
 	// 仅允许委派给能力目录内的助手（schema enum 约束的服务端兜底）
 	inCatalog := false
@@ -200,6 +266,17 @@ func (s *AgentService) executeCallAssistant(ctx context.Context, input map[strin
 	assistant, err := s.assistantSvc.getOwned(env.UserID, assistantID)
 	if err != nil {
 		return nil, err
+	}
+	// Agent Team P5：按助手 LLM 配置解析子 agent 客户端（follow/eleagent/byok）+ 子计费口径
+	subClient, subModel, billProvider, billModel, err := s.resolveSubClient(ctx, assistant, rt)
+	if err != nil {
+		return nil, err
+	}
+	// Agent Team P5：逐次委派计费闸门——余额不足则拒绝委派（工具错误返回，由主 agent 决定是否换路）
+	if s.billingService != nil {
+		if err := s.billingService.CheckBalance(env.UserID, billProvider, billModel, CurrencyDanwan); err != nil {
+			return nil, err
+		}
 	}
 	agentIDs, err := s.assistantSvc.AgentIDsFor(env.UserID, assistantID)
 	if err != nil {
@@ -236,7 +313,7 @@ func (s *AgentService) executeCallAssistant(ctx context.Context, input map[strin
 		SessionRepo:      env.SessionRepo,
 		SearchProvider:   env.SearchProvider,
 		Depth:            env.Depth + 1,
-		UsageAccumulator: env.UsageAccumulator,
+		UsageAccumulator: nil, // Agent Team P5：子用量即时扣费，不再经 accumulator（防双重计费）
 	}
 
 	// 子消息 = system（助手人格/默认专家模板）+ user(task + 可选背景)；不转发主对话历史
@@ -252,7 +329,39 @@ func (s *AgentService) executeCallAssistant(ctx context.Context, input map[strin
 
 	subCtx, cancel := context.WithTimeout(ctx, callAssistantTimeout)
 	defer cancel()
-	result, runErr := s.toolLoop.RunWithRegistry(subCtx, subRegistry, rt.client, rt.model, buildSubToolSchemas(subTools), messages, childEnv, nil, nil)
+	result, runErr := s.toolLoop.RunWithRegistry(subCtx, subRegistry, subClient, subModel, buildSubToolSchemas(subTools), messages, childEnv,
+		// Agent Team P5：子任务进度流式下发，事件带 session_id/parent_session_id/sub 标记，前端据此嵌套分组
+		func(record ToolCallRecord) error {
+			if rt.writer != nil {
+				s.writeEvent(rt.writer, "tool_call", map[string]interface{}{
+					"step": record.Step, "tool": record.Tool, "arguments": json.RawMessage(record.Arguments),
+					"session_id": childSession.ID, "parent_session_id": parentSessionID, "sub": true,
+				})
+				s.writeEvent(rt.writer, "tool_result", map[string]interface{}{
+					"step":              record.Step,
+					"tool":              record.Tool,
+					"status":            map[bool]string{true: "succeeded", false: "failed"}[record.Error == ""],
+					"output":            record.Output,
+					"error_message":     record.Error,
+					"session_id":        childSession.ID,
+					"parent_session_id": parentSessionID,
+					"sub":               true,
+				})
+			}
+			return nil
+		},
+		func(output AssistantOutput) {
+			if rt.writer == nil {
+				return
+			}
+			if output.ReasoningContent != "" {
+				s.writeEvent(rt.writer, "reasoning", map[string]interface{}{"delta": output.ReasoningContent, "session_id": childSession.ID, "sub": true})
+			}
+			if !output.IsFinal && output.Delta != "" {
+				s.writeEvent(rt.writer, "intermediate_answer", map[string]interface{}{"delta": output.Delta, "session_id": childSession.ID, "sub": true})
+			}
+		},
+	)
 
 	// 子 session 状态收尾（失败仅记日志，不影响错误返回语义）
 	status := "succeeded"
@@ -272,10 +381,11 @@ func (s *AgentService) executeCallAssistant(ctx context.Context, input map[strin
 		return nil, runErr
 	}
 
-	// 子 Usage 累计：只经 accumulator 进主循环 totalUsage 一次
-	// （主循环 result.Usage 由 Execute 单独 addUsage，两者不重叠）
-	if env.UsageAccumulator != nil && result.Usage != nil {
-		env.UsageAccumulator(result.Usage)
+	// Agent Team P5：子用量即时扣费（标注 call_assistant:子session），不再经 accumulator 进主 totalUsage（防双重计费）
+	if s.billingService != nil && result.Usage != nil {
+		if err := s.billingService.DeductWithSource(env.UserID, billProvider, billModel, CurrencyDanwan, "call_assistant:"+childSession.ID, result.Usage); err != nil && s.logger != nil {
+			s.logger.Warn("CallAssistant 子任务扣费失败", zap.String("user_id", env.UserID), zap.String("session_id", childSession.ID), zap.Error(err))
+		}
 	}
 
 	summary := result.FinalContent

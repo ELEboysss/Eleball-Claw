@@ -10,9 +10,9 @@ import (
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
 	"github.com/eleball/gateway/pkg/llm"
+	sqlite "github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	sqlite "github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -180,7 +180,7 @@ func TestAgentService_DeleteSession(t *testing.T) {
 
 func TestAgentService_buildInitialMessages(t *testing.T) {
 	agentSvc, _, _ := setupAgentService(t)
-	msgs := agentSvc.buildInitialMessages(context.Background(), AgentExecuteRequest{Message: "hello", History: []llm.Message{{Role: "user", Content: "prev"}}}, nil, "u1", "", "")
+	msgs := agentSvc.buildInitialMessages(context.Background(), AgentExecuteRequest{Message: "hello", History: []llm.Message{{Role: "user", Content: "prev"}}}, nil, "u1", "")
 	require.Len(t, msgs, 3)
 	assert.Equal(t, "system", msgs[0].Role)
 	assert.Equal(t, "prev", msgs[1].Content)

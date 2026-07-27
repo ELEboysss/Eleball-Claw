@@ -8,6 +8,7 @@ import {
   AlertCircle,
   Settings,
   ChevronDown,
+  ChevronRight,
   Menu,
   Plus,
   Copy,
@@ -19,15 +20,18 @@ import {
   FileText,
   Download,
   Globe,
-  Wrench
+  Wrench,
+  Folders,
+  FolderInput
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { useChat } from '../context/ChatContext'
-import { modelApi, billingApi, eleAgentApi, conversationApi, agentApi, assistantApi } from '../api/client'
+import { modelApi, billingApi, eleAgentApi, conversationApi, agentApi, assistantApi, teamApi } from '../api/client'
 import { streamChat } from '../utils/sse'
 import LoginModal from '../components/LoginModal'
 import ModelSettings from '../components/ModelSettings'
 import AssistantPicker from '../components/AssistantPicker'
+import TeamModal from '../components/TeamModal'
 import AgentSwitch from '../components/AgentSwitch'
 import AgentStream from '../components/AgentStream'
 import AgentSteps from '../components/AgentSteps'
@@ -103,6 +107,11 @@ export default function Chat() {
   const [assistantPickerOpen, setAssistantPickerOpen] = useState(false)
   const [keepThinking, setKeepThinking] = useState(() => loadKeepThinking(user?.user_id))
   const [agentSessionRefresh, setAgentSessionRefresh] = useState(0)
+  // 对话分组（Agent Team）：侧栏分组展示与「移动到组」用
+  const [teams, setTeams] = useState([])
+  const [teamModalOpen, setTeamModalOpen] = useState(false)
+  // 移动到组下拉：记录当前展开归属选择的对话 ID
+  const [moveMenuConvId, setMoveMenuConvId] = useState(null)
   // 当前正在流式更新的 Agent assistant 消息 ID，用于把 steps 实时写入对话消息
   const [streamingAgentMsgId, setStreamingAgentMsgId] = useState(null)
   const messagesEndRef = useRef(null)
@@ -279,6 +288,64 @@ export default function Chat() {
       window.removeEventListener('focus', onFocus)
     }
   }, [isLoggedIn])
+
+  // 拉取对话分组列表（与助手列表同节奏：切回页面时刷新，保证分组管理后及时同步）
+  const loadTeams = useCallback(() => {
+    if (!isLoggedIn) return
+    teamApi
+      .list()
+      .then((d) => setTeams(Array.isArray(d) ? d : d?.items || []))
+      .catch(() => {})
+  }, [isLoggedIn])
+
+  useEffect(() => {
+    loadTeams()
+    const onFocus = () => {
+      if (document.visibilityState === 'visible') loadTeams()
+    }
+    document.addEventListener('visibilitychange', onFocus)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      document.removeEventListener('visibilitychange', onFocus)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [loadTeams])
+
+  // 侧栏分组：按 team_id 分桶，未分组单列一组（key ''）
+  const groupedConversations = useMemo(() => {
+    const buckets = new Map()
+    for (const conv of conversations) {
+      const key = conv.teamId || ''
+      if (!buckets.has(key)) buckets.set(key, [])
+      buckets.get(key).push(conv)
+    }
+    return buckets
+  }, [conversations])
+
+  // 移动对话到组：PATCH team_id（空串=移出分组）并就地更新本地会话的 teamId。
+  // 新建后尚未产生消息的对话后端尚无记录（PATCH 返回「对话不存在」），
+  // 此时无法归组，提示用户先发送消息落库后再试。
+  const handleMoveConversation = async (convId, teamId) => {
+    setMoveMenuConvId(null)
+    const target = teamId || ''
+    try {
+      await conversationApi.update(convId, { team_id: target })
+    } catch (err) {
+      const msg = err.message || ''
+      const isNotFound = /不存在|not found|404/i.test(msg)
+      if (isNotFound) {
+        setError('对话未落库，请发送消息后再试')
+      } else {
+        console.error('移动分组失败:', err)
+        setError('移动分组失败')
+      }
+      return
+    }
+    setConversations((prev) =>
+      prev.map((c) => (c.id === convId ? { ...c, teamId: target } : c))
+    )
+    loadTeams()
+  }
 
   // 切换对话时恢复该对话的 Agent / 联网 / 搜索源 / 助手 / 模型设置
   useEffect(() => {
@@ -580,12 +647,14 @@ export default function Chat() {
 
   const handleSend = useCallback(async () => {
     if (!input.trim() && attachments.length === 0) return
-    if (!isLoggedIn) {
-      setLoginOpen(true)
-      return
-    }
     if (!currentProfile) {
       setError('请先配置模型：点击右上角设置图标')
+      return
+    }
+    // BYOK（非 Ele Agent）自带 API Key，不依赖平台登录态，可直接对话；
+    // Ele Agent / agent 走云端 LLM API，需登录态。
+    if (!isLoggedIn && currentProfile.provider === 'ELE_AGENT') {
+      setLoginOpen(true)
       return
     }
     if (!currentConversation) {
@@ -1038,6 +1107,13 @@ export default function Chat() {
               <Plus className="w-4 h-4" />
             </button>
             <button
+              onClick={() => setTeamModalOpen(true)}
+              className="p-1.5 rounded-lg text-eleball-text-secondary hover:bg-eleball-surface-variant transition-colors"
+              title="分组管理"
+            >
+              <Folders className="w-4 h-4" />
+            </button>
+            <button
               onClick={handleDeleteAllConversations}
               className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors"
               title="删除全部对话"
@@ -1052,42 +1128,64 @@ export default function Chat() {
             </button>
           </div>
         </div>
-        <div className="p-2 space-y-1">
-          {conversations.map((conv) => (
-            <div
-              key={conv.id}
-              onClick={() => switchConversation(conv.id)}
-              className={`group flex items-center gap-2 px-3 py-2 rounded-xl cursor-pointer transition-colors ${
-                conv.id === currentConversationId
-                  ? 'bg-eleball-primary-light text-eleball-primary'
-                  : 'hover:bg-eleball-surface-variant text-eleball-text'
-              }`}
-            >
-              <Bot className="w-4 h-4 flex-shrink-0" />
-              <div className="flex-1 min-w-0">
-                <p className="text-sm truncate">{conv.title || '新对话'}</p>
-                <p className="text-[10px] opacity-70 truncate">
-                  {new Date(conv.updatedAt).toLocaleString('zh-CN', {
-                    month: 'short',
-                    day: 'numeric',
-                    hour: '2-digit',
-                    minute: '2-digit'
-                  })}
-                </p>
+        <div className="p-2 space-y-2">
+          {/* 各分组：仅渲染有对话落入的组，组名可点击进入分组详情 */}
+          {teams.map((team) => {
+            const convs = groupedConversations.get(team.id) || []
+            if (convs.length === 0) return null
+            return (
+              <div key={team.id}>
+                <button
+                  onClick={() => navigate(`/teams/${team.id}`)}
+                  className="flex items-center gap-1 px-2 py-1 w-full text-left hover:bg-eleball-surface-variant rounded-lg transition-colors"
+                  title="查看分组详情"
+                >
+                  <ChevronRight className="w-3 h-3 text-eleball-text-tertiary flex-shrink-0" />
+                  <span className="text-xs font-medium text-eleball-text-secondary truncate">{team.name}</span>
+                  <span className="text-[10px] text-eleball-text-tertiary flex-shrink-0">({convs.length})</span>
+                </button>
+                <div className="space-y-0.5">
+                  {convs.map((conv) => (
+                    <ConversationItem
+                      key={conv.id}
+                      conv={conv}
+                      isActive={conv.id === currentConversationId}
+                      onSelect={switchConversation}
+                      onDelete={handleDeleteConversation}
+                      onMove={setMoveMenuConvId}
+                    />
+                  ))}
+                </div>
               </div>
-              <button
-                onClick={(e) => handleDeleteConversation(e, conv.id)}
-                className={`p-1 rounded-md opacity-0 group-hover:opacity-100 transition-opacity ${
-                  conv.id === currentConversationId
-                    ? 'hover:bg-eleball-primary/20 text-eleball-primary'
-                    : 'hover:bg-eleball-outline text-eleball-text-secondary'
-                }`}
-                title="删除对话"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          ))}
+            )
+          })}
+          {/* 未分组 */}
+          {(() => {
+            const convs = groupedConversations.get('') || []
+            if (convs.length === 0) return null
+            return (
+              <div>
+                {teams.length > 0 && (
+                  <div className="flex items-center gap-1 px-2 py-1">
+                    <span className="text-xs font-medium text-eleball-text-tertiary">未分组</span>
+                    <span className="text-[10px] text-eleball-text-tertiary">({convs.length})</span>
+                  </div>
+                )}
+                <div className="space-y-0.5">
+                  {convs.map((conv) => (
+                    <ConversationItem
+                      key={conv.id}
+                      conv={conv}
+                      isActive={conv.id === currentConversationId}
+                      onSelect={switchConversation}
+                      onDelete={handleDeleteConversation}
+                      onMove={setMoveMenuConvId}
+                    />
+                  ))}
+                </div>
+              </div>
+            )
+          })()}
         </div>
         <div className="p-3 border-t border-eleball-outline-variant flex-shrink-0">
           <AgentSessionList onRefresh={agentSessionRefresh} onSelect={handleSelectSession} />
@@ -1373,6 +1471,111 @@ export default function Chat() {
       />
 
       <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} />
+
+      <TeamModal
+        open={teamModalOpen}
+        onClose={() => setTeamModalOpen(false)}
+        teams={teams}
+        onTeamsChange={loadTeams}
+      />
+
+      {/* 移动对话到分组：列出可选组 + 移出分组 */}
+      {moveMenuConvId && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setMoveMenuConvId(null)}
+        >
+          <div
+            className="bg-white rounded-2xl w-full max-w-xs max-h-[70vh] overflow-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-3 border-b border-eleball-outline flex items-center justify-between">
+              <h3 className="font-bold text-sm text-eleball-text">移动到分组</h3>
+              <button
+                onClick={() => setMoveMenuConvId(null)}
+                className="text-eleball-text-tertiary hover:text-eleball-text"
+              >
+                &times;
+              </button>
+            </div>
+            <div className="p-2 space-y-0.5">
+              {teams.length === 0 && (
+                <p className="text-xs text-eleball-text-secondary text-center py-4">
+                  还没有分组，请先到「分组管理」创建
+                </p>
+              )}
+              {teams.map((team) => (
+                <button
+                  key={team.id}
+                  onClick={() => handleMoveConversation(moveMenuConvId, team.id)}
+                  className="block w-full text-left px-3 py-2 rounded-lg text-sm text-eleball-text hover:bg-eleball-primary-light hover:text-eleball-primary transition-colors"
+                >
+                  {team.name}
+                </button>
+              ))}
+              {teams.length > 0 && <div className="my-1 border-t border-eleball-outline-variant" />}
+              <button
+                onClick={() => handleMoveConversation(moveMenuConvId, '')}
+                className="block w-full text-left px-3 py-2 rounded-lg text-sm text-eleball-text-secondary hover:bg-eleball-surface-variant transition-colors"
+              >
+                移出分组
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 对话侧栏条目：标题 + 时间 + 移动到组 / 删除（hover 显现）
+function ConversationItem({ conv, isActive, onSelect, onDelete, onMove }) {
+  return (
+    <div
+      onClick={() => onSelect(conv.id)}
+      className={`group flex items-center gap-2 px-3 py-2 rounded-xl cursor-pointer transition-colors ${
+        isActive
+          ? 'bg-eleball-primary-light text-eleball-primary'
+          : 'hover:bg-eleball-surface-variant text-eleball-text'
+      }`}
+    >
+      <Bot className="w-4 h-4 flex-shrink-0" />
+      <div className="flex-1 min-w-0">
+        <p className="text-sm truncate">{conv.title || '新对话'}</p>
+        <p className="text-[10px] opacity-70 truncate">
+          {new Date(conv.updatedAt).toLocaleString('zh-CN', {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+          })}
+        </p>
+      </div>
+      <button
+        onClick={(e) => {
+          e.stopPropagation()
+          onMove(conv.id)
+        }}
+        className={`p-1 rounded-md opacity-0 group-hover:opacity-100 transition-opacity ${
+          isActive
+            ? 'hover:bg-eleball-primary/20 text-eleball-primary'
+            : 'hover:bg-eleball-outline text-eleball-text-secondary'
+        }`}
+        title="移动到分组"
+      >
+        <FolderInput className="w-3.5 h-3.5" />
+      </button>
+      <button
+        onClick={(e) => onDelete(e, conv.id)}
+        className={`p-1 rounded-md opacity-0 group-hover:opacity-100 transition-opacity ${
+          isActive
+            ? 'hover:bg-eleball-primary/20 text-eleball-primary'
+            : 'hover:bg-eleball-outline text-eleball-text-secondary'
+        }`}
+        title="删除对话"
+      >
+        <Trash2 className="w-3.5 h-3.5" />
+      </button>
     </div>
   )
 }

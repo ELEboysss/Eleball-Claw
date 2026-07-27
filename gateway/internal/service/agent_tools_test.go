@@ -150,6 +150,7 @@ func TestToolRegistry_SearchWeb(t *testing.T) {
 	runner := &mockRunner{}
 	search := &mockSearchProvider{result: map[string]interface{}{"results": []string{"r1"}}}
 	registry := NewToolRegistryWithDeps(runner, search)
+	registry.RegisterBuiltinSearchWeb()
 	env := &ToolEnv{}
 
 	searchTool, _ := registry.Get("SearchWeb")
@@ -274,6 +275,7 @@ func TestToolRegistry_FetchURL_EmptyURL(t *testing.T) {
 
 func TestToolSchemaBuilder_BuildWithOptions(t *testing.T) {
 	registry := NewToolRegistry()
+	registry.RegisterBuiltinSearchWeb()
 	builder := NewToolSchemaBuilder(registry)
 
 	// 启用联网：应包含 SearchWeb / FetchURL
@@ -309,6 +311,7 @@ func containsString(list []string, target string) bool {
 
 func TestToolRegistry_ListAvailable_RespectsVIP(t *testing.T) {
 	registry := NewToolRegistry()
+	registry.RegisterBuiltinSearchWeb()
 	all := registry.List()
 	if len(all) != 8 {
 		t.Fatalf("默认工具数量应为 8，实际 %d", len(all))

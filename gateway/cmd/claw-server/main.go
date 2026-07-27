@@ -30,6 +30,7 @@ import (
 	"github.com/eleball/gateway/internal/router"
 	"github.com/eleball/gateway/internal/seed"
 	"github.com/eleball/gateway/internal/service"
+	"github.com/eleball/gateway/pkg/crypto"
 	"github.com/eleball/gateway/pkg/llm"
 	"github.com/eleball/gateway/pkg/util"
 	sqlite "github.com/glebarez/sqlite"
@@ -213,6 +214,11 @@ func main() {
 	if err != nil {
 		logger.Fatal("初始化 API Key 管理器失败", zap.Error(err))
 	}
+	// Agent Team P5：BYOK api_key 加密器（助手级 LLM 配置用，AES-256-GCM）
+	keyEncryption, err := crypto.NewKeyEncryption(masterKey)
+	if err != nil {
+		logger.Fatal("初始化密钥加密器失败", zap.Error(err))
+	}
 
 	clientFactory := service.NewClientFactory(cfg.LLM.Timeout)
 	clientFactory.SetLogger(logger)
@@ -342,6 +348,8 @@ func main() {
 	assistantService := service.NewAssistantService(db, assistantRepo, agentRepo)
 	// Agent Team P3：助手 PATCH team_id 时同样校验组归属
 	assistantService.SetTeamService(teamService)
+	// Agent Team P5：装配 BYOK api_key 加密器
+	assistantService.SetKeyEncryption(keyEncryption)
 	agentWorkflowService.SetAssistantService(assistantService)
 	// 组共享记忆服务（Agent Team P2）：执行前检索注入 + 执行后异步提取
 	agentWorkflowService.SetTeamMemoryService(teamMemoryService)
