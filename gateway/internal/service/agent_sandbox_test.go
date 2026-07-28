@@ -136,3 +136,56 @@ func TestFileSandbox_WithProjectRoot(t *testing.T) {
 	_, err = fs.ReadFile(outside)
 	assert.Error(t, err)
 }
+
+// TestFileSandbox_DirMgmt_InCwd AR-21：cwd 文件管理（建/移/删）与逃逸防护
+func TestFileSandbox_DirMgmt_InCwd(t *testing.T) {
+	cwd := t.TempDir()
+	fs := NewFileSandbox(t.TempDir(), t.TempDir())
+
+	// MkdirInCwd 递归建目录
+	abs, err := fs.MkdirInCwd(cwd, "sub/deep")
+	require.NoError(t, err)
+	assert.True(t, filepath.IsAbs(abs))
+	info, err := os.Stat(abs)
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+
+	// MkdirInCwd .. 越界拒绝
+	_, err = fs.MkdirInCwd(cwd, "../evil")
+	assert.Error(t, err)
+
+	// MoveInCwd 重命名：先建文件再 move
+	src := filepath.Join(cwd, "a.txt")
+	require.NoError(t, os.WriteFile(src, []byte("data"), 0640))
+	dstAbs, err := fs.MoveInCwd(cwd, "a.txt", "b.txt")
+	require.NoError(t, err)
+	assert.Contains(t, dstAbs, "b.txt")
+	_, err = os.Stat(src)
+	assert.True(t, os.IsNotExist(err))
+	_, err = os.Stat(filepath.Join(cwd, "b.txt"))
+	require.NoError(t, err)
+
+	// MoveInCwd dst 越界拒绝
+	_, err = fs.MoveInCwd(cwd, "b.txt", "../escape.txt")
+	assert.Error(t, err)
+
+	// RemoveAllInCwd 删文件
+	_, err = fs.RemoveAllInCwd(cwd, "b.txt")
+	require.NoError(t, err)
+
+	// RemoveAllInCwd 递归删目录
+	_, err = fs.RemoveAllInCwd(cwd, "sub")
+	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(cwd, "sub"))
+	assert.True(t, os.IsNotExist(err))
+
+	// RemoveAllInCwd 拒删根（"." / ""）
+	_, err = fs.RemoveAllInCwd(cwd, ".")
+	assert.Error(t, err)
+	_, err = fs.RemoveAllInCwd(cwd, "")
+	assert.Error(t, err)
+
+	// RemoveAllInCwd .. 越界拒绝
+	_, err = fs.RemoveAllInCwd(cwd, "../outside")
+	assert.Error(t, err)
+}

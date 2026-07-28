@@ -307,118 +307,48 @@ func (fs *FileSandbox) EnsureWithinBase(path string) error {
 	return nil
 }
 
-// withinSandbox 校验绝对路径在沙箱允许范围内（basePath / knowledgeBase / projectRoot 三根）。
-// 供 Mkdir/Move/Remove/RemoveAll/ListDirAbs 等文件管理工具复用，统一三根放行逻辑。
-// 用 underDir 严格判断（防前缀碰撞：/a/b 不算在 /a/bc 内）。
-func (fs *FileSandbox) withinSandbox(absPath string) error {
-	if absPath == "" {
-		return errors.New("路径为空")
-	}
-	allowed := false
-	if fs.basePath != "" {
-		if baseAbs, err := filepath.Abs(fs.basePath); err == nil && underDir(absPath, baseAbs) {
-			allowed = true
-		}
-	}
-	if !allowed && fs.knowledgeBase != "" {
-		if kbAbs, err := filepath.Abs(fs.knowledgeBase); err == nil && underDir(absPath, kbAbs) {
-			allowed = true
-		}
-	}
-	if !allowed && fs.projectRoot != "" {
-		if underDir(absPath, filepath.Clean(fs.projectRoot)) {
-			allowed = true
-		}
-	}
-	if !allowed {
-		return errors.New("访问路径超出允许范围")
-	}
-	return nil
-}
-
-// isSandboxRoot 判断路径是否为沙箱根自身（basePath / knowledgeBase / projectRoot）。
-// RemoveAll 据此拒绝删根，防误删整个工作区 / 会话存储根。
-func (fs *FileSandbox) isSandboxRoot(absPath string) bool {
-	absClean := filepath.Clean(absPath)
-	if fs.basePath != "" {
-		if baseAbs, err := filepath.Abs(fs.basePath); err == nil && absClean == filepath.Clean(baseAbs) {
-			return true
-		}
-	}
-	if fs.knowledgeBase != "" {
-		if kbAbs, err := filepath.Abs(fs.knowledgeBase); err == nil && absClean == filepath.Clean(kbAbs) {
-			return true
-		}
-	}
-	if fs.projectRoot != "" && absClean == filepath.Clean(fs.projectRoot) {
-		return true
-	}
-	return false
-}
-
-// Mkdir 在沙箱内递归创建目录。接收绝对路径，需校验在沙箱内。
-func (fs *FileSandbox) Mkdir(absPath string) error {
-	if err := fs.withinSandbox(absPath); err != nil {
-		return err
-	}
-	return os.MkdirAll(absPath, 0750)
-}
-
-// Move 在沙箱内移动/重命名文件或目录。src、dst 都须在沙箱内。
-func (fs *FileSandbox) Move(srcAbs, dstAbs string) error {
-	if err := fs.withinSandbox(srcAbs); err != nil {
-		return err
-	}
-	if err := fs.withinSandbox(dstAbs); err != nil {
-		return err
-	}
-	return os.Rename(srcAbs, dstAbs)
-}
-
-// Remove 删除沙箱内单个文件或空目录。接收绝对路径，需校验在沙箱内。
-// 非空目录会报错（os.Remove 语义）；递归删目录用 RemoveAll。
-func (fs *FileSandbox) Remove(absPath string) error {
-	if err := fs.withinSandbox(absPath); err != nil {
-		return err
-	}
-	return os.Remove(absPath)
-}
-
-// RemoveAll 递归删除沙箱内目录。拒删沙箱根自身（防误删整个工作区）。
-// 接收绝对路径，需校验在沙箱内且非根。
-func (fs *FileSandbox) RemoveAll(absPath string) error {
-	if err := fs.withinSandbox(absPath); err != nil {
-		return err
-	}
-	if fs.isSandboxRoot(absPath) {
-		return errors.New("禁止删除工作目录根")
-	}
-	return os.RemoveAll(absPath)
-}
-
-// ListDirAbs 列出绝对路径下的直接子条目（供 LLM ListDir 工具用）。
-// 区别于 ListDir(cwd, relPath) 的 cwd 相对路径签名；接收绝对路径，需校验在沙箱内。
-func (fs *FileSandbox) ListDirAbs(absPath string) ([]FileEntry, error) {
-	if err := fs.withinSandbox(absPath); err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(absPath)
+// MkdirInCwd 在 cwd 下递归创建目录（AR-21，claw console 文件管理用）。
+// 复用 ResolveProjectPath 校验：拒 .. + EvalSymlinks 防软链 + cwd 前缀，与 Files list/download 同模型。
+// 不依赖 projectRoot，适配 ClawFilesHandler 的共享单例。返回创建后的绝对路径。
+func (fs *FileSandbox) MkdirInCwd(cwd, relPath string) (string, error) {
+	abs, err := fs.ResolveProjectPath(cwd, relPath)
 	if err != nil {
-		return nil, fmt.Errorf("读取目录失败: %w", err)
+		return "", err
 	}
-	result := make([]FileEntry, 0, len(entries))
-	for _, e := range entries {
-		var size, modified int64
-		if info, err := e.Info(); err == nil {
-			size = info.Size()
-			modified = info.ModTime().Unix()
-		}
-		result = append(result, FileEntry{
-			Name:     e.Name(),
-			IsDir:    e.IsDir(),
-			Size:     size,
-			Modified: modified,
-		})
+	if err := os.MkdirAll(abs, 0750); err != nil {
+		return "", fmt.Errorf("创建目录失败: %w", err)
 	}
-	return result, nil
+	return abs, nil
+}
+
+// MoveInCwd 在 cwd 内移动/重命名文件或目录（AR-21）。src、dst 都经 ResolveProjectPath 校验落在 cwd 内。
+func (fs *FileSandbox) MoveInCwd(cwd, srcRel, dstRel string) (string, error) {
+	srcAbs, err := fs.ResolveProjectPath(cwd, srcRel)
+	if err != nil {
+		return "", err
+	}
+	dstAbs, err := fs.ResolveProjectPath(cwd, dstRel)
+	if err != nil {
+		return "", err
+	}
+	if err := os.Rename(srcAbs, dstAbs); err != nil {
+		return "", fmt.Errorf("移动/重命名失败: %w", err)
+	}
+	return dstAbs, nil
+}
+
+// RemoveAllInCwd 递归删除 cwd 内文件或目录（AR-21）。文件/目录统删（os.RemoveAll 语义）。
+// 拒删 cwd 根自身（防误删整个工作区）。
+func (fs *FileSandbox) RemoveAllInCwd(cwd, relPath string) (string, error) {
+	abs, err := fs.ResolveProjectPath(cwd, relPath)
+	if err != nil {
+		return "", err
+	}
+	if abs == filepath.Clean(cwd) {
+		return "", errors.New("禁止删除工作目录根")
+	}
+	if err := os.RemoveAll(abs); err != nil {
+		return "", fmt.Errorf("删除失败: %w", err)
+	}
+	return abs, nil
 }

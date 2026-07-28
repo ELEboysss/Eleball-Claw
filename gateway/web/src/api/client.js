@@ -223,7 +223,13 @@ export const clawFilesApi = {
   fetch: (cwd, path) =>
     client.get('/claw-console/files', { params: { cwd, path, type: 'download' }, responseType: 'blob' }),
   // 查询 Git 状态 -> { is_repo, branch, ahead, behind, clean, entries: [{path,x,y,status}] }
-  gitStatus: (cwd) => client.get('/claw-console/git/status', { params: { cwd } })
+  gitStatus: (cwd) => client.get('/claw-console/git/status', { params: { cwd } }),
+  // AR-21：新建目录（body {cwd, path}）-> { path }
+  createDir: (cwd, path) => client.post('/claw-console/files/mkdir', { cwd, path }),
+  // AR-21：移动/重命名（body {cwd, src_path, dst_path}）-> { path }
+  move: (cwd, srcPath, dstPath) => client.post('/claw-console/files/move', { cwd, src_path: srcPath, dst_path: dstPath }),
+  // AR-21：删除文件或目录（body {cwd, path}）-> { path }
+  remove: (cwd, path) => client.delete('/claw-console/files', { data: { cwd, path } })
 }
 
 // ====== Worktree 切换 API（本地 claw：AR-17 O16，WorktreeSwitcher 消费）======

@@ -347,8 +347,8 @@ func TestToolRegistry_ListAvailable_RespectsVIP(t *testing.T) {
 	registry := NewToolRegistry()
 	registry.RegisterBuiltinSearchWeb()
 	all := registry.List()
-	if len(all) != 13 {
-		t.Fatalf("默认工具数量应为 13，实际 %d", len(all))
+	if len(all) != 8 {
+		t.Fatalf("默认工具数量应为 8，实际 %d", len(all))
 	}
 	free := registry.ListAvailable(false)
 	if len(free) != 2 {
@@ -362,8 +362,8 @@ func TestToolRegistry_ListAvailable_RespectsVIP(t *testing.T) {
 		t.Fatalf("非 VIP 用户应看到 SearchWeb 和 FetchURL，实际 %v", freeNames)
 	}
 	vip := registry.ListAvailable(true)
-	if len(vip) != 13 {
-		t.Fatalf("VIP 用户应看到 13 个工具，实际 %d", len(vip))
+	if len(vip) != 8 {
+		t.Fatalf("VIP 用户应看到 8 个工具，实际 %d", len(vip))
 	}
 }
 
@@ -407,3 +407,21 @@ func TestDefaultSearchProvider_NoConfig(t *testing.T) {
 
 var _ PlatformToolRunner = (*mockRunner)(nil)
 var _ SearchProvider = (*mockSearchProvider)(nil)
+
+func TestNormalizeToolName(t *testing.T) {
+	cases := map[string]string{
+		"WriteFile":            "WriteFile",
+		"write_file":           "WriteFile",
+		"WRITE_FILE":           "WriteFile",
+		"read_file":            "ReadFile",
+		"str_replace_file":     "StrReplaceFile",
+		"functions.write_file": "WriteFile",
+		"fetch_url":            "FetchURL",
+		"UnknownTool":          "UnknownTool",
+	}
+	for in, want := range cases {
+		if got := normalizeToolName(in); got != want {
+			t.Errorf("normalizeToolName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

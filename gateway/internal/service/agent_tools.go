@@ -179,11 +179,6 @@ var toolNameAliases = map[string]string{
 	"write_file":       "WriteFile",
 	"read_file":        "ReadFile",
 	"str_replace_file": "StrReplaceFile",
-	"list_dir":         "ListDir",
-	"create_dir":       "CreateDir",
-	"move":             "Move",
-	"delete_file":      "DeleteFile",
-	"delete_dir":       "DeleteDir",
 	"grep":             "Grep",
 	"shell":            "Shell",
 	"ocr":              "OCR",
@@ -503,151 +498,6 @@ func (r *ToolRegistry) registerDefaults() {
 		Func: r.toolOCR,
 	})
 
-	// AR-20：工作目录文件管理工具（claw cwd + 云端会话沙箱均启用）
-	r.Register(&Tool{
-		Name:        "ListDir",
-		Description: "列出工作目录或会话目录下的直接子条目（文件与子目录）。path 为空或 \".\" 表示当前根目录",
-		ServerSide:  true,
-		Driver:      string(model.ToolDriverBuiltin),
-		Manifest: &model.ToolManifest{
-			ID:          "com.eleball.tools.list_dir",
-			Name:        "列出目录",
-			Description: "列出目录下的直接子条目。",
-			Driver:      model.ToolDriverBuiltin,
-			Category:    "文件",
-			Level:       1,
-			Permissions: []model.ToolPermission{model.ToolPermissionFileTools},
-			Actions:     []model.ToolAction{{Name: "list", Description: "列出目录", Params: map[string]string{"path": "path"}}},
-		},
-		Parameters: map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"path": map[string]interface{}{
-					"type":        "string",
-					"description": "目录相对路径，为空或 \".\" 表示当前根目录",
-				},
-			},
-			"required": []string{},
-		},
-		Func: r.toolListDir,
-	})
-
-	r.Register(&Tool{
-		Name:        "CreateDir",
-		Description: "在工作目录或会话目录中创建目录（递归创建父目录）",
-		ServerSide:  true,
-		Driver:      string(model.ToolDriverBuiltin),
-		Manifest: &model.ToolManifest{
-			ID:          "com.eleball.tools.create_dir",
-			Name:        "创建目录",
-			Description: "递归创建目录。",
-			Driver:      model.ToolDriverBuiltin,
-			Category:    "文件",
-			Level:       1,
-			Permissions: []model.ToolPermission{model.ToolPermissionFileTools},
-			Actions:     []model.ToolAction{{Name: "mkdir", Description: "创建目录", Params: map[string]string{"path": "path"}}},
-		},
-		Parameters: map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"path": map[string]interface{}{
-					"type":        "string",
-					"description": "目录相对路径",
-				},
-			},
-			"required": []string{"path"},
-		},
-		Func: r.toolCreateDir,
-	})
-
-	r.Register(&Tool{
-		Name:        "Move",
-		Description: "移动或重命名工作目录内的文件/目录。src 为源路径，dst 为目标路径（含新名）",
-		ServerSide:  true,
-		Driver:      string(model.ToolDriverBuiltin),
-		Manifest: &model.ToolManifest{
-			ID:          "com.eleball.tools.move",
-			Name:        "移动/重命名",
-			Description: "移动或重命名文件/目录。",
-			Driver:      model.ToolDriverBuiltin,
-			Category:    "文件",
-			Level:       1,
-			Permissions: []model.ToolPermission{model.ToolPermissionFileTools},
-			Actions:     []model.ToolAction{{Name: "move", Description: "移动/重命名", Params: map[string]string{"src": "src", "dst": "dst"}}},
-		},
-		Parameters: map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"src": map[string]interface{}{
-					"type":        "string",
-					"description": "源文件/目录相对路径",
-				},
-				"dst": map[string]interface{}{
-					"type":        "string",
-					"description": "目标相对路径（含新名称）",
-				},
-			},
-			"required": []string{"src", "dst"},
-		},
-		Func: r.toolMove,
-	})
-
-	r.Register(&Tool{
-		Name:        "DeleteFile",
-		Description: "删除工作目录内的单个文件。不支持删除目录（删目录用 DeleteDir）",
-		ServerSide:  true,
-		Driver:      string(model.ToolDriverBuiltin),
-		Manifest: &model.ToolManifest{
-			ID:          "com.eleball.tools.delete_file",
-			Name:        "删除文件",
-			Description: "删除单个文件。",
-			Driver:      model.ToolDriverBuiltin,
-			Category:    "文件",
-			Level:       1,
-			Permissions: []model.ToolPermission{model.ToolPermissionFileTools},
-			Actions:     []model.ToolAction{{Name: "delete", Description: "删除文件", Params: map[string]string{"path": "path"}}},
-		},
-		Parameters: map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"path": map[string]interface{}{
-					"type":        "string",
-					"description": "文件相对路径",
-				},
-			},
-			"required": []string{"path"},
-		},
-		Func: r.toolDeleteFile,
-	})
-
-	r.Register(&Tool{
-		Name:        "DeleteDir",
-		Description: "递归删除工作目录内的目录及其所有内容。禁止删除根目录",
-		ServerSide:  true,
-		Driver:      string(model.ToolDriverBuiltin),
-		Manifest: &model.ToolManifest{
-			ID:          "com.eleball.tools.delete_dir",
-			Name:        "删除目录",
-			Description: "递归删除目录。",
-			Driver:      model.ToolDriverBuiltin,
-			Category:    "文件",
-			Level:       1,
-			Permissions: []model.ToolPermission{model.ToolPermissionFileTools},
-			Actions:     []model.ToolAction{{Name: "rmdir", Description: "递归删除目录", Params: map[string]string{"path": "path"}}},
-		},
-		Parameters: map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"path": map[string]interface{}{
-					"type":        "string",
-					"description": "目录相对路径，禁止为空或 \".\"（根目录）",
-				},
-			},
-			"required": []string{"path"},
-		},
-		Func: r.toolDeleteDir,
-	})
-
 	// VideoGenerate 已移除：当前实现仅为 ffmpeg 占位视频，非真正 AI 视频生成，
 	// 避免误导用户。后续接入 Seedance / CogVideo / 可灵等真实文生视频 API 后再恢复。
 }
@@ -830,11 +680,14 @@ func (r *ToolRegistry) toolStrReplaceFile(ctx context.Context, input map[string]
 	}
 	resourceID, err := env.SaveOutput(fileName, mimeType, absPath, fileSize)
 	if err != nil {
+		// 文件已改成功（modified:true）；SaveOutput 仅登记下载资源，属非关键 infra，
+		// 失败不应让模型误以为编辑失败 -> 降级为 warning 而非 error（防误导模型/判官）。
 		return map[string]interface{}{
-			"path":     path,
-			"abs_path": absPath,
-			"modified": true,
-			"error":    fmt.Sprintf("登记下载资源失败: %v", err),
+			"path":        path,
+			"abs_path":    absPath,
+			"modified":    true,
+			"resource_id": "",
+			"warning":     fmt.Sprintf("下载资源登记失败（不影响文件修改）: %v", err),
 		}, nil
 	}
 
@@ -845,111 +698,6 @@ func (r *ToolRegistry) toolStrReplaceFile(ctx context.Context, input map[string]
 		"resource_id":  resourceID,
 		"mime_type":    mimeType,
 		"download_url": fmt.Sprintf("/v1/agent/resources/%s", resourceID),
-	}, nil
-}
-
-// toolListDir 列出目录条目工具（AR-20）
-func (r *ToolRegistry) toolListDir(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
-	path, _ := input["path"].(string)
-	if path == "" {
-		path = "."
-	}
-	absPath, err := env.ResolveFilePath(path)
-	if err != nil {
-		return nil, err
-	}
-	entries, err := env.Sandbox.ListDirAbs(absPath)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{
-		"path":     path,
-		"abs_path": absPath,
-		"entries":  entries,
-	}, nil
-}
-
-// toolCreateDir 创建目录工具（AR-20）
-func (r *ToolRegistry) toolCreateDir(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
-	path, _ := input["path"].(string)
-	if path == "" {
-		return nil, errors.New("path 不能为空")
-	}
-	absPath, err := env.ResolveFilePath(path)
-	if err != nil {
-		return nil, err
-	}
-	if err := env.Sandbox.Mkdir(absPath); err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{
-		"path":     path,
-		"abs_path": absPath,
-		"created":  true,
-	}, nil
-}
-
-// toolMove 移动/重命名工具（AR-20）
-func (r *ToolRegistry) toolMove(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
-	src, _ := input["src"].(string)
-	dst, _ := input["dst"].(string)
-	if src == "" || dst == "" {
-		return nil, errors.New("src 和 dst 不能为空")
-	}
-	srcAbs, err := env.ResolveFilePath(src)
-	if err != nil {
-		return nil, err
-	}
-	dstAbs, err := env.ResolveFilePath(dst)
-	if err != nil {
-		return nil, err
-	}
-	if err := env.Sandbox.Move(srcAbs, dstAbs); err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{
-		"src":      src,
-		"dst":      dst,
-		"moved":    true,
-		"abs_path": dstAbs,
-	}, nil
-}
-
-// toolDeleteFile 删除单个文件工具（AR-20）
-func (r *ToolRegistry) toolDeleteFile(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
-	path, _ := input["path"].(string)
-	if path == "" {
-		return nil, errors.New("path 不能为空")
-	}
-	absPath, err := env.ResolveFilePath(path)
-	if err != nil {
-		return nil, err
-	}
-	if err := env.Sandbox.Remove(absPath); err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{
-		"path":    path,
-		"deleted": true,
-	}, nil
-}
-
-// toolDeleteDir 递归删除目录工具（AR-20）。禁止删根（path 为空/./..）。
-func (r *ToolRegistry) toolDeleteDir(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
-	path, _ := input["path"].(string)
-	if path == "" || path == "." || path == ".." || path == "/" || path == "\\" {
-		return nil, errors.New("禁止删除根目录")
-	}
-	absPath, err := env.ResolveFilePath(path)
-	if err != nil {
-		return nil, err
-	}
-	if err := env.Sandbox.RemoveAll(absPath); err != nil {
-		return nil, err
-	}
-	return map[string]interface{}{
-		"path":    path,
-		"deleted": true,
 	}, nil
 }
 

@@ -242,6 +242,10 @@ func NewClawRouter(
 				// AR-11：文件浏览器/预览（FileExplorer/FileViewer 消费，仅 claw）
 				console.GET("/files", clawFilesHandler.Files)
 				console.GET("/git/status", clawFilesHandler.GitStatus)
+				// AR-21：文件管理（新建/移动/删除目录与文件，FileExplorer 消费，仅 claw）
+				console.POST("/files/mkdir", clawFilesHandler.CreateDir)
+				console.POST("/files/move", clawFilesHandler.Move)
+				console.DELETE("/files", clawFilesHandler.Delete)
 
 				// AR-17 O16：worktree 列出/创建/删除（WorktreeSwitcher 消费，仅 claw）
 				console.GET("/worktrees", clawWorktreeHandler.ListWorktrees)

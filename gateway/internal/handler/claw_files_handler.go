@@ -76,6 +76,76 @@ func (h *ClawFilesHandler) Files(c *gin.Context) {
 	})
 }
 
+// CreateDir 在工作目录下创建目录（AR-21，POST /v1/claw-console/files/mkdir）。
+// 复用 MkdirInCwd：ResolveProjectPath 校验落在 cwd 内（拒 .. + EvalSymlinks 防软链）。
+func (h *ClawFilesHandler) CreateDir(c *gin.Context) {
+	var req struct {
+		Cwd  string `json:"cwd"`
+		Path string `json:"path"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "参数错误: " + err.Error()})
+		return
+	}
+	if req.Cwd == "" || req.Path == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "cwd 和 path 不能为空"})
+		return
+	}
+	abs, err := h.fs.MkdirInCwd(req.Cwd, req.Path)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": gin.H{"path": abs}})
+}
+
+// Move 移动/重命名工作目录内文件或目录（AR-21，POST /v1/claw-console/files/move）。
+// src_path、dst_path 都经 ResolveProjectPath 校验落在 cwd 内。
+func (h *ClawFilesHandler) Move(c *gin.Context) {
+	var req struct {
+		Cwd     string `json:"cwd"`
+		SrcPath string `json:"src_path"`
+		DstPath string `json:"dst_path"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "参数错误: " + err.Error()})
+		return
+	}
+	if req.Cwd == "" || req.SrcPath == "" || req.DstPath == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "cwd/src_path/dst_path 不能为空"})
+		return
+	}
+	abs, err := h.fs.MoveInCwd(req.Cwd, req.SrcPath, req.DstPath)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": gin.H{"path": abs}})
+}
+
+// Delete 删除工作目录内文件或目录（AR-21，DELETE /v1/claw-console/files）。
+// 文件/目录统删（os.RemoveAll 语义），拒删 cwd 根。
+func (h *ClawFilesHandler) Delete(c *gin.Context) {
+	var req struct {
+		Cwd  string `json:"cwd"`
+		Path string `json:"path"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "参数错误: " + err.Error()})
+		return
+	}
+	if req.Cwd == "" || req.Path == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "cwd 和 path 不能为空"})
+		return
+	}
+	abs, err := h.fs.RemoveAllInCwd(req.Cwd, req.Path)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": gin.H{"path": abs}})
+}
+
 // serveFile 读取文件字节并以内联方式返回（供 FileViewer 预览，非强制下载）。
 func (h *ClawFilesHandler) serveFile(c *gin.Context, absPath string) {
 	info, err := os.Stat(absPath)
