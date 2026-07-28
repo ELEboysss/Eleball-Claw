@@ -37,6 +37,14 @@ const maxMalformedRetries = 2
 // bracketMalformedPrompt 检测到 [工具名]...[/工具名] 文本标签但格式错误时注入的反馈（AR-20）。
 const bracketMalformedPrompt = "（系统提示）检测到你用 [工具名]参数[/工具名] 文本标签调用工具，此格式不被支持。请使用结构化工具调用（function calling / tool_calls）调用工具，参数以 JSON 对象提供，工具名需精确匹配可用工具列表（区分大小写）。"
 
+// maxBareJSONRetries 裸 JSON 工具调用反馈 LLM 重试的最大次数（AR-25）。
+// 超过后放弃重试，透传最终回答（附说明），防 LLM 反复用裸 JSON 烧步数。
+const maxBareJSONRetries = 2
+
+// bareJSONPrompt 检测到裸 JSON 工具调用（无标记包裹，name 命中 registry）时注入的反馈（AR-25）。
+// 不直接执行裸 JSON 以防误判正文里的 JSON 数据/示例，引导 LLM 改用结构化 tool_calls 或内联标记。
+const bareJSONPrompt = "（系统提示）检测到你直接在正文输出裸 JSON 来调用工具（如 [{\"name\":\"...\",\"parameters\":{...}}]），此格式不会被直接执行（避免误判正文里的 JSON 数据/示例）。请改用以下任一方式调用工具：1. 结构化工具调用（function calling / tool_calls）；2. 内联标记格式：<|FunctionCallBegin|>[{\"name\":\"...\",\"parameters\":{...}}]<|FunctionCallEnd|>。工具名需精确匹配可用工具列表（区分大小写）。"
+
 // ToolCallingLoop Function Calling 循环
 type ToolCallingLoop struct {
 	registry *ToolRegistry
@@ -133,6 +141,8 @@ func (l *ToolCallingLoop) RunWithRegistry(
 	const maxConsecutiveRepeats = 2
 	// AR-20：方括号标签工具调用格式错误时反馈 LLM 重试的累计次数
 	malformedRetries := 0
+	// AR-25：裸 JSON 工具调用反馈 LLM 重试的累计次数
+	bareJSONRetries := 0
 
 	for step := 0; step < maxIterations; step++ {
 		// AR-02：客户端取消（断连）时立即结束循环，保留已产出供前端展示
@@ -211,11 +221,18 @@ func (l *ToolCallingLoop) RunWithRegistry(
 					resp.ToolCalls = bc
 					resp.Delta = bcCleaned
 				} else if bare, _ := parseBareJSONToolCalls(resp.Delta); len(bare) > 0 && anyToolResolved(registry, bare) {
-					// (3) 裸 JSON 数组/对象工具调用（无任何标记包裹，AR-25）：部分模型直接在
-					// 正文输出 [{"name":"...","parameters":{...}}]。anyToolResolved 校验至少一个
-					// 工具名命中 registry，防误判正文里的 JSON 数据/示例。
-					resp.ToolCalls = bare
-					resp.Delta = ""
+					// (3) 检测到裸 JSON 工具调用（name 命中 registry，模型意图调工具但用了裸 JSON
+					// 格式）：不直接执行（防误判正文里的 JSON 数据/示例），反馈 LLM 改用结构化
+					// tool_calls 或 <|FunctionCallBegin|> 标记格式（模型已支持，见 inline parser）。AR-25
+					if bareJSONRetries < maxBareJSONRetries {
+						bareJSONRetries++
+						result.Messages = append(result.Messages,
+							llm.Message{Role: "assistant", Content: resp.Delta},
+							llm.Message{Role: "user", Content: bareJSONPrompt},
+						)
+						continue
+					}
+					resp.Delta = resp.Delta + "\n\n（系统提示：检测到工具调用使用了裸 JSON 格式，已超过重试上限，请改用结构化工具调用或内联标记格式。）"
 				}
 			}
 		}

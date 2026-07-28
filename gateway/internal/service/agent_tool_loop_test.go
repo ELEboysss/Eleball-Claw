@@ -161,6 +161,58 @@ func TestToolCallingLoop_ReachMaxSteps(t *testing.T) {
 	}
 }
 
+func TestToolCallingLoop_BareJSONFeedback(t *testing.T) {
+	// 模型第一轮用裸 JSON 调 Shell（无标记），应被反馈而非执行；
+	// 第二轮改用结构化 tool_calls，正常执行。AR-25 反馈式。
+	registry := NewToolRegistryWithDeps(&mockRunner{shellOutput: "ok"}, &mockSearchProvider{result: map[string]interface{}{"results": []string{"r1"}}})
+	loop := NewToolCallingLoop(registry, 5)
+	client := &mockAgentLLM{
+		responses: []llm.ChatChunk{
+			{Delta: `[{"name":"Shell","parameters":{"command":"echo","args":["hello"]}}]`},
+			{ToolCalls: []llm.ToolCall{
+				{ID: "tc1", Type: "function", Function: llm.ToolCallFunction{Name: "Shell", Arguments: `{"command":"echo","args":["hello"]}`}},
+			}},
+			{Delta: "done"},
+		},
+	}
+
+	result, err := loop.Run(context.Background(), client, "m", nil, []llm.Message{{Role: "user", Content: "run echo"}}, &ToolEnv{}, nil, nil)
+	if err != nil {
+		t.Fatalf("不应报错: %v", err)
+	}
+	// 裸 JSON 那轮被反馈（不执行），只有结构化那轮执行 -> 1 条记录
+	if len(result.Records) != 1 {
+		t.Fatalf("裸 JSON 应被反馈不执行，期望 1 条记录，实际 %d: %v", len(result.Records), result.Records)
+	}
+	if result.Records[0].Tool != "Shell" {
+		t.Fatalf("工具名不对: %v", result.Records[0].Tool)
+	}
+	if result.FinalContent != "done" {
+		t.Fatalf("最终回答不对: %v", result.FinalContent)
+	}
+}
+
+func TestToolCallingLoop_BareJSONNotResolvedTransfers(t *testing.T) {
+	// 裸 JSON name 不命中 registry（如正文里的 JSON 数据/示例）-> 不当工具调用，透传原文。AR-25。
+	registry := NewToolRegistry()
+	loop := NewToolCallingLoop(registry, 3)
+	client := &mockAgentLLM{
+		responses: []llm.ChatChunk{
+			{Delta: `{"name":"SomeData","parameters":{"x":1}}`},
+		},
+	}
+	result, err := loop.Run(context.Background(), client, "m", nil, []llm.Message{{Role: "user", Content: "hi"}}, &ToolEnv{}, nil, nil)
+	if err != nil {
+		t.Fatalf("不应报错: %v", err)
+	}
+	if len(result.Records) != 0 {
+		t.Fatalf("不命中的裸 JSON 不应执行工具: %v", result.Records)
+	}
+	if result.FinalContent != `{"name":"SomeData","parameters":{"x":1}}` {
+		t.Fatalf("应透传原 JSON，实际: %v", result.FinalContent)
+	}
+}
+
 func TestToolResultToString(t *testing.T) {
 	if s := toolResultToString(nil, "error"); s != "工具执行失败: error" {
 		t.Fatalf("错误结果转换不对: %v", s)
