@@ -44,6 +44,7 @@ func NewClawRouter(
 	clawConsoleHandler *handler.ClawConsoleHandler,
 	clawCwdHandler *handler.ClawCwdHandler,
 	clawFilesHandler *handler.ClawFilesHandler,
+	clawWorktreeHandler *handler.ClawWorktreeHandler,
 	cloudAccount *service.CloudAccountService,
 	adminEleAgentModelHandler *handler.AdminEleAgentModelHandler,
 	adminSettingHandler *handler.AdminSettingHandler,
@@ -241,6 +242,11 @@ func NewClawRouter(
 				// AR-11：文件浏览器/预览（FileExplorer/FileViewer 消费，仅 claw）
 				console.GET("/files", clawFilesHandler.Files)
 				console.GET("/git/status", clawFilesHandler.GitStatus)
+
+				// AR-17 O16：worktree 列出/创建/删除（WorktreeSwitcher 消费，仅 claw）
+				console.GET("/worktrees", clawWorktreeHandler.ListWorktrees)
+				console.POST("/worktrees", clawWorktreeHandler.CreateWorktree)
+				console.DELETE("/worktrees", clawWorktreeHandler.RemoveWorktree)
 			}
 		}
 

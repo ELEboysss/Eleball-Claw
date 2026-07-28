@@ -226,6 +226,19 @@ export const clawFilesApi = {
   gitStatus: (cwd) => client.get('/claw-console/git/status', { params: { cwd } })
 }
 
+// ====== Worktree 切换 API（本地 claw：AR-17 O16，WorktreeSwitcher 消费）======
+export const worktreeApi = {
+  // 列出 cwd 所属项目根 + 全部 worktree
+  // -> { projectRoot, isGit, isTopLevel, worktrees: [{path,branch,isMain}] }
+  list: (cwd) => client.get('/claw-console/worktrees', { params: { cwd } }),
+  // 创建 worktree（body {cwd,branch}）-> { path, branch }
+  create: (cwd, branch) => client.post('/claw-console/worktrees', { cwd, branch }),
+  // 删除 worktree（body {cwd,path,force}）-> { dirty }；dirty=true 表示有未提交改动需 force 二次确认
+  remove: (cwd, path, force = false) =>
+    client.delete('/claw-console/worktrees', { data: { cwd, path, force } })
+}
+
+
 // ====== 对话历史 API（本地 claw：本地存储）======
 export const conversationApi = {
   // teamId 非空时按组过滤；空串 = 全部对话

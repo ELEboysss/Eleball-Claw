@@ -403,6 +403,7 @@ func main() {
 	clawConsoleHandler := handler.NewClawConsoleHandler(db)
 	clawCwdHandler := handler.NewClawCwdHandler()
 	clawFilesHandler := handler.NewClawFilesHandler(agentSandbox)
+	clawWorktreeHandler := handler.NewClawWorktreeHandler(service.NewWorktreeService())
 	assistantHandler := handler.NewAssistantHandler(assistantService)
 	teamHandler := handler.NewTeamHandler(teamService)
 	teamMemoryHandler := handler.NewTeamMemoryHandler(teamMemoryService)
@@ -414,7 +415,7 @@ func main() {
 		chatHandler, syncHandler, eleAgentHandler,
 		conversationHandler, moduleHandler, agentWorkflowHandler, agentHandler,
 		agentCredentialHandler, visualHandler, publicSettingHandler, releaseHandler,
-		clawConsoleHandler, clawCwdHandler, clawFilesHandler, cloudAccountService, adminEleAgentModelHandler, adminSettingHandler,
+		clawConsoleHandler, clawCwdHandler, clawFilesHandler, clawWorktreeHandler, cloudAccountService, adminEleAgentModelHandler, adminSettingHandler,
 		assistantHandler, teamHandler, teamMemoryHandler, systemHandler,
 	)
 

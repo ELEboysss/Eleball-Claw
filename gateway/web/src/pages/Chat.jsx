@@ -45,6 +45,7 @@ import ConfirmDialog from '../components/ConfirmDialog'
 import BranchNavigator from '../components/BranchNavigator'
 import DirectoryPicker from '../components/DirectoryPicker'
 import FileExplorer from '../components/FileExplorer'
+import WorktreeSwitcher from '../components/WorktreeSwitcher'
 import FileViewer from '../components/FileViewer'
 import { useAgent } from '../hooks/useAgent'
 import { Link } from 'react-router-dom'
@@ -1687,6 +1688,15 @@ export default function Chat() {
       {/* AR-11：文件浏览器/预览侧栏（仅 claw 本地，可折叠右栏；选中文件时切到 FileViewer） */}
       {filePanelOpen && (
         <aside className="hidden sm:flex flex-col w-80 lg:w-96 flex-shrink-0 border-l border-eleball-outline-variant bg-eleball-surface min-h-0">
+          {/* AR-17 O16：worktree 切换器（cwd 为 git 仓库顶层检出时显示） */}
+          {cwd && (
+            <div className="p-2 border-b border-eleball-outline-variant flex-shrink-0">
+              <WorktreeSwitcher
+                cwd={cwd}
+                onCwdChange={(newCwd) => { setCwd(newCwd); setSelectedFile(null) }}
+              />
+            </div>
+          )}
           {selectedFile ? (
             <FileViewer cwd={cwd} path={selectedFile} onClose={() => setSelectedFile(null)} />
           ) : (
