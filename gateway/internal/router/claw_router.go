@@ -146,6 +146,7 @@ func NewClawRouter(
 				auth.DELETE("/agent/sessions", agentWorkflowHandler.DeleteSessions)
 				auth.GET("/agent/sessions/:id", agentWorkflowHandler.GetSession)
 				auth.GET("/agent/sessions/:id/audit", agentWorkflowHandler.GetSessionAudit)
+				auth.POST("/agent/sessions/:id/fork", agentWorkflowHandler.ForkSession)
 				auth.DELETE("/agent/sessions/:id", agentWorkflowHandler.DeleteSession)
 			}
 
