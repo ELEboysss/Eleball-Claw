@@ -178,19 +178,19 @@ export default function VisualStudio() {
   }, [currentModel, publicSettings, tasks])
 
   return (
-    <div className="h-[calc(100dvh-4rem)] flex flex-col bg-[#13131f] text-[#e8e8f0]">
+    <div className="h-[calc(100dvh-4rem)] flex flex-col bg-eleball-vs-bg text-eleball-vs-text">
       <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} />
 
       {/* 顶部 Tab */}
-      <div className="border-b border-[#26263a] px-4 py-3 bg-[#1c1c2b]">
+      <div className="border-b border-eleball-vs-border px-4 py-3 bg-eleball-vs-surface">
         <div className="mx-auto w-full max-w-[1280px] flex items-center gap-4">
-          <h1 className="text-lg font-semibold text-[#e8e8f0] mr-4">视觉工作室</h1>
+          <h1 className="text-lg font-semibold text-eleball-vs-text mr-4">视觉工作室</h1>
           <button
             onClick={() => setTab('image')}
             className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
               tab === 'image'
-                ? 'bg-[#6750A4] text-white'
-                : 'bg-[#252538] text-[#a0a0b8] hover:bg-[#6750A4]/20 hover:text-[#b8a5ff]'
+                ? 'bg-eleball-primary text-white'
+                : 'bg-eleball-vs-surface-variant text-eleball-vs-text-muted hover:bg-eleball-primary/20 hover:text-eleball-vs-accent'
             }`}
           >
             <ImageIcon className="w-4 h-4" />
@@ -200,8 +200,8 @@ export default function VisualStudio() {
             onClick={() => setTab('video')}
             className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
               tab === 'video'
-                ? 'bg-[#6750A4] text-white'
-                : 'bg-[#252538] text-[#a0a0b8] hover:bg-[#6750A4]/20 hover:text-[#b8a5ff]'
+                ? 'bg-eleball-primary text-white'
+                : 'bg-eleball-vs-surface-variant text-eleball-vs-text-muted hover:bg-eleball-primary/20 hover:text-eleball-vs-accent'
             }`}
           >
             <Film className="w-4 h-4" />
@@ -235,7 +235,7 @@ export default function VisualStudio() {
             </div>
 
             {/* 中间：会话记录流 + 浮动创作输入区 */}
-            <div className={`${mobilePanel === 'chat' ? 'flex' : 'hidden'} lg:flex lg:col-span-5 flex-col rounded-xl border border-[#26263a] bg-[#1c1c2b] shadow-sm overflow-hidden relative`}>
+            <div className={`${mobilePanel === 'chat' ? 'flex' : 'hidden'} lg:flex lg:col-span-5 flex-col rounded-xl border border-eleball-vs-border bg-eleball-vs-surface shadow-sm overflow-hidden relative`}>
               <div className="flex-1 min-h-0 overflow-hidden">
                 <VisualChatThread
                   tasks={tasks.filter((t) => t.media_type === (tab === 'video' ? 'video' : 'image'))}
@@ -257,7 +257,7 @@ export default function VisualStudio() {
             </div>
 
             {/* 右侧：选中任务预览/详情 */}
-            <div className={`${mobilePanel === 'preview' ? 'flex' : 'hidden'} lg:flex lg:col-span-5 flex-col rounded-xl border border-[#26263a] bg-[#1c1c2b] p-4 shadow-sm`}>
+            <div className={`${mobilePanel === 'preview' ? 'flex' : 'hidden'} lg:flex lg:col-span-5 flex-col rounded-xl border border-eleball-vs-border bg-eleball-vs-surface p-4 shadow-sm`}>
               {tab === 'video' ? (
                 <VideoPreviewPanel task={currentTask} />
               ) : (
@@ -269,22 +269,22 @@ export default function VisualStudio() {
       </div>
 
       {/* AR-13 O12：移动端底部 Tab 切换 会话/对话/预览（< lg） */}
-      <div className="lg:hidden flex shrink-0 border-t border-[#26263a] bg-[#1c1c2b]">
+      <div className="lg:hidden flex shrink-0 border-t border-eleball-vs-border bg-eleball-vs-surface">
         <button
           onClick={() => setMobilePanel('list')}
-          className={`flex-1 flex items-center justify-center gap-1 py-2.5 text-xs font-medium transition-colors ${mobilePanel === 'list' ? 'text-[#b8a5ff]' : 'text-[#a0a0b8]'}`}
+          className={`flex-1 flex items-center justify-center gap-1 py-2.5 text-xs font-medium transition-colors ${mobilePanel === 'list' ? 'text-eleball-vs-accent' : 'text-eleball-vs-text-muted'}`}
         >
           <Folders className="w-4 h-4" />会话
         </button>
         <button
           onClick={() => setMobilePanel('chat')}
-          className={`flex-1 flex items-center justify-center gap-1 py-2.5 text-xs font-medium transition-colors ${mobilePanel === 'chat' ? 'text-[#b8a5ff]' : 'text-[#a0a0b8]'}`}
+          className={`flex-1 flex items-center justify-center gap-1 py-2.5 text-xs font-medium transition-colors ${mobilePanel === 'chat' ? 'text-eleball-vs-accent' : 'text-eleball-vs-text-muted'}`}
         >
           <MessageSquare className="w-4 h-4" />对话
         </button>
         <button
           onClick={() => setMobilePanel('preview')}
-          className={`flex-1 flex items-center justify-center gap-1 py-2.5 text-xs font-medium transition-colors ${mobilePanel === 'preview' ? 'text-[#b8a5ff]' : 'text-[#a0a0b8]'}`}
+          className={`flex-1 flex items-center justify-center gap-1 py-2.5 text-xs font-medium transition-colors ${mobilePanel === 'preview' ? 'text-eleball-vs-accent' : 'text-eleball-vs-text-muted'}`}
         >
           <ImageIcon className="w-4 h-4" />预览
         </button>
