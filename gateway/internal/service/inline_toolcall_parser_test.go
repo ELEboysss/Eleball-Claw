@@ -162,3 +162,80 @@ func TestParseBracketToolCalls_LiteralNewlineInString(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(calls[0].Function.Arguments), &args))
 	assert.Equal(t, "行1\n行2", args["content"])
 }
+
+func TestParseBareJSONToolCalls_ArrayForm(t *testing.T) {
+	// 裸 JSON 数组工具调用（无任何标记包裹），复现 debugs/log 场景
+	content := `[{"name":"com_eleball_tools_search_web_baidu","parameters":{"query":"咕咕嘎嘎 梗"}}]`
+	calls, cleaned := parseBareJSONToolCalls(content)
+	require.Len(t, calls, 1)
+	assert.Equal(t, "com_eleball_tools_search_web_baidu", calls[0].Function.Name)
+	assert.Equal(t, "function", calls[0].Type)
+	assert.NotEmpty(t, calls[0].ID)
+	assert.Equal(t, "", cleaned)
+	var args map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(calls[0].Function.Arguments), &args))
+	assert.Equal(t, "咕咕嘎嘎 梗", args["query"])
+}
+
+func TestParseBareJSONToolCalls_SingleObject(t *testing.T) {
+	content := `{"name":"ocr","arguments":{"image":"a.png"}}`
+	calls, _ := parseBareJSONToolCalls(content)
+	require.Len(t, calls, 1)
+	assert.Equal(t, "ocr", calls[0].Function.Name)
+	var args map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(calls[0].Function.Arguments), &args))
+	assert.Equal(t, "a.png", args["image"])
+}
+
+func TestParseBareJSONToolCalls_PrettyPrinted(t *testing.T) {
+	// 多行缩进的 pretty JSON（日志里的实际形态）
+	content := `[
+  {
+    "name": "search",
+    "parameters": {
+      "query": "x"
+    }
+  }
+]`
+	calls, _ := parseBareJSONToolCalls(content)
+	require.Len(t, calls, 1)
+	assert.Equal(t, "search", calls[0].Function.Name)
+}
+
+func TestParseBareJSONToolCalls_LiteralNewline(t *testing.T) {
+	// parameters 值内字面换行（未转义）也应容错
+	content := "{\"name\":\"WriteFile\",\"parameters\":{\"path\":\"x.md\",\"content\":\"行1\n行2\"}}"
+	calls, _ := parseBareJSONToolCalls(content)
+	require.Len(t, calls, 1)
+	var args map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(calls[0].Function.Arguments), &args))
+	assert.Equal(t, "行1\n行2", args["content"])
+}
+
+func TestParseBareJSONToolCalls_NonIdentName(t *testing.T) {
+	// name 含空格等非标识符 -> 不解析（防误判）
+	content := `{"name":"not a tool","parameters":{}}`
+	calls, cleaned := parseBareJSONToolCalls(content)
+	assert.Nil(t, calls)
+	assert.Equal(t, content, cleaned)
+}
+
+func TestParseBareJSONToolCalls_JSONDataNotTool(t *testing.T) {
+	// 普通 JSON 数据（无 name 字段）-> 不解析，当普通文本（防误判正文里的 JSON 数据）
+	content := `{"id":1,"items":["a","b"]}`
+	calls, cleaned := parseBareJSONToolCalls(content)
+	assert.Nil(t, calls)
+	assert.Equal(t, content, cleaned)
+}
+
+func TestParseBareJSONToolCalls_PlainText(t *testing.T) {
+	calls, cleaned := parseBareJSONToolCalls("普通回答，没有 JSON")
+	assert.Nil(t, calls)
+	assert.Equal(t, "普通回答，没有 JSON", cleaned)
+}
+
+func TestParseBareJSONToolCalls_PrefixedNotParsed(t *testing.T) {
+	// 带前缀文字（非整段 JSON）-> 不解析，当普通文本（防误判正文）
+	calls, _ := parseBareJSONToolCalls(`我来搜一下：[{"name":"search","parameters":{}}]`)
+	assert.Nil(t, calls)
+}

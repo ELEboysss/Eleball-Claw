@@ -210,6 +210,12 @@ func (l *ToolCallingLoop) RunWithRegistry(
 				} else if len(bc) > 0 {
 					resp.ToolCalls = bc
 					resp.Delta = bcCleaned
+				} else if bare, _ := parseBareJSONToolCalls(resp.Delta); len(bare) > 0 && anyToolResolved(registry, bare) {
+					// (3) 裸 JSON 数组/对象工具调用（无任何标记包裹，AR-25）：部分模型直接在
+					// 正文输出 [{"name":"...","parameters":{...}}]。anyToolResolved 校验至少一个
+					// 工具名命中 registry，防误判正文里的 JSON 数据/示例。
+					resp.ToolCalls = bare
+					resp.Delta = ""
 				}
 			}
 		}

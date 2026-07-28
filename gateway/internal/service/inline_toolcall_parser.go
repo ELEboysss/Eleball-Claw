@@ -67,30 +67,11 @@ func parseInlineFunctionCalls(content string) ([]llm.ToolCall, string) {
 
 	out := make([]llm.ToolCall, 0, len(calls))
 	for _, c := range calls {
-		name := strings.TrimSpace(c.Name)
-		if name == "" {
+		tc, ok := inlineCallToToolCall(c, "inline_call")
+		if !ok {
 			return nil, content
 		}
-		args := c.Parameters
-		if args == nil {
-			args = c.Arguments
-		}
-		if args == nil {
-			args = map[string]interface{}{}
-		}
-		raw, err := json.Marshal(args)
-		if err != nil {
-			return nil, content
-		}
-		seq := atomic.AddUint64(&inlineCallSeq, 1)
-		out = append(out, llm.ToolCall{
-			ID:   fmt.Sprintf("inline_call_%d", seq),
-			Type: "function",
-			Function: llm.ToolCallFunction{
-				Name:      name,
-				Arguments: string(raw),
-			},
-		})
+		out = append(out, tc)
 	}
 	cleaned := strings.TrimSpace(content[:idx] + tail)
 	return out, cleaned
@@ -225,4 +206,104 @@ func escapeControlInJSONStrings(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// inlineCallToToolCall 把单个内联调用结构转为 llm.ToolCall。name 非空时返回 ok=true，
+// 否则 ok=false（调用方据此放弃整批解析，保持与原 inline parser 一致的"任一无效即放弃"语义）。
+// name 的标识符风格校验（isToolNameIdent）由调用方按需做：inline/bracket 路径不校验
+// （name 来自标记/标签，已隐含约束），bare JSON 路径需显式校验以防误判。
+func inlineCallToToolCall(c inlineFunctionCall, idPrefix string) (llm.ToolCall, bool) {
+	name := strings.TrimSpace(c.Name)
+	if name == "" {
+		return llm.ToolCall{}, false
+	}
+	args := c.Parameters
+	if args == nil {
+		args = c.Arguments
+	}
+	if args == nil {
+		args = map[string]interface{}{}
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return llm.ToolCall{}, false
+	}
+	seq := atomic.AddUint64(&inlineCallSeq, 1)
+	return llm.ToolCall{
+		ID:   fmt.Sprintf("%s_%d", idPrefix, seq),
+		Type: "function",
+		Function: llm.ToolCallFunction{
+			Name:      name,
+			Arguments: string(raw),
+		},
+	}, true
+}
+
+// parseBareJSONToolCalls 解析无任何标记包裹的裸 JSON 工具调用（AR-25）。
+//
+// 部分模型（思维链 / 中小厂商）既不用结构化 tool_calls，也不用 <|FunctionCallBegin|>
+// 标记或 [name]{json}[/name] 标签，而是直接在正文输出一个 JSON 数组或对象表示工具调用：
+//
+//	[{"name":"search","parameters":{"query":"..."}}]
+//	{"name":"search","parameters":{"query":"..."}}
+//
+// 不解析时被当最终回答透传给用户（表现为"工具调用没执行"，见 debugs/log）。
+//
+// 严格约束（防误判正文里的 JSON 数据 / 代码示例）：
+//   - 整段 response（TrimSpace 后）须为合法 JSON（数组或对象）
+//   - 每个对象须有 name（工具名标识符 [A-Za-z_][A-Za-z0-9_]*) + parameters/arguments
+//   - 数组中任一元素不满足 -> 整体不解析（当普通文本，不当 malformed 反馈）
+//   - 字符串值内字面控制字符先转义（同 inline parser 容错）
+//
+// 返回解析出的 tool_calls 与剥离后正文（恒空，因整段都是调用）。无匹配返回 nil 与原 content。
+// 调用方须用 registry.Resolve 校验至少一个工具名命中，否则不当工具调用（防 JSON 数据误判）。
+func parseBareJSONToolCalls(content string) ([]llm.ToolCall, string) {
+	trimmed := strings.TrimSpace(content)
+	if len(trimmed) == 0 || (trimmed[0] != '[' && trimmed[0] != '{') {
+		return nil, content
+	}
+	escaped := escapeControlInJSONStrings(trimmed)
+
+	var arr []inlineFunctionCall
+	if err := json.Unmarshal([]byte(escaped), &arr); err == nil && len(arr) > 0 {
+		out := make([]llm.ToolCall, 0, len(arr))
+		for _, c := range arr {
+			name := strings.TrimSpace(c.Name)
+			if name == "" || !isToolNameIdent(name) {
+				return nil, content
+			}
+			tc, ok := inlineCallToToolCall(c, "inline_bare")
+			if !ok {
+				return nil, content
+			}
+			out = append(out, tc)
+		}
+		return out, ""
+	}
+
+	var single inlineFunctionCall
+	if err := json.Unmarshal([]byte(escaped), &single); err == nil && single.Name != "" {
+		name := strings.TrimSpace(single.Name)
+		if !isToolNameIdent(name) {
+			return nil, content
+		}
+		tc, ok := inlineCallToToolCall(single, "inline_bare")
+		if !ok {
+			return nil, content
+		}
+		return []llm.ToolCall{tc}, ""
+	}
+	return nil, content
+}
+
+// anyToolResolved 检查 calls 中是否至少有一个工具名能被 registry 解析（含归一化）。
+// 用于裸 JSON 工具调用的误判防护：模型在正文里输出的 JSON 数据/示例，其 "name" 字段
+// 不会碰巧命中已注册工具，此时不应当作工具调用（透传原文）。
+func anyToolResolved(registry *ToolRegistry, calls []llm.ToolCall) bool {
+	for _, tc := range calls {
+		if _, _, ok := registry.Resolve(tc.Function.Name); ok {
+			return true
+		}
+	}
+	return false
 }
