@@ -151,6 +151,22 @@ func TestParseInlineFunctionCalls_LiteralNewlineInString(t *testing.T) {
 	assert.Equal(t, "# 标题\n\n正文第二行", args["content"])
 }
 
+func TestParseInlineFunctionCalls_UnescapedQuoteInString(t *testing.T) {
+	// 复现 MiMo 等模型在 content 字符串值内直接输出未转义 ASCII 双引号（如正文 "咕咕嘎嘎"）
+	// + 字面换行的场景（见 debugs/log 的 WriteFile 调用）。标准 JSON 禁止字符串值内未转义 "，
+	// escape 须按"前瞻结构字符"判断 " 是边界还是内容引号，转义内容引号后解析。
+	// 单对象 + pretty-printed 形态（与日志一致）。
+	content := "<|FunctionCallBegin|>\n{\n  \"name\": \"WriteFile\",\n  \"parameters\": {\n    \"path\": \"x.md\",\n    \"content\": \"# 标题\n\n\"咕咕嘎嘎\"是梗，原型 \"goo goo gaga\"。\"\n  }\n}\n<|FunctionCallEnd|>"
+	calls, cleaned := parseInlineFunctionCalls(content)
+	require.Len(t, calls, 1)
+	assert.Equal(t, "WriteFile", calls[0].Function.Name)
+	assert.Equal(t, "", cleaned)
+	var args map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(calls[0].Function.Arguments), &args))
+	assert.Equal(t, "x.md", args["path"])
+	assert.Equal(t, "# 标题\n\n\"咕咕嘎嘎\"是梗，原型 \"goo goo gaga\"。", args["content"])
+}
+
 func TestParseBracketToolCalls_LiteralNewlineInString(t *testing.T) {
 	// 方括号标签格式同样兼容字符串值内的字面换行
 	content := "[WriteFile]{\"path\":\"x.md\",\"content\":\"行1\n行2\"}[/WriteFile]"

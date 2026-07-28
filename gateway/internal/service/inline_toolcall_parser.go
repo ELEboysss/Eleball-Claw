@@ -183,8 +183,14 @@ func escapeControlInJSONStrings(s string) string {
 			b.WriteByte(c)
 			escaped = true
 		case '"':
-			b.WriteByte(c)
-			inStr = false
+			// 判断是字符串边界还是字符串值内未转义的双引号（模型常漏转义，如正文里的 "咕咕嘎嘎"）。
+			// 边界 = " 后跳过空白是 JSON 结构字符（, } ] :）或 EOF；否则视为内容里的未转义引号，转义为 \"。
+			if isJSONStringBoundary(s, i+1) {
+				b.WriteByte(c)
+				inStr = false
+			} else {
+				b.WriteString(`\"`)
+			}
 		case '\n':
 			b.WriteString(`\n`)
 		case '\r':
@@ -206,6 +212,22 @@ func escapeControlInJSONStrings(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// isJSONStringBoundary 判断 s[pos:] 跳过空白后是否为 JSON 结构字符（, } ] :），
+// 用于区分 s[pos-1] 处的 " 是字符串值结束边界还是值内未转义的引号。EOF 视为边界。
+func isJSONStringBoundary(s string, pos int) bool {
+	for pos < len(s) {
+		switch s[pos] {
+		case ' ', '\t', '\n', '\r':
+			pos++
+		case ',', '}', ']', ':':
+			return true
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // inlineCallToToolCall 把单个内联调用结构转为 llm.ToolCall。name 非空时返回 ok=true，
