@@ -90,7 +90,7 @@ func (c *GeminiClient) Chat(ctx context.Context, req ChatRequest) (*ChatChunk, e
 	chunk.FinishReason = mapGeminiFinishReason(resp.finishReason(), len(toolCalls) > 0)
 	if chunk.Usage == nil {
 		// 上游未返回 usage 时兜底估算，避免漏记漏扣
-		chunk.Usage = EstimateUsageFromMessages(req.Messages, content)
+		chunk.Usage = EstimateUsageFromMessagesForModel(req.Messages, content, req.Model)
 	}
 	return chunk, nil
 }
@@ -229,7 +229,7 @@ func (c *GeminiClient) ChatStream(ctx context.Context, req ChatRequest) (<-chan 
 		}
 		// 上游未返回 usage 且流正常结束时，补发兜底估算 final chunk
 		if !usageEmitted && scanner.Err() == nil {
-			usage := EstimateUsageFromMessages(req.Messages, accumulatedContent.String())
+			usage := EstimateUsageFromMessagesForModel(req.Messages, accumulatedContent.String(), req.Model)
 			select {
 			case chunkChan <- ChatChunk{Usage: usage}:
 			case <-ctx.Done():

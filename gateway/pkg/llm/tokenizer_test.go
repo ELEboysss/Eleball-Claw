@@ -70,3 +70,28 @@ func TestEstimateUsageFromMessagesWithContentParts(t *testing.T) {
 		t.Fatalf("expected positive prompt tokens for content parts, got %d", usage.PromptTokens)
 	}
 }
+
+// TestEstimateUsageFromMessagesBuffer 验证兜底估算叠加安全垫（AR-19 P2-1）。
+func TestEstimateUsageFromMessagesBuffer(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "hello"}}
+	usage := EstimateUsageFromMessages(msgs, "hi")
+	if usage.PromptTokens < usageTokenBuffer {
+		t.Fatalf("expected prompt tokens >= buffer %d, got %d", usageTokenBuffer, usage.PromptTokens)
+	}
+	if usage.TotalTokens != usage.PromptTokens+usage.CompletionTokens {
+		t.Fatalf("total mismatch: %d != %d + %d", usage.TotalTokens, usage.PromptTokens, usage.CompletionTokens)
+	}
+}
+
+// TestEstimateUsageFromMessagesForModelCoefficient 验证按模型族估算系数（AR-19 P2-1）。
+func TestEstimateUsageFromMessagesForModelCoefficient(t *testing.T) {
+	code := "package main\nimport \"fmt\"\nfunc main() {\n\tfor i := 0; i < 100; i++ {\n\t\tfmt.Printf(\"item %d\\n\", i)\n\t\tif i%2 == 0 { continue }\n\t}\n}"
+	msgs := []Message{{Role: "user", Content: code}}
+	completion := "return result"
+	// 代码模型系数 1.2 > 默认 1.0，prompt 估算应更高（buffer 相同，差异来自系数）
+	base := EstimateUsageFromMessagesForModel(msgs, completion, "gpt-4o")
+	coder := EstimateUsageFromMessagesForModel(msgs, completion, "deepseek-coder")
+	if coder.PromptTokens <= base.PromptTokens {
+		t.Fatalf("coder model estimate should exceed base: coder=%d base=%d", coder.PromptTokens, base.PromptTokens)
+	}
+}

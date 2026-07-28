@@ -103,7 +103,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, req ChatRequest) (*ChatChunk, e
 	usage := normalizeUsage(resp.Usage, resp.InputTokens, resp.OutputTokens)
 	if usage == nil {
 		// 上游未返回 usage 时做兜底估算，避免漏记漏扣
-		usage = EstimateUsageFromMessages(req.Messages, content)
+		usage = EstimateUsageFromMessagesForModel(req.Messages, content, req.Model)
 	}
 	return &ChatChunk{
 		Delta:            content,
@@ -237,7 +237,7 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, req ChatRequest) (<-chan 
 
 		// 上游未返回 usage 且流正常结束时，补发一个带有兜底估算的 final chunk
 		if !usageEmitted && scanner.Err() == nil {
-			usage := EstimateUsageFromMessages(req.Messages, accumulatedDelta.String())
+			usage := EstimateUsageFromMessagesForModel(req.Messages, accumulatedDelta.String(), req.Model)
 			select {
 			case chunkChan <- ChatChunk{Usage: usage}:
 			case <-ctx.Done():
