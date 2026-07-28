@@ -24,6 +24,20 @@ html {
   scroll-behavior: smooth;
 }
 
+/* UX-O13：尊重 prefers-reduced-motion。
+   全局降级所有 CSS 动画/过渡/滚动行为（含 Tailwind animate-spin 持续旋转），
+   对启用「减少动态效果」的用户生效。framer-motion 由 main.jsx 的 MotionConfig 单独接管。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 body {
   margin: 0;
   padding: 0;

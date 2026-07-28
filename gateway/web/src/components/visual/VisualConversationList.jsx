@@ -43,7 +43,7 @@ export default function VisualConversationList({ conversations, selectedId, onSe
                   e.stopPropagation()
                   onDelete(conv.id)
                 }}
-                className="opacity-0 group-hover:opacity-100 p-1 rounded text-[#a0a0b8] hover:text-[#ff7b7b] transition-opacity"
+                className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-1 rounded text-[#a0a0b8] hover:text-[#ff7b7b] transition-opacity"
                 title="删除会话"
               >
                 <Trash2 className="w-3.5 h-3.5" />

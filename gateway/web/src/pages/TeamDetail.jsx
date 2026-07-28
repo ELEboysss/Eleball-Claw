@@ -355,7 +355,7 @@ export default function TeamDetail() {
                   </div>
                   <button
                     onClick={() => handleDeleteMemory(m.id)}
-                    className="p-1 text-eleball-text-tertiary hover:text-red-500 transition-opacity opacity-0 group-hover:opacity-100 flex-shrink-0"
+                    className="p-1 text-eleball-text-tertiary hover:text-red-500 transition-opacity opacity-0 group-hover:opacity-100 focus-visible:opacity-100 flex-shrink-0"
                     title="删除记忆"
                   >
                     <Trash2 className="w-3.5 h-3.5" />

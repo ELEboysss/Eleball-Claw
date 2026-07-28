@@ -1827,7 +1827,7 @@ function ConversationItem({ conv, isActive, onSelect, onDelete, onMove }) {
           e.stopPropagation()
           onMove(conv.id)
         }}
-        className={`p-1 rounded-md opacity-0 group-hover:opacity-100 transition-opacity ${
+        className={`p-1 rounded-md opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity ${
           isActive
             ? 'hover:bg-eleball-primary/20 text-eleball-primary'
             : 'hover:bg-eleball-outline text-eleball-text-secondary'
@@ -1838,7 +1838,7 @@ function ConversationItem({ conv, isActive, onSelect, onDelete, onMove }) {
       </button>
       <button
         onClick={(e) => onDelete(e, conv.id)}
-        className={`p-1 rounded-md opacity-0 group-hover:opacity-100 transition-opacity ${
+        className={`p-1 rounded-md opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity ${
           isActive
             ? 'hover:bg-eleball-primary/20 text-eleball-primary'
             : 'hover:bg-eleball-outline text-eleball-text-secondary'
@@ -1981,7 +1981,7 @@ function MessageBubble({ message, isLast, loading, onFork, forkingMessageId }) {
             onClick={() => onFork(message.id, message.sessionId)}
             disabled={forkingMessageId === message.id}
             aria-label="从此处分叉" title="从此处分叉"
-            className="absolute -bottom-2 -left-2 p-1 rounded-full bg-eleball-surface border border-eleball-outline-variant text-eleball-text-secondary opacity-0 group-hover:opacity-100 transition-opacity shadow-sm disabled:opacity-50"
+            className="absolute -bottom-2 -left-2 p-1 rounded-full bg-eleball-surface border border-eleball-outline-variant text-eleball-text-secondary opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity shadow-sm disabled:opacity-50"
           >
             <GitFork className="w-3 h-3" />
           </button>
@@ -2085,7 +2085,7 @@ function CopyButton({ text }) {
   return (
     <button
       onClick={handleCopy}
-      className="absolute -bottom-2 -right-2 p-1 rounded-full bg-eleball-surface border border-eleball-outline-variant text-eleball-text-secondary opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"
+      className="absolute -bottom-2 -right-2 p-1 rounded-full bg-eleball-surface border border-eleball-outline-variant text-eleball-text-secondary opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity shadow-sm"
       aria-label="复制内容" title="复制内容"
     >
       {copied ? (
