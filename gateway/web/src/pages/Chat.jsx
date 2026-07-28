@@ -1697,15 +1697,18 @@ export default function Chat() {
               />
             </div>
           )}
-          {selectedFile ? (
-            <FileViewer cwd={cwd} path={selectedFile} onClose={() => setSelectedFile(null)} />
-          ) : (
+          <div className={`flex-1 min-h-0 ${selectedFile ? 'hidden' : 'flex flex-col'}`}>
             <FileExplorer
               cwd={cwd}
               onOpenFile={(p) => setSelectedFile(p)}
               gitStatus={gitStatus}
               refreshKey={fileRefreshKey}
             />
+          </div>
+          {selectedFile && (
+            <div className="flex-1 min-h-0 flex flex-col">
+              <FileViewer cwd={cwd} path={selectedFile} onClose={() => setSelectedFile(null)} />
+            </div>
           )}
         </aside>
       )}
