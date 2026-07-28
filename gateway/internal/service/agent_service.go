@@ -414,7 +414,7 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	availableTools := s.schemaBuilder.BuildWithOptionsAndDynamic(hasFileTools, enableWebSearch, dynamicTools)
 
 	// 10. 构建初始消息（Agent Team P2：组内对话注入组共享记忆区块；P3：能力目录区块）
-	messages := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID)
+	messages := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID, resolvedCwd)
 
 	// 11. Function Calling 循环
 	// AR-03：执行中余额校验节流计数器（每 balanceCheckEvery 步查一次 DB，避免每轮查库）
@@ -685,7 +685,7 @@ func (s *AgentService) ensureSessionQuota(ctx context.Context, userID string) er
 // Agent Team P2：teamID 非空且 teamMemorySvc 已装配时，检索组共享记忆并把
 // 「组共享记忆」区块拼入 system 消息内容尾部（不新增消息，避免弱模型角色混乱）；
 // userID/teamID 传空则跳过注入（如工具关闭的普通对话路径）。
-func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID string) []llm.Message {
+func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID, resolvedCwd string) []llm.Message {
 	messages := make([]llm.Message, 0, len(req.History)+2)
 	systemContent := "你是一个有用的 AI 助手。\n" +
 		"规则：\n" +
@@ -701,6 +701,12 @@ func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecut
 		if block := s.teamMemorySvc.FormatInjectionBlock(memories, TeamMemoryInjectMaxChars); block != "" {
 			systemContent += "\n\n" + block
 		}
+	}
+	// AR-06：claw 工作目录注入 system prompt（resolvedCwd 非空即 claw 启用且有有效 cwd）。
+	// 文件工具 path 基于此目录解析；LLM 需知晓工作目录才能正确传 path，避免漏传或瞎传。
+	if resolvedCwd != "" {
+		systemContent += "\n\n当前工作目录：" + resolvedCwd +
+			"\n文件工具（ReadFile/WriteFile/StrReplaceFile/Grep/OCR）的 path 参数请使用相对于此目录的路径，也可使用绝对路径。"
 	}
 	messages = append(messages, llm.Message{
 		Role:    "system",
@@ -766,7 +772,7 @@ func (s *AgentService) chatStream(ctx context.Context, req AgentExecuteRequest, 
 	modelName = normalizeAgentModelName(req.Provider, modelName)
 
 	// 工具关闭的普通对话路径不注入组共享记忆（userID/teamID 传空跳过；保持与历史行为一致）
-	messages := s.buildInitialMessages(ctx, req, req.Attachments, "", "")
+	messages := s.buildInitialMessages(ctx, req, req.Attachments, "", "", "")
 	stream, err := llmClient.ChatStream(ctx, llm.ChatRequest{
 		Model:    modelName,
 		Messages: messages,

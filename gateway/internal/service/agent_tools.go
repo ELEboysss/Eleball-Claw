@@ -325,7 +325,7 @@ func (r *ToolRegistry) registerDefaults() {
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "文件相对路径",
+					"description": "相对于当前工作目录的文件路径，可用绝对路径",
 				},
 			},
 			"required": []string{"path"},
@@ -353,7 +353,7 @@ func (r *ToolRegistry) registerDefaults() {
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "文件相对路径",
+					"description": "相对于当前工作目录的文件路径，可用绝对路径",
 				},
 				"content": map[string]interface{}{
 					"type":        "string",
@@ -385,7 +385,7 @@ func (r *ToolRegistry) registerDefaults() {
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "文件相对路径",
+					"description": "相对于当前工作目录的文件路径，可用绝对路径",
 				},
 				"old_string": map[string]interface{}{
 					"type":        "string",
@@ -421,7 +421,7 @@ func (r *ToolRegistry) registerDefaults() {
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "相对路径，文件或目录",
+					"description": "相对于当前工作目录的文件或目录路径，可用绝对路径",
 				},
 				"pattern": map[string]interface{}{
 					"type":        "string",
@@ -490,7 +490,7 @@ func (r *ToolRegistry) registerDefaults() {
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "图片相对路径",
+					"description": "相对于当前工作目录的图片路径，可用绝对路径",
 				},
 			},
 			"required": []string{"path"},
