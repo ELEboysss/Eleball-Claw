@@ -234,6 +234,40 @@ func TestToolRegistry_Grep(t *testing.T) {
 	if err == nil {
 		t.Fatal("Grep 应拒绝越界路径")
 	}
+
+	// 正则元字符（| 分支、.*、中文）必须可用：toolGrep 是纯 Go RE2 搜索，不经过 shell。
+	// 回归用户线上 bug：pattern "claw|Claw|CLAW" 曾被 shellSafe 误判为命令注入。
+	out, err = grepTool.Func(context.Background(), map[string]interface{}{
+		"path":    "test.txt",
+		"pattern": "claw|Claw|CLAW",
+	}, env)
+	if err != nil {
+		t.Fatalf("Grep 应接受含 | 的正则 pattern，实际报错: %v", err)
+	}
+	if m, ok := out["matches"].([]string); !ok || len(m) != 0 {
+		t.Fatalf("期望 0 条匹配（test.txt 无 claw），实际 %v", out["matches"])
+	}
+
+	// 复合正则 + 中文（用户实际 pattern 形态）
+	out, err = grepTool.Func(context.Background(), map[string]interface{}{
+		"path":    "test.txt",
+		"pattern": "hello.*golang|工具列表",
+	}, env)
+	if err != nil {
+		t.Fatalf("Grep 应接受复合正则+中文 pattern，实际报错: %v", err)
+	}
+	if m, ok := out["matches"].([]string); !ok || len(m) != 1 {
+		t.Fatalf("期望 1 条匹配（hello golang），实际 %v", out["matches"])
+	}
+
+	// 空字节仍应被拒绝
+	_, err = grepTool.Func(context.Background(), map[string]interface{}{
+		"path":    "test.txt",
+		"pattern": "hello\x00world",
+	}, env)
+	if err == nil {
+		t.Fatal("Grep 应拒绝含空字节的 pattern")
+	}
 }
 
 func TestToolRegistry_FetchURL(t *testing.T) {
@@ -313,16 +347,23 @@ func TestToolRegistry_ListAvailable_RespectsVIP(t *testing.T) {
 	registry := NewToolRegistry()
 	registry.RegisterBuiltinSearchWeb()
 	all := registry.List()
-	if len(all) != 8 {
-		t.Fatalf("默认工具数量应为 8，实际 %d", len(all))
+	if len(all) != 13 {
+		t.Fatalf("默认工具数量应为 13，实际 %d", len(all))
 	}
 	free := registry.ListAvailable(false)
-	if len(free) != 2 || free[0].Name != "SearchWeb" || free[1].Name != "FetchURL" {
-		t.Fatalf("非 VIP 用户应看到 SearchWeb 和 FetchURL，实际 %v", free)
+	if len(free) != 2 {
+		t.Fatalf("非 VIP 用户应看到 2 个免费工具，实际 %d", len(free))
+	}
+	freeNames := map[string]bool{}
+	for _, f := range free {
+		freeNames[f.Name] = true
+	}
+	if !freeNames["SearchWeb"] || !freeNames["FetchURL"] {
+		t.Fatalf("非 VIP 用户应看到 SearchWeb 和 FetchURL，实际 %v", freeNames)
 	}
 	vip := registry.ListAvailable(true)
-	if len(vip) != 8 {
-		t.Fatalf("VIP 用户应看到 8 个工具，实际 %d", len(vip))
+	if len(vip) != 13 {
+		t.Fatalf("VIP 用户应看到 13 个工具，实际 %d", len(vip))
 	}
 }
 

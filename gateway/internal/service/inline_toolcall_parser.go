@@ -90,3 +90,77 @@ func parseInlineFunctionCalls(content string) ([]llm.ToolCall, string) {
 	cleaned := strings.TrimSpace(content[:idx] + tail)
 	return out, cleaned
 }
+
+// parseBracketToolCalls 解析形如 [ToolName]{json}[/ToolName] 的方括号标签工具调用。
+//
+// 部分模型（尤其中小厂商 / BYOK 弱模型）不走结构化 tool_calls，而在正文里输出
+// [WriteFile]{"path":"x","content":"..."}[/WriteFile] 这类伪 XML 标签。不解析时
+// Agent 循环会把整段标签当作最终回答透传给用户（表现为「调用了却没执行」）。
+//
+// 严格约束（借鉴 jcode chatgpt_web 信封解析，防误判正文方括号）：
+//   - 整段 response（TrimSpace 后）必须形如 [name]{json}[/name]，前后不得有其它正文
+//   - name 须匹配 [A-Za-z_][A-Za-z0-9_]*（工具名风格，排除中文标签 [注意] / markdown [link] 等误判）
+//   - 参数须为合法 JSON 对象；非法 JSON -> malformed=true，由调用方反馈 LLM 换结构化调用
+//
+// 返回：解析出的 tool_calls（name 原样，归一化由 tool loop 做）、剥离标签后的正文、
+// 是否检测到形似标签但格式错误（malformed）。无配对标签形态返回 nil, 原 content, false。
+func parseBracketToolCalls(content string) (calls []llm.ToolCall, cleaned string, malformed bool) {
+	trimmed := strings.TrimSpace(content)
+	if !strings.HasPrefix(trimmed, "[") {
+		return nil, content, false
+	}
+	openEnd := strings.Index(trimmed, "]")
+	if openEnd < 0 {
+		return nil, content, false
+	}
+	name := trimmed[1:openEnd]
+	if !isToolNameIdent(name) {
+		return nil, content, false // [link]/[注意] 等非工具名标签，按普通文本
+	}
+	closeStart := strings.LastIndex(trimmed, "[/")
+	if closeStart <= openEnd {
+		return nil, content, false // 无配对 [/...] 闭合，按普通文本（不误判 [note] 等）
+	}
+	if !strings.HasSuffix(trimmed, "]") {
+		return nil, content, true // 有 [/ 但末尾非 ]，格式错
+	}
+	closeName := trimmed[closeStart+2 : len(trimmed)-1]
+	if !isToolNameIdent(closeName) {
+		return nil, content, true
+	}
+	payload := strings.TrimSpace(trimmed[openEnd+1 : closeStart])
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(payload), &args); err != nil {
+		return nil, content, true // 非法 JSON -> malformed，反馈 LLM 换方式
+	}
+	raw, _ := json.Marshal(args)
+	seq := atomic.AddUint64(&inlineCallSeq, 1)
+	calls = []llm.ToolCall{{
+		ID:   fmt.Sprintf("inline_bracket_%d", seq),
+		Type: "function",
+		Function: llm.ToolCallFunction{
+			Name:      name,
+			Arguments: string(raw),
+		},
+	}}
+	return calls, "", false
+}
+
+// isToolNameIdent 判断是否为工具名风格标识符 [A-Za-z_][A-Za-z0-9_]*
+func isToolNameIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		isAlpha := (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z')
+		isDigit := r >= '0' && r <= '9'
+		if i == 0 {
+			if !(isAlpha || r == '_') {
+				return false
+			}
+		} else if !(isAlpha || isDigit || r == '_') {
+			return false
+		}
+	}
+	return true
+}

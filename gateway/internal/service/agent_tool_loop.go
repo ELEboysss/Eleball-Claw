@@ -30,6 +30,13 @@ type ToolCallRecord struct {
 	OutputSize int   `json:"output_size,omitempty"`
 }
 
+// maxMalformedRetries 方括号标签工具调用格式错误时，反馈 LLM 重试的最大次数（AR-20）。
+// 超过后放弃重试，透传最终回答（附说明），防 LLM 反复用错误格式烧步数。
+const maxMalformedRetries = 2
+
+// bracketMalformedPrompt 检测到 [工具名]...[/工具名] 文本标签但格式错误时注入的反馈（AR-20）。
+const bracketMalformedPrompt = "（系统提示）检测到你用 [工具名]参数[/工具名] 文本标签调用工具，此格式不被支持。请使用结构化工具调用（function calling / tool_calls）调用工具，参数以 JSON 对象提供，工具名需精确匹配可用工具列表（区分大小写）。"
+
 // ToolCallingLoop Function Calling 循环
 type ToolCallingLoop struct {
 	registry *ToolRegistry
@@ -124,6 +131,8 @@ func (l *ToolCallingLoop) RunWithRegistry(
 	lastToolCallKey := ""
 	consecutiveCount := 0
 	const maxConsecutiveRepeats = 2
+	// AR-20：方括号标签工具调用格式错误时反馈 LLM 重试的累计次数
+	malformedRetries := 0
 
 	for step := 0; step < maxIterations; step++ {
 		// AR-02：客户端取消（断连）时立即结束循环，保留已产出供前端展示
@@ -176,12 +185,32 @@ func (l *ToolCallingLoop) RunWithRegistry(
 			}
 		}
 
-		// 兼容在正文输出内联函数调用标记（<|FunctionCallBegin|>...）而非结构化
-		// tool_calls 的模型：还原为真实 tool_calls 并剥离标记，否则标记会透传给用户
+		// 兼容在正文输出内联函数调用标记而非结构化 tool_calls 的模型，还原为真实
+		// tool_calls 并剥离标记，否则标记会透传给用户（表现为「调用了却没执行」）：
+		// (1) <|FunctionCallBegin|>...<|FunctionCallEnd|>（MiMo 系列）
+		// (2) [ToolName]{json}[/ToolName] 方括号标签（中小厂商 / BYOK 弱模型，AR-20）
 		if len(resp.ToolCalls) == 0 {
 			if calls, cleaned := parseInlineFunctionCalls(resp.Delta); len(calls) > 0 {
 				resp.ToolCalls = calls
 				resp.Delta = cleaned
+			} else {
+				bc, bcCleaned, malformed := parseBracketToolCalls(resp.Delta)
+				if malformed {
+					// 形似 [tool] 标签但格式错误（非 JSON 体等）：不当最终回答透传，
+					// 注入反馈让 LLM 改用结构化 function calling；超限则放弃并透传附说明。
+					if malformedRetries < maxMalformedRetries {
+						malformedRetries++
+						result.Messages = append(result.Messages,
+							llm.Message{Role: "assistant", Content: resp.Delta},
+							llm.Message{Role: "user", Content: bracketMalformedPrompt},
+						)
+						continue
+					}
+					resp.Delta = resp.Delta + "\n\n（系统提示：检测到工具调用使用了不支持的文本标签格式，已超过重试上限，请改用结构化工具调用。）"
+				} else if len(bc) > 0 {
+					resp.ToolCalls = bc
+					resp.Delta = bcCleaned
+				}
 			}
 		}
 
@@ -235,15 +264,16 @@ func (l *ToolCallingLoop) RunWithRegistry(
 				Arguments: tc.Function.Arguments,
 			}
 
-			tool, ok := registry.Get(tc.Function.Name)
+			tool, resolvedName, ok := registry.Resolve(tc.Function.Name)
 			if !ok {
-				// 工具名未命中：列出可用工具名，提示 LLM 用准确名字重试（不为其做模糊适配）
+				// 工具名未命中（含归一化后）：列出可用工具名，提示 LLM 用准确名字重试
 				avail := make([]string, 0, 8)
 				for _, t := range registry.List() {
 					avail = append(avail, t.Name)
 				}
 				record.Error = fmt.Sprintf("未知工具: %s。可用工具：%s", tc.Function.Name, strings.Join(avail, ", "))
 			} else {
+				record.Tool = resolvedName // AR-20：记录归一化后的真实工具名
 				var input map[string]interface{}
 				if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
 					record.Error = fmt.Sprintf("参数解析失败: %v", err)
