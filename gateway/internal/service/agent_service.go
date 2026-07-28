@@ -694,7 +694,7 @@ func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecut
 		"3. 如果工具返回失败或没有有效结果，如实告知用户，不要编造。\n" +
 		"4. 必须使用工具列表中的准确工具名（区分大小写），不得自创或变形；若返回未知工具，按其列出的可用工具名重新调用。\n" +
 		"5. 调用工具前，先查看可用工具列表及其描述，确认工具能力与用户需求匹配后再调用；不确定时查看工具描述而非猜测。\n" +
-		"6. 必须使用结构化工具调用（function calling / tool_calls）调用工具，禁止在回复正文里用 [工具名]参数[/工具名] 等文本标签描述工具调用；工具参数以 JSON 对象提供。"
+		"6. 必须使用结构化工具调用（function calling / tool_calls）调用工具，禁止在回复正文里用 [工具名]参数[/工具名] 等文本标签或 {\"name\":\"...\",\"parameters\":{...}} 形式的 JSON 文本来描述或发起工具调用；工具参数以 JSON 对象经 tool_calls 字段提供。"
 	// Agent Team P2：组共享记忆注入（区块预算 4000 字符 ≈ 2000 tokens，超出按相关度截断）
 	if teamID != "" && s.teamMemorySvc != nil {
 		memories := s.teamMemorySvc.SearchForInjection(ctx, userID, teamID, req.Message, 8)
