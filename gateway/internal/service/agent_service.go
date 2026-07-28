@@ -217,12 +217,16 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	if req.SearchProvider != nil && *req.SearchProvider != "" {
 		searchProvider = *req.SearchProvider
 	}
-	// 同时持久化到 conversation
-	if req.EnableTools != nil || req.EnableWebSearch != nil || req.SearchProvider != nil {
+	// 同时持久化到 conversation（AR-23：req.Cwd 非空时一并写回会话，供后续 execute 回填）
+	if req.EnableTools != nil || req.EnableWebSearch != nil || req.SearchProvider != nil || req.Cwd != "" {
 		updateReq := UpdateConversationReq{
 			EnableTools:     req.EnableTools,
 			EnableWebSearch: req.EnableWebSearch,
 			SearchProvider:  req.SearchProvider,
+		}
+		if req.Cwd != "" {
+			cwdVal := req.Cwd
+			updateReq.Cwd = &cwdVal
 		}
 		if err := s.conversationSvc.Update(ctx, conv.ID, userID, updateReq); err != nil {
 			s.logger.Warn("同步 conversation 工具/搜索设置失败", zap.Error(err))
@@ -322,13 +326,20 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	// AR-06：claw cwd 解析（仅 unrestricted=true 即 claw 启用；云端忽略 req.Cwd 维持多租户隔离）。
 	// EvalSymlinks 防软链逃逸，Stat 校验为目录。无效时 cwd 留空，回退会话沙箱。
 	resolvedCwd := ""
-	if s.unrestricted && req.Cwd != "" {
-		if abs, aErr := filepath.Abs(req.Cwd); aErr == nil {
-			if info, statErr := os.Stat(abs); statErr == nil && info.IsDir() {
-				if resolved, eErr := filepath.EvalSymlinks(abs); eErr == nil {
-					resolvedCwd = filepath.Clean(resolved)
-				} else {
-					resolvedCwd = filepath.Clean(abs)
+	if s.unrestricted {
+		// AR-23：cwd 跟会话走--前端没传 req.Cwd 时回填会话持久化的 conv.Cwd
+		cwdSrc := req.Cwd
+		if cwdSrc == "" {
+			cwdSrc = conv.Cwd
+		}
+		if cwdSrc != "" {
+			if abs, aErr := filepath.Abs(cwdSrc); aErr == nil {
+				if info, statErr := os.Stat(abs); statErr == nil && info.IsDir() {
+					if resolved, eErr := filepath.EvalSymlinks(abs); eErr == nil {
+						resolvedCwd = filepath.Clean(resolved)
+					} else {
+						resolvedCwd = filepath.Clean(abs)
+					}
 				}
 			}
 		}

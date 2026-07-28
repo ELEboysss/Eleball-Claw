@@ -408,6 +408,8 @@ export default function Chat() {
     const exists = availableSearchProviders.some((p) => p.name === savedProvider)
     setSearchProvider(exists ? savedProvider : (availableSearchProviders[0]?.name || 'baidu'))
     setAssistantId(currentConversation.assistantId || '')
+    // AR-23：恢复该会话持久化的工作目录（cwd 跟会话走）
+    setCwd(currentConversation.cwd || '')
     // 恢复该对话绑定的模型：按 model+provider 找匹配 profile（直接 setState，不触发后端写）
     if (currentConversation.model && currentConversation.provider) {
       const matched = profiles.find(
@@ -575,6 +577,7 @@ export default function Chat() {
     // 快照当前模型配置到新对话（model 身份），切换对话时据此恢复
     conv.model = currentProfile?.modelName || ''
     conv.provider = currentProfile?.provider || ''
+    conv.cwd = cwd || '' // AR-23：快照当前工作目录到新对话
     const next = [conv, ...conversations]
     updateConversations(next)
     switchConversation(conv.id)
@@ -1693,7 +1696,14 @@ export default function Chat() {
             <div className="p-2 border-b border-eleball-outline-variant flex-shrink-0">
               <WorktreeSwitcher
                 cwd={cwd}
-                onCwdChange={(newCwd) => { setCwd(newCwd); setSelectedFile(null) }}
+                onCwdChange={(newCwd) => {
+                  setCwd(newCwd)
+                  setSelectedFile(null)
+                  // AR-23：持久化工作目录到会话（worktree 切换）
+                  if (currentConversation?.id) {
+                    conversationApi.update(currentConversation.id, { cwd: newCwd }).catch(() => {})
+                  }
+                }}
               />
             </div>
           )}
@@ -1721,6 +1731,10 @@ export default function Chat() {
           setCwd(resolvedCwd)
           setSelectedFile(null)
           setFilePanelOpen(true)
+          // AR-23：持久化工作目录到会话，供切换回来时恢复 + 后续 execute 回填
+          if (currentConversation?.id) {
+            conversationApi.update(currentConversation.id, { cwd: resolvedCwd }).catch(() => {})
+          }
         }}
       />
 

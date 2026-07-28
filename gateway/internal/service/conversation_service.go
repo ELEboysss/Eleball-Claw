@@ -161,6 +161,7 @@ func (s *ConversationService) ForkConversation(ctx context.Context, userID, sour
 		SearchProvider:  src.SearchProvider,
 		AssistantID:     src.AssistantID,
 		TeamID:          src.TeamID,
+		Cwd:             src.Cwd,
 		DiskPath:        filepath.Join(s.basePath, userID, "conversations", newID),
 		CreatedAt:       now,
 		UpdatedAt:       now,
@@ -246,6 +247,8 @@ type UpdateConversationReq struct {
 	AssistantID *string `json:"assistant_id,omitempty"`
 	// TeamID 会话所属的对话分组 ID（空字符串 = 移出分组）
 	TeamID *string `json:"team_id,omitempty"`
+	// Cwd claw 本地工作目录（空字符串 = 清除绑定）。仅 claw 启用；云端忽略。
+	Cwd *string `json:"cwd,omitempty"`
 	// Model / Provider 会话绑定的模型配置（profile.modelName + provider）。
 	// 切换对话时按此恢复 currentProfileId；对话中切模型时同步到此。
 	Model     *string `json:"model,omitempty"`
@@ -293,6 +296,9 @@ func (s *ConversationService) Update(ctx context.Context, id, userID string, req
 			}
 		}
 		updates["team_id"] = *req.TeamID
+	}
+	if req.Cwd != nil {
+		updates["cwd"] = *req.Cwd
 	}
 	if req.Model != nil {
 		updates["model"] = *req.Model
