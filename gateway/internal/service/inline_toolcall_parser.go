@@ -49,6 +49,11 @@ func parseInlineFunctionCalls(content string) ([]llm.ToolCall, string) {
 		payload = rest
 	}
 	payload = strings.TrimSpace(payload)
+	// 容错：部分模型（如 MiMo 系列）在字符串参数值内直接输出字面换行/制表符（未转义），
+	// 标准 JSON 禁止字符串值内出现字面控制字符，encoding/json 会报 "invalid character
+	// '\n' in string literal" 导致整段标记解析失败、被当作最终回答透传给用户（表现为
+	// 工具调用没执行）。先转义字符串值内的控制字符再解析；字符串外的结构空白原样保留。
+	payload = escapeControlInJSONStrings(payload)
 
 	var calls []inlineFunctionCall
 	if err := json.Unmarshal([]byte(payload), &calls); err != nil || len(calls) == 0 {
@@ -129,6 +134,7 @@ func parseBracketToolCalls(content string) (calls []llm.ToolCall, cleaned string
 		return nil, content, true
 	}
 	payload := strings.TrimSpace(trimmed[openEnd+1 : closeStart])
+	payload = escapeControlInJSONStrings(payload)
 	var args map[string]interface{}
 	if err := json.Unmarshal([]byte(payload), &args); err != nil {
 		return nil, content, true // 非法 JSON -> malformed，反馈 LLM 换方式
@@ -163,4 +169,60 @@ func isToolNameIdent(s string) bool {
 		}
 	}
 	return true
+}
+
+// escapeControlInJSONStrings 把 JSON 文本中字符串值内的字面控制字符（U+0000~U+001F）
+// 转义为合法 JSON 转义序列，兼容部分模型在字符串参数里直接输出未转义换行的情形。
+//
+// 仅转义字符串值内部的控制字符；字符串外的结构空白（token 间的换行/空格）原样保留，
+// 因为它们是合法 JSON 分隔符。字节级扫描，UTF-8 多字节字符（如中文）的高位字节
+// （>=0x80）不落入各控制字符分支，原样透传。
+func escapeControlInJSONStrings(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inStr := false
+	escaped := false
+	const hex = "0123456789abcdef"
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !inStr {
+			b.WriteByte(c)
+			if c == '"' {
+				inStr = true
+			}
+			continue
+		}
+		if escaped { // 上一字节是反斜杠，本字节原样保留（如 \" \\ \n 已是转义序列）
+			b.WriteByte(c)
+			escaped = false
+			continue
+		}
+		switch c {
+		case '\\':
+			b.WriteByte(c)
+			escaped = true
+		case '"':
+			b.WriteByte(c)
+			inStr = false
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\f':
+			b.WriteString(`\f`)
+		default:
+			if c < 0x20 {
+				b.WriteString(`\u00`)
+				b.WriteByte(hex[c>>4])
+				b.WriteByte(hex[c&0x0f])
+			} else {
+				b.WriteByte(c)
+			}
+		}
+	}
+	return b.String()
 }

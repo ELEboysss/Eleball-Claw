@@ -347,7 +347,7 @@ func TestTeamMemory_InjectedIntoSystemPrompt(t *testing.T) {
 	agentSvc := &AgentService{teamMemorySvc: env.memory}
 
 	// 组内对话：system 消息尾部拼入「组共享记忆」区块
-	msgs := agentSvc.buildInitialMessages(ctx, AgentExecuteRequest{Message: "项目代号是什么"}, nil, teamMemoryTestUser, team.ID)
+	msgs := agentSvc.buildInitialMessages(ctx, AgentExecuteRequest{Message: "项目代号是什么"}, nil, teamMemoryTestUser, team.ID, "")
 	require.NotEmpty(t, msgs)
 	systemContent, ok := msgs[0].Content.(string)
 	require.True(t, ok)
@@ -355,13 +355,13 @@ func TestTeamMemory_InjectedIntoSystemPrompt(t *testing.T) {
 	assert.Contains(t, systemContent, "项目代号是 Eleball")
 
 	// 未分组对话（teamID 为空）：不注入
-	msgs = agentSvc.buildInitialMessages(ctx, AgentExecuteRequest{Message: "项目代号是什么"}, nil, teamMemoryTestUser, "")
+	msgs = agentSvc.buildInitialMessages(ctx, AgentExecuteRequest{Message: "项目代号是什么"}, nil, teamMemoryTestUser, "", "")
 	systemContent, _ = msgs[0].Content.(string)
 	assert.NotContains(t, systemContent, "组共享记忆")
 
 	// 未装配 teamMemorySvc：不注入
 	agentSvcBare := &AgentService{}
-	msgs = agentSvcBare.buildInitialMessages(ctx, AgentExecuteRequest{Message: "项目代号是什么"}, nil, teamMemoryTestUser, team.ID)
+	msgs = agentSvcBare.buildInitialMessages(ctx, AgentExecuteRequest{Message: "项目代号是什么"}, nil, teamMemoryTestUser, team.ID, "")
 	systemContent, _ = msgs[0].Content.(string)
 	assert.NotContains(t, systemContent, "组共享记忆")
 }

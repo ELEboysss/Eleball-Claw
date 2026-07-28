@@ -180,7 +180,7 @@ func TestAgentService_DeleteSession(t *testing.T) {
 
 func TestAgentService_buildInitialMessages(t *testing.T) {
 	agentSvc, _, _ := setupAgentService(t)
-	msgs := agentSvc.buildInitialMessages(context.Background(), AgentExecuteRequest{Message: "hello", History: []llm.Message{{Role: "user", Content: "prev"}}}, nil, "u1", "")
+	msgs := agentSvc.buildInitialMessages(context.Background(), AgentExecuteRequest{Message: "hello", History: []llm.Message{{Role: "user", Content: "prev"}}}, nil, "u1", "", "")
 	require.Len(t, msgs, 3)
 	assert.Equal(t, "system", msgs[0].Role)
 	assert.Equal(t, "prev", msgs[1].Content)

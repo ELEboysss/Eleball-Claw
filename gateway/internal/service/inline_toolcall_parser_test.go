@@ -134,3 +134,31 @@ func TestParseBracketToolCalls_PrefixedNotParsed(t *testing.T) {
 	assert.False(t, malformed)
 	assert.Nil(t, calls)
 }
+
+func TestParseInlineFunctionCalls_LiteralNewlineInString(t *testing.T) {
+	// 复现 MiMo 等模型在字符串参数值内直接输出未转义字面换行的场景：
+	// content 字段值跨多行（字面 \n），标准 JSON 解析会报 "invalid character '\n'
+	// in string literal" 失败。parser 应容错转义后解析，否则整段标记被透传给用户
+	// （表现为工具调用没执行）。见 debugs/log。
+	content := "<|FunctionCallBegin|>[{\"name\":\"WriteFile\",\"parameters\":{\"path\":\"x.md\",\"content\":\"# 标题\n\n正文第二行\"}}]<|FunctionCallEnd|>"
+	calls, cleaned := parseInlineFunctionCalls(content)
+	require.Len(t, calls, 1)
+	assert.Equal(t, "WriteFile", calls[0].Function.Name)
+	assert.Equal(t, "", cleaned)
+	var args map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(calls[0].Function.Arguments), &args))
+	assert.Equal(t, "x.md", args["path"])
+	assert.Equal(t, "# 标题\n\n正文第二行", args["content"])
+}
+
+func TestParseBracketToolCalls_LiteralNewlineInString(t *testing.T) {
+	// 方括号标签格式同样兼容字符串值内的字面换行
+	content := "[WriteFile]{\"path\":\"x.md\",\"content\":\"行1\n行2\"}[/WriteFile]"
+	calls, _, malformed := parseBracketToolCalls(content)
+	assert.False(t, malformed)
+	require.Len(t, calls, 1)
+	assert.Equal(t, "WriteFile", calls[0].Function.Name)
+	var args map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(calls[0].Function.Arguments), &args))
+	assert.Equal(t, "行1\n行2", args["content"])
+}
