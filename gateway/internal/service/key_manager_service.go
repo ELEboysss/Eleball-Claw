@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -23,6 +24,9 @@ type KeyManagerService struct {
 
 	mu   sync.RWMutex
 	keys map[string][]*model.ProviderApiKey // provider -> keys
+
+	// AR-16 LLM-P1-6：默认 Key 选择策略（由 SetDefaultStrategy 设置，配置 KEY_SELECTION_STRATEGY）。
+	defaultStrategy KeySelectionStrategy
 }
 
 // NewNoOpKeyManager 创建一个不管理任何 Key 的空管理器，用于测试或纯 fallback 模式。
@@ -69,9 +73,37 @@ type SelectedKey struct {
 	Plaintext string
 }
 
-// SelectKey 为指定 Provider 选择一个可用 Key
-// 算法：过滤未启用/超配额 → 按 Priority 升序 → 按 LastUsedAt 升序（轮询）
+// KeySelectionStrategy Key 选择策略（AR-16 LLM-P1-6 成本感知选 Key）。
+type KeySelectionStrategy string
+
+const (
+	// StrategyRoundRobin 默认策略：按 Priority 升序 + LastUsedAt 升序轮询（现有行为，向后兼容）。
+	StrategyRoundRobin KeySelectionStrategy = ""
+	// StrategyHeadroom 优先选剩余日配额多的 Key（DailyQuota-UsedTokens 降序），
+	// 适合多 Key 池避免单 Key 提前耗尽；DailyQuota=0 视为无限配额，优先级最高。
+	// 同剩余配额按 Priority + LastUsedAt 轮询兜底。
+	StrategyHeadroom KeySelectionStrategy = "headroom"
+)
+
+// SetDefaultStrategy 设置默认 Key 选择策略（AR-16，配置 KEY_SELECTION_STRATEGY 注入）。
+// 未知值回退 StrategyRoundRobin，保证向后兼容。SelectKeyWithStrategy 可按调用显式覆盖。
+func (s *KeyManagerService) SetDefaultStrategy(strategy string) {
+	switch KeySelectionStrategy(strategy) {
+	case StrategyHeadroom:
+		s.defaultStrategy = StrategyHeadroom
+	default:
+		s.defaultStrategy = StrategyRoundRobin
+	}
+}
+
+// SelectKey 为指定 Provider 选择一个可用 Key（按默认策略，向后兼容入口）。
 func (s *KeyManagerService) SelectKey(provider string) (*SelectedKey, error) {
+	return s.SelectKeyWithStrategy(provider, s.defaultStrategy)
+}
+
+// SelectKeyWithStrategy 按指定策略选择一个可用 Key（AR-16 LLM-P1-6）。
+// 过滤未启用 / 超配额 / 冷却（AR-04）后，按 strategy 排序取首位。
+func (s *KeyManagerService) SelectKeyWithStrategy(provider string, strategy KeySelectionStrategy) (*SelectedKey, error) {
 	now := time.Now()
 	s.mu.RLock()
 	keys := s.keys[provider]
@@ -96,22 +128,20 @@ func (s *KeyManagerService) SelectKey(provider string) (*SelectedKey, error) {
 		return nil, fmt.Errorf("provider %s 无可用 API Key", provider)
 	}
 
-	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].Priority != candidates[j].Priority {
-			return candidates[i].Priority < candidates[j].Priority
-		}
-		// LastUsedAt 为空表示从未使用，优先使用
-		if candidates[i].LastUsedAt == nil && candidates[j].LastUsedAt != nil {
-			return true
-		}
-		if candidates[i].LastUsedAt != nil && candidates[j].LastUsedAt == nil {
-			return false
-		}
-		if candidates[i].LastUsedAt == nil && candidates[j].LastUsedAt == nil {
-			return candidates[i].CreatedAt.Before(candidates[j].CreatedAt)
-		}
-		return candidates[i].LastUsedAt.Before(*candidates[j].LastUsedAt)
-	})
+	switch strategy {
+	case StrategyHeadroom:
+		sort.Slice(candidates, func(i, j int) bool {
+			ri, rj := remainingQuota(candidates[i]), remainingQuota(candidates[j])
+			if ri != rj {
+				return ri > rj // 剩余配额多优先
+			}
+			return lessByPriorityLastUsed(candidates[i], candidates[j])
+		})
+	default: // StrategyRoundRobin
+		sort.Slice(candidates, func(i, j int) bool {
+			return lessByPriorityLastUsed(candidates[i], candidates[j])
+		})
+	}
 
 	selected := candidates[0]
 	plaintext, err := s.decryptKey(selected)
@@ -122,18 +152,49 @@ func (s *KeyManagerService) SelectKey(provider string) (*SelectedKey, error) {
 	return &SelectedKey{Key: selected, Plaintext: plaintext}, nil
 }
 
+// remainingQuota 返回 Key 的剩余日配额（AR-16）。DailyQuota<=0 视为无限，返回 MaxInt64。
+func remainingQuota(k *model.ProviderApiKey) int64 {
+	if k.DailyQuota <= 0 {
+		return math.MaxInt64
+	}
+	r := k.DailyQuota - k.UsedTokens
+	if r < 0 {
+		return 0
+	}
+	return r
+}
+
+// lessByPriorityLastUsed 默认排序：Priority 升序，同优先级按 LastUsedAt 升序（轮询，从未使用优先）。
+// 抽出供 round_robin 与 headroom 兜底复用，行为与原 SelectKey 排序一致。
+func lessByPriorityLastUsed(a, b *model.ProviderApiKey) bool {
+	if a.Priority != b.Priority {
+		return a.Priority < b.Priority
+	}
+	// LastUsedAt 为空表示从未使用，优先使用
+	if a.LastUsedAt == nil && b.LastUsedAt != nil {
+		return true
+	}
+	if a.LastUsedAt != nil && b.LastUsedAt == nil {
+		return false
+	}
+	if a.LastUsedAt == nil && b.LastUsedAt == nil {
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	return a.LastUsedAt.Before(*b.LastUsedAt)
+}
+
 // ReportSuccess 报告调用成功，更新用量和最近使用时间
 // AR-04：成功后清除冷却与退避级别，重置连续失败计数。
 func (s *KeyManagerService) ReportSuccess(keyID string, usedTokens int64) error {
 	now := time.Now()
 	updates := map[string]interface{}{
-		"used_tokens":         gorm.Expr("used_tokens + ?", usedTokens),
-		"failure_count":       0,
-		"last_error":          "",
-		"last_error_type":     "",
-		"backoff_level":       0,
-		"rate_limited_until":  nil,
-		"last_used_at":        now,
+		"used_tokens":        gorm.Expr("used_tokens + ?", usedTokens),
+		"failure_count":      0,
+		"last_error":         "",
+		"last_error_type":    "",
+		"backoff_level":      0,
+		"rate_limited_until": nil,
+		"last_used_at":       now,
 	}
 	if err := s.repo.UpdateFields(keyID, updates); err != nil {
 		return err

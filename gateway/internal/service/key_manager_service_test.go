@@ -6,8 +6,9 @@ import (
 
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
-	"github.com/stretchr/testify/assert"
 	sqlite "github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
 
@@ -118,4 +119,45 @@ func TestKeyManagerService_RotateKey(t *testing.T) {
 	selected, err := svc.SelectKey("openai")
 	assert.NoError(t, err)
 	assert.Equal(t, "new-key", selected.Plaintext)
+}
+
+// TestKeyManagerService_SelectKeyHeadroom 验证 headroom 策略优先选剩余配额多的 Key（AR-16 LLM-P1-6）。
+func TestKeyManagerService_SelectKeyHeadroom(t *testing.T) {
+	svc, _ := setupKeyManagerService(t)
+
+	// k1: quota 500，从未使用（remaining 500, LastUsedAt nil）
+	// k2: quota 2000，用掉 100（remaining 1900, LastUsedAt now）
+	_, err := svc.CreateKey("openai", "OpenAI-01", "", "sk-1", 0, 500)
+	require.NoError(t, err)
+	k2, err := svc.CreateKey("openai", "OpenAI-02", "", "sk-2", 0, 2000)
+	require.NoError(t, err)
+	require.NoError(t, svc.ReportSuccess(k2.ID, 100)) // k2 用 100，remaining 1900
+
+	// headroom：k2 剩余 2000 > k1 剩余 400 -> 选 k2
+	sel, err := svc.SelectKeyWithStrategy("openai", StrategyHeadroom)
+	require.NoError(t, err)
+	assert.Equal(t, "sk-2", sel.Plaintext, "headroom 应选剩余配额多的 k2")
+
+	// 默认 round_robin：k1 LastUsedAt 更早（先用过），轮询选 LastUsedAt 最早 -> 选 k1
+	selRR, err := svc.SelectKey("openai")
+	require.NoError(t, err)
+	assert.Equal(t, "sk-1", selRR.Plaintext, "round_robin 应选 LastUsedAt 最早的 k1")
+}
+
+// TestKeyManagerService_SelectKeyHeadroomUnlimited 验证 DailyQuota=0（无限配额）在 headroom 下优先级最高。
+func TestKeyManagerService_SelectKeyHeadroomUnlimited(t *testing.T) {
+	svc, _ := setupKeyManagerService(t)
+
+	// k1: 无配额限制（DailyQuota=0 -> 剩余 MaxInt64），已用 5000
+	// k2: quota 2000，从未使用（remaining 2000）
+	k1, err := svc.CreateKey("openai", "OpenAI-01", "", "sk-1", 0, 0)
+	require.NoError(t, err)
+	_, err = svc.CreateKey("openai", "OpenAI-02", "", "sk-2", 0, 2000)
+	require.NoError(t, err)
+	require.NoError(t, svc.ReportSuccess(k1.ID, 5000)) // k1 用 5000，但无限配额
+
+	// headroom：k1 无限配额优先 -> 选 k1（即便已用更多）
+	sel, err := svc.SelectKeyWithStrategy("openai", StrategyHeadroom)
+	require.NoError(t, err)
+	assert.Equal(t, "sk-1", sel.Plaintext, "headroom 应优先选无限配额的 k1")
 }
