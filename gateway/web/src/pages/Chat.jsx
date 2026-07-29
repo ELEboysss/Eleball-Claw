@@ -484,10 +484,26 @@ export default function Chat() {
         })
       }
       const res = await conversationApi.saveMessage(conversationId, payload)
-      // AR-12：对齐服务端消息 ID（服务端生成 msg_xxx），供分叉 entry_id 解析；
-      // 本地占位 id（如 agent_xxx）过长且与服务端不一致，这里以服务端返回为准回写。
-      if (res?.message?.id) {
-        message.id = res.message.id
+      // AR-12/AR-28：对齐服务端消息 ID（服务端生成 msg_xxx），供分叉 entry_id 解析。
+      // assistant 消息传入的常是拷贝（未开「保留思考」时 {…msg, reasoningContent:''}），
+      // 直接改 message.id 只改到拷贝；必须用占位 ID 在会话状态里定位显示消息并回写真实 ID，
+      // 否则分叉 ListMessagesUpTo 按占位 entry_id 找不到记录（「分叉点消息无效：record not found」）。
+      const realId = res?.message?.id
+      if (realId && realId !== message.id) {
+        const placeholderId = message.id
+        message.id = realId
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.id === conversationId
+              ? {
+                  ...c,
+                  messages: c.messages.map((m) =>
+                    m.id === placeholderId ? { ...m, id: realId } : m
+                  )
+                }
+              : c
+          )
+        )
       }
       return res?.title || null
     } catch (err) {
