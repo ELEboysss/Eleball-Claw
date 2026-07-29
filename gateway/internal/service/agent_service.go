@@ -425,7 +425,7 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	availableTools := s.schemaBuilder.BuildWithOptionsAndDynamic(hasFileTools, enableWebSearch, dynamicTools)
 
 	// 10. 构建初始消息（Agent Team P2：组内对话注入组共享记忆区块；P3：能力目录区块）
-	messages := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID, resolvedCwd)
+	messages := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID, resolvedCwd, true)
 
 	// 11. Function Calling 循环
 	// AR-03：执行中余额校验节流计数器（每 balanceCheckEvery 步查一次 DB，避免每轮查库）
@@ -696,7 +696,7 @@ func (s *AgentService) ensureSessionQuota(ctx context.Context, userID string) er
 // Agent Team P2：teamID 非空且 teamMemorySvc 已装配时，检索组共享记忆并把
 // 「组共享记忆」区块拼入 system 消息内容尾部（不新增消息，避免弱模型角色混乱）；
 // userID/teamID 传空则跳过注入（如工具关闭的普通对话路径）。
-func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID, resolvedCwd string) []llm.Message {
+func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID, resolvedCwd string, toolsEnabled bool) []llm.Message {
 	messages := make([]llm.Message, 0, len(req.History)+2)
 	systemContent := "你是一个有用的 AI 助手。\n" +
 		"规则：\n" +
@@ -704,8 +704,14 @@ func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecut
 		"2. 请直接输出工具调用，拿到工具结果后再给出最终回答。\n" +
 		"3. 如果工具返回失败或没有有效结果，如实告知用户，不要编造。\n" +
 		"4. 必须使用工具列表中的准确工具名（区分大小写），不得自创或变形；若返回未知工具，按其列出的可用工具名重新调用。\n" +
-		"5. 调用工具前，先查看可用工具列表及其描述，确认工具能力与用户需求匹配后再调用；不确定时查看工具描述而非猜测。\n" +
-		"6. 必须使用结构化工具调用（function calling / tool_calls）调用工具，禁止在回复正文里用 [工具名]参数[/工具名] 等文本标签或 {\"name\":\"...\",\"parameters\":{...}} 形式的 JSON 文本来描述或发起工具调用；工具参数以 JSON 对象经 tool_calls 字段提供。"
+		"5. 调用工具前，先查看可用工具列表及其描述，确认工具能力与用户需求匹配后再调用；不确定时查看工具描述而非猜测。\n"
+	if toolsEnabled {
+		// AR-26：优先 function calling；不支持时引导模型用内嵌标记调 FunctionGet 主动拉取工具列表，
+		// 拿到后再用内嵌标记调具体工具。不预设工具列表（按需拉取，对应 assistant 当下工具能力）。
+		systemContent += "6. 优先使用结构化工具调用（function calling / tool_calls）调用工具。若你的环境不支持 function calling，可发送内联标记 <|FunctionCallBegin|>[{\"name\":\"FunctionGet\",\"parameters\":{}}]<|FunctionCallEnd|> 获取可用工具列表及用法，拿到后用同样的内联标记 <|FunctionCallBegin|>[{\"name\":\"工具名\",\"parameters\":{...}}]<|FunctionCallEnd|> 调用具体工具。禁止用 [工具名]参数[/工具名] 方括号标签或裸 JSON 形式调用工具。"
+	} else {
+		systemContent += "6. 必须使用结构化工具调用（function calling / tool_calls）调用工具，禁止在回复正文里用 [工具名]参数[/工具名] 等文本标签或 {\"name\":\"...\",\"parameters\":{...}} 形式的 JSON 文本来描述或发起工具调用；工具参数以 JSON 对象经 tool_calls 字段提供。"
+	}
 	// Agent Team P2：组共享记忆注入（区块预算 4000 字符 ≈ 2000 tokens，超出按相关度截断）
 	if teamID != "" && s.teamMemorySvc != nil {
 		memories := s.teamMemorySvc.SearchForInjection(ctx, userID, teamID, req.Message, 8)
@@ -783,7 +789,7 @@ func (s *AgentService) chatStream(ctx context.Context, req AgentExecuteRequest, 
 	modelName = normalizeAgentModelName(req.Provider, modelName)
 
 	// 工具关闭的普通对话路径不注入组共享记忆（userID/teamID 传空跳过；保持与历史行为一致）
-	messages := s.buildInitialMessages(ctx, req, req.Attachments, "", "", "")
+	messages := s.buildInitialMessages(ctx, req, req.Attachments, "", "", "", false)
 	stream, err := llmClient.ChatStream(ctx, llm.ChatRequest{
 		Model:    modelName,
 		Messages: messages,
@@ -1178,7 +1184,16 @@ func (s *AgentService) GetResource(ctx context.Context, resourceID string) (data
 	if err != nil {
 		return nil, "", "", err
 	}
-	data, err = s.sandbox.ReadFile(output.DiskPath)
+	// AR-27：claw（unrestricted）下 WriteFile 把文件写到 cwd 内，DiskPath 是 cwd 下绝对路径。
+	// 共享沙箱单例 projectRoot 为空会拒绝读取，导致下载返回 JSON 404（浏览器存成 ar-xxxxx.json）。
+	// 按所属 session 的 cwd 克隆沙箱再读；取不到 session/cwd 时回退共享沙箱（云端 basePath 内）。
+	reader := s.sandbox
+	if s.unrestricted && output.SessionID != "" {
+		if sess, serr := s.sessionRepo.GetByID(output.SessionID); serr == nil && sess != nil && sess.Cwd != "" {
+			reader = s.sandbox.WithProjectRoot(sess.Cwd)
+		}
+	}
+	data, err = reader.ReadFile(output.DiskPath)
 	if err != nil {
 		return nil, "", "", err
 	}

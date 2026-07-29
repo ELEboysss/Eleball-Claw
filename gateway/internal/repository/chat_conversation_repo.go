@@ -119,7 +119,7 @@ func (r *ChatConversationRepo) SaveMessage(msg *model.ChatMessage) error {
 		existing, err := r.GetMessageByClientID(msg.ClientMessageID)
 		if err == nil && existing != nil {
 			// 已存在则更新内容，避免多设备同步时重复消息
-			return r.db.Model(&model.ChatMessage{}).
+			if err := r.db.Model(&model.ChatMessage{}).
 				Where("id = ?", existing.ID).
 				Updates(map[string]interface{}{
 					"content":           msg.Content,
@@ -127,7 +127,14 @@ func (r *ChatConversationRepo) SaveMessage(msg *model.ChatMessage) error {
 					"tool_results":      msg.ToolResults,
 					"attachments":       msg.Attachments,
 					"created_at":        msg.CreatedAt,
-				}).Error
+				}).Error; err != nil {
+				return err
+			}
+			// AR-27：回写真实记录 ID，避免调用方拿到新生成的幻影 ID
+			// （导致对话分叉 ListMessagesUpTo 按 entry_id 找不到记录）。
+			msg.ID = existing.ID
+			msg.ConversationID = existing.ConversationID
+			return nil
 		}
 	}
 	return r.db.Create(msg).Error

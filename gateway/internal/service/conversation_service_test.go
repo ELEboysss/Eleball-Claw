@@ -271,3 +271,43 @@ func TestConversationService_ForkConversation(t *testing.T) {
 	_, err = svc.ForkConversation(ctx, "u2", conv.ID, "m2")
 	assert.Error(t, err)
 }
+
+// TestConversationService_SaveMessage_DedupWritesBackRealID AR-27：同 client_message_id 二次保存
+// 走去重更新分支，必须把真实记录 ID 回写到 msg，否则调用方拿到幻影 ID，分叉时按 entry_id
+// 找不到记录（「分叉点消息无效：record not found」）。
+func TestConversationService_SaveMessage_DedupWritesBackRealID(t *testing.T) {
+	svc := setupConversationService(t)
+	ctx := context.Background()
+	conv, err := svc.CreateConversation(ctx, "u1", CreateConversationReq{Title: "t"})
+	require.NoError(t, err)
+
+	// 首次保存：Create 路径，拿到真实 DB ID
+	first := &model.ChatMessage{Role: "assistant", Content: "v1", ClientMessageID: "agent_assistant_s1"}
+	_, err = svc.SaveMessage(ctx, conv.ID, "u1", first)
+	require.NoError(t, err)
+	require.NotEmpty(t, first.ID)
+	realID := first.ID
+
+	// 同 client_message_id 再存（模拟前端用相同 clientMessageId 覆盖更新）：走去重分支
+	second := &model.ChatMessage{Role: "assistant", Content: "v2", ClientMessageID: "agent_assistant_s1"}
+	_, err = svc.SaveMessage(ctx, conv.ID, "u1", second)
+	require.NoError(t, err)
+	// AR-27：去重更新后必须回写真实记录 ID，而非新生成的幻影 ID
+	assert.Equal(t, realID, second.ID, "去重保存后应回写真实记录 ID，而非幻影 ID")
+
+	// 内容应已更新为 v2，且仍只有一条记录
+	msgs, total, err := svc.ListMessages(ctx, conv.ID, "u1", 1, 10)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), total)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "v2", msgs[0].Content)
+	assert.Equal(t, realID, msgs[0].ID)
+
+	// 回归分叉：用回写后的 ID 作为分叉点应成功（修复前会 record not found）
+	forked, err := svc.ForkConversation(ctx, "u1", conv.ID, second.ID)
+	require.NoError(t, err)
+	flisted, _, err := svc.repo.ListMessages(forked.ID, 1, 50)
+	require.NoError(t, err)
+	require.Len(t, flisted, 1)
+	assert.Equal(t, "v2", flisted[0].Content)
+}

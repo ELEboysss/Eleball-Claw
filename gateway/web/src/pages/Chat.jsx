@@ -1699,8 +1699,12 @@ export default function Chat() {
                 onCwdChange={(newCwd) => {
                   setCwd(newCwd)
                   setSelectedFile(null)
-                  // AR-23：持久化工作目录到会话（worktree 切换）
+                  // AR-23/AR-27：持久化工作目录到会话（worktree 切换），并同步本地 conversation，
+                  // 避免恢复 effect（deps 含 availableSearchProviders）晚到时把 cwd 覆盖回旧值
                   if (currentConversation?.id) {
+                    updateConversations((prev) =>
+                      prev.map((c) => (c.id === currentConversation.id ? { ...c, cwd: newCwd } : c))
+                    )
                     conversationApi.update(currentConversation.id, { cwd: newCwd }).catch(() => {})
                   }
                 }}
@@ -1731,8 +1735,11 @@ export default function Chat() {
           setCwd(resolvedCwd)
           setSelectedFile(null)
           setFilePanelOpen(true)
-          // AR-23：持久化工作目录到会话，供切换回来时恢复 + 后续 execute 回填
+          // AR-23/AR-27：持久化工作目录到会话，供切换回来时恢复 + 后续 execute 回填；同步本地 conversation
           if (currentConversation?.id) {
+            updateConversations((prev) =>
+              prev.map((c) => (c.id === currentConversation.id ? { ...c, cwd: resolvedCwd } : c))
+            )
             conversationApi.update(currentConversation.id, { cwd: resolvedCwd }).catch(() => {})
           }
         }}

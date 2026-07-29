@@ -45,6 +45,15 @@ const maxBareJSONRetries = 2
 // 不直接执行裸 JSON 以防误判正文里的 JSON 数据/示例，引导 LLM 改用结构化 tool_calls 或内联标记。
 const bareJSONPrompt = "（系统提示）检测到你直接在正文输出裸 JSON 来调用工具（如 [{\"name\":\"...\",\"parameters\":{...}}]），此格式不会被直接执行（避免误判正文里的 JSON 数据/示例）。请改用以下任一方式调用工具：1. 结构化工具调用（function calling / tool_calls）；2. 内联标记格式：<|FunctionCallBegin|>[{\"name\":\"...\",\"parameters\":{...}}]<|FunctionCallEnd|>。工具名需精确匹配可用工具列表（区分大小写）。"
 
+// functionGetName 元工具名（AR-26）：走内嵌标记（不支持原生 function calling）的模型用它
+// 主动拉取当前 assistant 的工具列表+用法。不注册到 registry、不进 tools 参数，仅在 tool
+// 执行循环按 name 拦截，返回 RenderToolsAsText(tools) 作为 tool_result 注入对话上下文。
+const functionGetName = "FunctionGet"
+
+// maxFunctionGetCalls 单次执行内 FunctionGet 最多返回工具列表的次数（防模型反复拉取烧步数）。
+// 超过后返回「已在上文提供，勿重复请求」，不再塞工具列表。AR-26。
+const maxFunctionGetCalls = 2
+
 // ToolCallingLoop Function Calling 循环
 type ToolCallingLoop struct {
 	registry *ToolRegistry
@@ -143,6 +152,8 @@ func (l *ToolCallingLoop) RunWithRegistry(
 	malformedRetries := 0
 	// AR-25：裸 JSON 工具调用反馈 LLM 重试的累计次数
 	bareJSONRetries := 0
+	// AR-26：FunctionGet 元工具返回工具列表的累计次数（防反复拉取）
+	functionGetCalls := 0
 
 	for step := 0; step < maxIterations; step++ {
 		// AR-02：客户端取消（断连）时立即结束循环，保留已产出供前端展示
@@ -281,6 +292,38 @@ func (l *ToolCallingLoop) RunWithRegistry(
 
 		// 执行本轮返回的每个 tool_call
 		for _, tc := range resp.ToolCalls {
+			// AR-26：FunctionGet 元工具拦截。走内嵌标记的模型用它主动拉取工具列表，
+			// 不执行真实工具，返回当前 assistant 的工具能力（RenderToolsAsText）作为 tool_result。
+			if strings.EqualFold(tc.Function.Name, functionGetName) {
+				functionGetCalls++
+				var list string
+				if functionGetCalls <= maxFunctionGetCalls {
+					list = RenderToolsAsText(tools)
+				} else {
+					list = "工具列表已在之前的 FunctionGet 返回中提供，请查看上文消息，勿重复请求。"
+				}
+				record := ToolCallRecord{
+					Step:      callIndex,
+					Tool:      functionGetName,
+					Arguments: tc.Function.Arguments,
+					Output:    map[string]interface{}{"tool_list": list},
+				}
+				result.Records = append(result.Records, record)
+				if onToolCall != nil {
+					if err := onToolCall(record); err != nil {
+						return nil, err
+					}
+				}
+				callIndex++
+				result.Messages = append(result.Messages, llm.Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Content:    list,
+				})
+				toolCallCount++
+				continue
+			}
+
 			record := ToolCallRecord{
 				Step:      callIndex,
 				Tool:      tc.Function.Name,

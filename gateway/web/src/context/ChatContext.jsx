@@ -113,6 +113,8 @@ export function ChatProvider({ children }) {
             // 会话绑定的模型配置（model 身份），切换对话时据此恢复 currentProfileId
             model: conv.model || '',
             provider: conv.provider || '',
+            // AR-23/AR-27：会话持久化的工作目录（claw 本地）。重启后从后端恢复，避免 cwd 丢失
+            cwd: conv.cwd || '',
             createdAt: conv.created_at,
             updatedAt: conv.updated_at
           }

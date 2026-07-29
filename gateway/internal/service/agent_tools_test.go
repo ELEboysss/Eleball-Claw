@@ -405,6 +405,39 @@ func TestDefaultSearchProvider_NoConfig(t *testing.T) {
 	}
 }
 
+func TestRenderToolsAsText(t *testing.T) {
+	// AR-26：OpenAI schema -> Markdown 工具列表文本（供 FunctionGet 返回给走内嵌标记的模型）。
+	tools := []map[string]interface{}{
+		{"type": "function", "function": map[string]interface{}{
+			"name":        "Shell",
+			"description": "执行 shell 命令",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"command": map[string]interface{}{"type": "string"},
+				},
+			},
+		}},
+	}
+	text := RenderToolsAsText(tools)
+	if !strings.Contains(text, "Shell") {
+		t.Fatalf("应含工具名 Shell: %v", text)
+	}
+	if !strings.Contains(text, "执行 shell 命令") {
+		t.Fatalf("应含工具描述: %v", text)
+	}
+	if !strings.Contains(text, "FunctionCallBegin") {
+		t.Fatalf("应含调用方式说明: %v", text)
+	}
+	if !strings.Contains(text, "command") {
+		t.Fatalf("应含参数 schema: %v", text)
+	}
+	// 空列表
+	if got := RenderToolsAsText(nil); got != "（当前无可用工具）" {
+		t.Fatalf("空列表应返回提示，实际: %v", got)
+	}
+}
+
 var _ PlatformToolRunner = (*mockRunner)(nil)
 var _ SearchProvider = (*mockSearchProvider)(nil)
 
