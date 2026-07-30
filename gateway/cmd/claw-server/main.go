@@ -285,6 +285,11 @@ func main() {
 		logger.Warn("预置 SearchWeb 官方搜索秘技失败", zap.Error(err))
 	}
 
+	// 预置官方 Prompt 型秘技「秘技制造机」（免费、免 VIP；激活并绑定助手后注入造模块方法论）
+	if err := seed.SkillMakerSKU(agentRepo, logger); err != nil {
+		logger.Warn("预置秘技制造机失败", zap.Error(err))
+	}
+
 	// 启动模块后台健康探测（每 5 分钟一次）
 	moduleRegistry.Start()
 	defer moduleRegistry.Stop()
