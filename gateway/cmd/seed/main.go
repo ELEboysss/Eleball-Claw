@@ -94,13 +94,10 @@ func main() {
 	}
 
 	if *onlySKUs {
-		if err := seed.AgentReachSKUs(agentRepo, logger); err != nil {
-			logger.Fatal("预置 Agent-Reach SKU 失败", zap.Error(err))
+		if err := seed.SyncOfficialSKUs(agentRepo, "cloud", logger); err != nil {
+			logger.Fatal("同步官方 SKU 失败", zap.Error(err))
 		}
-		if err := seed.FirecrawlSKUs(agentRepo, logger); err != nil {
-			logger.Fatal("预置 Firecrawl SKU 失败", zap.Error(err))
-		}
-		fmt.Println("SKU 预置完成")
+		fmt.Println("官方 SKU 同步完成")
 		return
 	}
 

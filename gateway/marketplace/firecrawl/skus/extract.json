@@ -7,6 +7,7 @@
   "runtime_type": "remote",
   "category": "互联网",
   "level": 3,
+  "price_danwan": 100,
   "permissions": ["network"],
   "parameters": {
     "type": "object",
@@ -36,7 +37,7 @@
       "label": "Firecrawl API Key",
       "description": "用于调用 Firecrawl Cloud API，可从 https://firecrawl.dev 获取。",
       "placeholder": "fc-...",
-      "required": false,
+      "required": true,
       "scope": "module"
     }
   },

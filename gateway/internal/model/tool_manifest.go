@@ -49,7 +49,9 @@ type ToolAction struct {
 	Params map[string]string `json:"params,omitempty"`
 }
 
-// ToolPricing 工具定价元数据（展示用，实际价格仍走 AgentItem.PriceDanwan/PriceElegant）
+// ToolPricing 工具按次计费元数据（per_use/per_token/per_minute，展示用）。
+// 注意：与下面的 PriceDanwan/PriceElegant 不同——后者是 SKU 的一次性购买价（弹丸/优雅），
+// 是 AgentItem.PriceDanwan/PriceElegant 的来源（官方 SKU 从 manifest 文件读，开发者 SKU 从创建请求读）。
 type ToolPricing struct {
 	// Currency 默认计费币种：danwan / elegant
 	Currency string `json:"currency,omitempty"`
@@ -118,6 +120,11 @@ type ToolManifest struct {
 	Category string `json:"category,omitempty"`
 	// Level 秘技等级 1~6，与 AgentItem.Level 对齐
 	Level int `json:"level,omitempty"`
+	// PriceDanwan SKU 一次性购买价（弹丸）。官方 SKU 以 manifest 文件为准；
+	// 缺省 0 表示免费。与 AgentItem.PriceDanwan 对齐。
+	PriceDanwan int64 `json:"price_danwan,omitempty"`
+	// PriceElegant 优雅币购买价（可选，nil 表示不接受优雅币）。
+	PriceElegant *int64 `json:"price_elegant,omitempty"`
 	// Permissions 所需权限列表
 	Permissions []ToolPermission `json:"permissions,omitempty"`
 	// Parameters OpenAI function parameters schema

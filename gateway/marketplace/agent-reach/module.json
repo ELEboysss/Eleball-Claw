@@ -4,6 +4,7 @@
   "description": "网页阅读、搜索、视频字幕、GitHub、社交平台等",
   "url": "http://localhost:8094",
   "transport_type": "module",
+  "sku_scope": "cloud",
   "capabilities": [
     "web_read",
     "search",

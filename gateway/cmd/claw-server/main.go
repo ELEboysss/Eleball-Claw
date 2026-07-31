@@ -281,9 +281,9 @@ func main() {
 		logger.Warn("自动补齐内置模块失败", zap.Error(err))
 	}
 
-	// 预置本地 search-web 官方搜索 SKU（免费，百度千帆/必应两变体）
-	if err := seed.SearchWebSKUs(agentRepo, logger); err != nil {
-		logger.Warn("预置 SearchWeb 官方搜索秘技失败", zap.Error(err))
+	// 泛化同步本地官方 SKU（module.json sku_scope=claw，如 search-web 免费搜索两变体）
+	if err := seed.SyncOfficialSKUs(agentRepo, "claw", logger); err != nil {
+		logger.Warn("同步本地官方 SKU 失败", zap.Error(err))
 	}
 
 	// 预置官方 Prompt 型秘技「秘技制造机」（免费、免 VIP；激活并绑定助手后注入造模块方法论）

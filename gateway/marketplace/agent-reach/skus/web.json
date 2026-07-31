@@ -7,6 +7,7 @@
   "runtime_type": "remote",
   "category": "互联网",
   "level": 2,
+  "price_danwan": 0,
   "permissions": ["network"],
   "parameters": {
     "type": "object",

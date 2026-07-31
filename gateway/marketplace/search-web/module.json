@@ -4,6 +4,7 @@
   "description": "本地运行的网页搜索工具。",
   "url": "http://localhost:8091",
   "transport_type": "module",
+  "sku_scope": "claw",
   "capabilities": [
     "list_sources",
     "search",

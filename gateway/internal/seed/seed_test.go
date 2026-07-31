@@ -24,12 +24,13 @@ func setupSeedTestRepo(t *testing.T) *repository.AgentRepo {
 	return repository.NewAgentRepo(db)
 }
 
-// TestSearchWebSKUs 预置百度千帆/必应两条免费官方 SKU，manifest 含 credentials 声明，幂等重跑不产生重复
-func TestSearchWebSKUs(t *testing.T) {
+// TestSyncClawOfficialSKUs 泛化扫描本地官方 SKU（sku_scope=claw，即 search-web
+// 百度千帆/必应两条免费 SKU），manifest 含 credentials 声明，幂等重跑不产生重复。
+func TestSyncClawOfficialSKUs(t *testing.T) {
 	repo := setupSeedTestRepo(t)
 	logger := zap.NewNop()
 
-	require.NoError(t, SearchWebSKUs(repo, logger))
+	require.NoError(t, SyncOfficialSKUs(repo, "claw", logger))
 
 	// 百度千帆变体
 	baidu, err := repo.GetByID("search-web-baidu")
@@ -70,7 +71,7 @@ func TestSearchWebSKUs(t *testing.T) {
 	assert.True(t, mb.Credentials["bing_search_api_key"].Required)
 
 	// 幂等：重跑不产生重复、不报错
-	require.NoError(t, SearchWebSKUs(repo, logger))
+	require.NoError(t, SyncOfficialSKUs(repo, "claw", logger))
 	total, err := repo.Count()
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), total)
