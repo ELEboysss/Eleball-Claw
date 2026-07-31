@@ -315,9 +315,10 @@ type AgentItem struct {
 	Status        string  `json:"status"`
 	CreatedAt     int64   `json:"created_at"`
 	// 运行时字段：当前登录用户是否已激活该秘技
-	IsActive         bool  `json:"is_active"`
-	DriverRegistered bool  `json:"driver_registered"`
-	ModuleOnline     *bool `json:"module_online,omitempty"`
+	IsActive           bool  `json:"is_active"`
+	DriverRegistered   bool  `json:"driver_registered"`
+	ModuleOnline       *bool `json:"module_online,omitempty"`
+	CredentialComplete bool  `json:"credential_complete"`
 }
 
 // Manifest 解析 ManifestJSON 为 ToolManifest
@@ -600,13 +601,13 @@ func init() {
 		{ID: "agent-004", Name: "会议纪要整理", Description: "将会议录音或速记整理为正式会议纪要", Category: "办公", PriceDanwan: 0, AvgRating: 4.5, PurchaseCount: 876, FavoriteCount: 180, Status: "approved", Level: 1, CreatedAt: now},
 		{ID: "agent-005", Name: "SQL 优化大师", Description: "分析 SQL 查询语句，指出性能瓶颈并给出优化方案", Category: "编程", PriceDanwan: 150, AvgRating: 4.9, PurchaseCount: 2103, FavoriteCount: 560, Status: "approved", Level: 4, CreatedAt: now},
 		{ID: "agent-006", Name: "睡前故事创作", Description: "根据指定主题或角色，创作温暖治愈的睡前故事", Category: "创意", PriceDanwan: 0, AvgRating: 4.6, PurchaseCount: 654, FavoriteCount: 120, Status: "approved", Level: 1, CreatedAt: now},
-		{ID: "agent-reach-web", Name: "全网洞察（基础版）", Description: "基于 Agent-Reach 的网页阅读与全网语义搜索，零配置即用", Category: "互联网", PriceDanwan: 0, AvgRating: 4.7, PurchaseCount: 320, FavoriteCount: 80, Status: "approved", Level: 2, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.agent_reach.web","name":"全网洞察","description":"基于 Agent-Reach 的网页阅读与全网语义搜索，零配置即用。","driver":"agent_reach","runtime_type":"remote","category":"互联网","level":2,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["web_read","search"],"description":"模块 action"},"params":{"type":"object","description":"Agent-Reach 参数","properties":{"query":{"type":"string","description":"URL 或搜索关键词"},"limit":{"type":"integer","description":"返回条数","default":5}}}},"required":["action"]},"actions":[{"name":"web_read","description":"读取任意网页"},{"name":"search","description":"全网语义搜索"}],"timeout_seconds":60}`},
-		{ID: "agent-reach-video", Name: "视频解析器", Description: "基于 Agent-Reach 的 YouTube/B站 字幕提取与搜索", Category: "互联网", PriceDanwan: 200, AvgRating: 4.8, PurchaseCount: 156, FavoriteCount: 45, Status: "approved", Level: 3, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.agent_reach.video","name":"视频解析器","description":"基于 Agent-Reach 的 YouTube/B站 字幕提取与搜索。","driver":"agent_reach","runtime_type":"remote","category":"互联网","level":3,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["youtube_subtitles","bilibili_search"],"description":"模块 action"},"params":{"type":"object","description":"Agent-Reach 参数","properties":{"query":{"type":"string","description":"视频 URL 或搜索关键词"},"limit":{"type":"integer","description":"返回条数","default":5}}}},"required":["action"]},"actions":[{"name":"youtube_subtitles","description":"提取 YouTube 字幕"},{"name":"bilibili_search","description":"B站搜索"}],"credentials":{"youtube_cookie":{"type":"cookie","label":"YouTube Cookie","description":"用于提取 YouTube 字幕","placeholder":"粘贴 YouTube Cookie","required":false},"bilibili_cookie":{"type":"cookie","label":"B站 Cookie","description":"用于 B站搜索","placeholder":"粘贴 B站 Cookie","required":false}},"timeout_seconds":120}`},
+		{ID: "agent-reach-web", Name: "全网洞察（基础版）", Description: "基于 Agent-Reach 的网页阅读与全网语义搜索，零配置即用", Category: "互联网", PriceDanwan: 0, AvgRating: 4.7, PurchaseCount: 320, FavoriteCount: 80, Status: "approved", Level: 2, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.agent_reach.web","name":"全网洞察","description":"基于 Agent-Reach 的网页阅读与全网语义搜索，零配置即用。","driver":"agent_reach","runtime_type":"remote","category":"互联网","level":2,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["web_read","search"],"description":"模块 action"},"params":{"type":"object","description":"Agent-Reach 参数","properties":{"query":{"type":"string","description":"URL 或搜索关键词"},"limit":{"type":"integer","description":"返回条数","default":5}}}},"required":["action"]},"actions":[{"name":"web_read","description":"读取任意网页"},{"name":"search","description":"全网语义搜索"}],"credentials":{"exa_api_key":{"type":"api_key","label":"Exa API Key","description":"全网语义搜索依赖 Exa.ai","placeholder":"exa-xxxxxxxx","required":true,"scope":"module"}},"timeout_seconds":60}`},
+		{ID: "agent-reach-video", Name: "视频解析器", Description: "基于 Agent-Reach 的 YouTube/B站 字幕提取与搜索", Category: "互联网", PriceDanwan: 200, AvgRating: 4.8, PurchaseCount: 156, FavoriteCount: 45, Status: "approved", Level: 3, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.agent_reach.video","name":"视频解析器","description":"基于 Agent-Reach 的 YouTube/B站 字幕提取与搜索。","driver":"agent_reach","runtime_type":"remote","category":"互联网","level":3,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["youtube_subtitles","bilibili_search"],"description":"模块 action"},"params":{"type":"object","description":"Agent-Reach 参数","properties":{"query":{"type":"string","description":"视频 URL 或搜索关键词"},"limit":{"type":"integer","description":"返回条数","default":5}}}},"required":["action"]},"actions":[{"name":"youtube_subtitles","description":"提取 YouTube 字幕"},{"name":"bilibili_search","description":"B站搜索"}],"credentials":{"youtube_cookie":{"type":"cookie","label":"YouTube Cookie","description":"用于提取 YouTube 字幕","placeholder":"粘贴 YouTube Cookie","required":false},"bilibili_cookie":{"type":"cookie","label":"B站 Cookie","description":"用于 B站搜索","placeholder":"粘贴 B站 Cookie","required":false,"scope":"module"}},"timeout_seconds":120}`},
 		{ID: "agent-reach-github", Name: "开发者雷达", Description: "基于 Agent-Reach 的 GitHub 仓库查看与代码搜索", Category: "开发", PriceDanwan: 80, AvgRating: 4.5, PurchaseCount: 210, FavoriteCount: 60, Status: "approved", Level: 2, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.agent_reach.github","name":"开发者雷达","description":"基于 Agent-Reach 的 GitHub 仓库查看与代码搜索。","driver":"agent_reach","runtime_type":"remote","category":"开发","level":2,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["github_repo","github_search"],"description":"模块 action"},"params":{"type":"object","description":"Agent-Reach 参数","properties":{"query":{"type":"string","description":"仓库名或搜索关键词"},"limit":{"type":"integer","description":"返回条数","default":5}}}},"required":["action"]},"actions":[{"name":"github_repo","description":"查看 GitHub 仓库"},{"name":"github_search","description":"搜索 GitHub 仓库"}],"credentials":{"github_token":{"type":"api_key","label":"GitHub Token","description":"可选，用于提高 GitHub API 速率限额或访问私有仓库","placeholder":"ghp_...","required":false}},"timeout_seconds":60}`},
-		{ID: "agent-reach-social", Name: "社媒雷达", Description: "基于 Agent-Reach 的社媒内容搜索与阅读，支持 Twitter、小红书、Reddit、B站", Category: "互联网", PriceDanwan: 150, AvgRating: 4.6, PurchaseCount: 98, FavoriteCount: 30, Status: "approved", Level: 3, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.agent_reach.social","name":"社媒雷达","description":"基于 Agent-Reach 的社媒内容搜索与阅读，支持 Twitter、小红书、Reddit、B站。","driver":"agent_reach","runtime_type":"remote","category":"互联网","level":3,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["social_search","social_read"],"description":"模块 action"},"params":{"type":"object","description":"Agent-Reach 参数","properties":{"social_platform":{"type":"string","enum":["twitter","xiaohongshu","reddit","bilibili"],"description":"社交平台"},"query":{"type":"string","description":"搜索关键词或帖子链接"},"limit":{"type":"integer","description":"返回条数","default":5}}}},"required":["action"]},"actions":[{"name":"social_search","description":"搜索社媒内容"},{"name":"social_read","description":"读取社媒帖子详情"}],"credentials":{"twitter_cookie":{"type":"cookie","label":"Twitter Cookie","description":"用于 Twitter 搜索/阅读的浏览器登录态 Cookie","placeholder":"粘贴 Twitter Cookie","required":false},"xiaohongshu_cookie":{"type":"cookie","label":"小红书 Cookie","description":"用于小红书搜索/阅读的浏览器登录态 Cookie","placeholder":"粘贴小红书 Cookie","required":false}},"timeout_seconds":120}`},
-		{ID: "firecrawl-scrape", Name: "Firecrawl 网页抓取", Description: "将任意网页转换为干净 Markdown，返回标题、URL、描述等元数据", Category: "互联网", PriceDanwan: 0, AvgRating: 4.7, PurchaseCount: 0, FavoriteCount: 0, Status: "approved", Level: 2, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.firecrawl.scrape","name":"Firecrawl 网页抓取","description":"将任意网页转换为干净 Markdown，返回标题、URL、描述等元数据。","driver":"firecrawl","runtime_type":"remote","category":"互联网","level":2,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["scrape"],"description":"抓取动作"},"params":{"type":"object","description":"Firecrawl scrape 参数，如 {url: \"https://example.com\"}"}},"required":["action"]},"actions":[{"name":"scrape","description":"抓取单个网页并返回 Markdown / 元数据"}],"timeout_seconds":120}`},
-		{ID: "firecrawl-crawl", Name: "Firecrawl 网站爬虫", Description: "对指定网站启动批量爬取任务，返回任务 ID", Category: "互联网", PriceDanwan: 100, AvgRating: 4.6, PurchaseCount: 0, FavoriteCount: 0, Status: "approved", Level: 3, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.firecrawl.crawl","name":"Firecrawl 批量爬取","description":"对指定网站启动批量爬取任务，返回任务 ID。","driver":"firecrawl","runtime_type":"remote","category":"互联网","level":3,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["crawl"],"description":"爬取动作"},"params":{"type":"object","description":"Firecrawl crawl 参数，如 {url: \"https://example.com\", limit: 10}"}},"required":["action"]},"actions":[{"name":"crawl","description":"批量爬取网站，返回任务 ID"}],"timeout_seconds":120}`},
-		{ID: "firecrawl-extract", Name: "Firecrawl 结构化提取", Description: "按 JSON Schema 从网页中提取结构化数据", Category: "互联网", PriceDanwan: 100, AvgRating: 4.8, PurchaseCount: 0, FavoriteCount: 0, Status: "approved", Level: 3, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.firecrawl.extract","name":"Firecrawl 结构化提取","description":"按 JSON Schema 从网页中提取结构化数据。","driver":"firecrawl","runtime_type":"remote","category":"互联网","level":3,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["extract"],"description":"提取动作"},"params":{"type":"object","description":"Firecrawl extract 参数，如 {urls: [...], schema: {...}}"}},"required":["action"]},"actions":[{"name":"extract","description":"按 JSON Schema 提取结构化数据"}],"timeout_seconds":120}`},
+		{ID: "agent-reach-social", Name: "社媒雷达", Description: "基于 Agent-Reach 的社媒内容搜索与阅读，支持 Twitter、小红书、Reddit、B站", Category: "互联网", PriceDanwan: 150, AvgRating: 4.6, PurchaseCount: 98, FavoriteCount: 30, Status: "approved", Level: 3, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.agent_reach.social","name":"社媒雷达","description":"基于 Agent-Reach 的社媒内容搜索与阅读，支持 Twitter、小红书、Reddit、B站。","driver":"agent_reach","runtime_type":"remote","category":"互联网","level":3,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["social_search","social_read"],"description":"模块 action"},"params":{"type":"object","description":"Agent-Reach 参数","properties":{"social_platform":{"type":"string","enum":["twitter","xiaohongshu","reddit","bilibili"],"description":"社交平台"},"query":{"type":"string","description":"搜索关键词或帖子链接"},"limit":{"type":"integer","description":"返回条数","default":5}}}},"required":["action"]},"actions":[{"name":"social_search","description":"搜索社媒内容"},{"name":"social_read","description":"读取社媒帖子详情"}],"credentials":{"twitter_cookie":{"type":"cookie","label":"Twitter Cookie","description":"用于 Twitter 搜索/阅读的浏览器登录态 Cookie","placeholder":"粘贴 Twitter Cookie","required":false},"xiaohongshu_cookie":{"type":"cookie","label":"小红书 Cookie","description":"用于小红书搜索/阅读的浏览器登录态 Cookie","placeholder":"粘贴小红书 Cookie","required":false},"bilibili_cookie":{"type":"cookie","label":"B站 Cookie","description":"用于 B站搜索/阅读的 SESSDATA 或完整 Cookie Header String。与「视频解析器」共享此凭证（模块级）。","placeholder":"粘贴 B站 Cookie","required":false,"scope":"module"}},"timeout_seconds":120}`},
+		{ID: "firecrawl-scrape", Name: "Firecrawl 网页抓取", Description: "将任意网页转换为干净 Markdown，返回标题、URL、描述等元数据", Category: "互联网", PriceDanwan: 0, AvgRating: 4.7, PurchaseCount: 0, FavoriteCount: 0, Status: "approved", Level: 2, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.firecrawl.scrape","name":"Firecrawl 网页抓取","description":"将任意网页转换为干净 Markdown，返回标题、URL、描述等元数据。","driver":"firecrawl","runtime_type":"remote","category":"互联网","level":2,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["scrape"],"description":"抓取动作"},"params":{"type":"object","description":"Firecrawl scrape 参数，如 {url: \"https://example.com\"}"}},"required":["action"]},"actions":[{"name":"scrape","description":"抓取单个网页并返回 Markdown / 元数据"}],"credentials":{"firecrawl_api_key":{"type":"api_key","label":"Firecrawl API Key","description":"用于调用 Firecrawl Cloud API","placeholder":"fc-...","required":false,"scope":"module"}},"timeout_seconds":120}`},
+		{ID: "firecrawl-crawl", Name: "Firecrawl 网站爬虫", Description: "对指定网站启动批量爬取任务，返回任务 ID", Category: "互联网", PriceDanwan: 100, AvgRating: 4.6, PurchaseCount: 0, FavoriteCount: 0, Status: "approved", Level: 3, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.firecrawl.crawl","name":"Firecrawl 批量爬取","description":"对指定网站启动批量爬取任务，返回任务 ID。","driver":"firecrawl","runtime_type":"remote","category":"互联网","level":3,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["crawl"],"description":"爬取动作"},"params":{"type":"object","description":"Firecrawl crawl 参数，如 {url: \"https://example.com\", limit: 10}"}},"required":["action"]},"actions":[{"name":"crawl","description":"批量爬取网站，返回任务 ID"}],"credentials":{"firecrawl_api_key":{"type":"api_key","label":"Firecrawl API Key","description":"用于调用 Firecrawl Cloud API","placeholder":"fc-...","required":false,"scope":"module"}},"timeout_seconds":120}`},
+		{ID: "firecrawl-extract", Name: "Firecrawl 结构化提取", Description: "按 JSON Schema 从网页中提取结构化数据", Category: "互联网", PriceDanwan: 100, AvgRating: 4.8, PurchaseCount: 0, FavoriteCount: 0, Status: "approved", Level: 3, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.firecrawl.extract","name":"Firecrawl 结构化提取","description":"按 JSON Schema 从网页中提取结构化数据。","driver":"firecrawl","runtime_type":"remote","category":"互联网","level":3,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["extract"],"description":"提取动作"},"params":{"type":"object","description":"Firecrawl extract 参数，如 {urls: [...], schema: {...}}"}},"required":["action"]},"actions":[{"name":"extract","description":"按 JSON Schema 提取结构化数据"}],"credentials":{"firecrawl_api_key":{"type":"api_key","label":"Firecrawl API Key","description":"用于调用 Firecrawl Cloud API","placeholder":"fc-...","required":false,"scope":"module"}},"timeout_seconds":120}`},
 	}
 	for _, a := range mockAgents {
 		agents = append(agents, a)
@@ -2022,6 +2023,7 @@ func listAgentsHandler(w http.ResponseWriter, r *http.Request) {
 		cp := *a
 		cp.DriverRegistered = e2eDriverRegisteredFromManifest(a.ManifestJSON)
 		cp.ModuleOnline = e2eModuleOnlinePtrFromManifest(a.ManifestJSON)
+		cp.CredentialComplete = e2eCredentialComplete(uid, a)
 		if uid != "" && purchases[uid] != nil && purchases[uid][a.ID] {
 			cp.IsActive = true
 		}
@@ -2362,16 +2364,22 @@ func agentCredentialsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	manifest, _ := item.Manifest()
-	key := uid + ":" + agentID
 
 	switch r.Method {
 	case http.MethodGet:
-		mu.RLock()
 		values := make(map[string]string)
-		for k, v := range e2eCredentials[key] {
-			values[k] = v
+		if manifest != nil {
+			mu.RLock()
+			for k, def := range manifest.Credentials {
+				bucket := e2eCredentialBucket(uid, def, manifest, agentID)
+				if stored := e2eCredentials[bucket]; stored != nil {
+					if v := stored[k]; v != "" {
+						values[k] = v
+					}
+				}
+			}
+			mu.RUnlock()
 		}
-		mu.RUnlock()
 		respondSuccess(w, map[string]interface{}{
 			"agent_id":    agentID,
 			"credentials": manifest.Credentials,
@@ -2386,15 +2394,20 @@ func agentCredentialsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		mu.Lock()
-		if e2eCredentials[key] == nil {
-			e2eCredentials[key] = make(map[string]string)
-		}
 		for k, v := range req.Values {
+			var def model.CredentialDef
+			if manifest != nil {
+				def = manifest.Credentials[k]
+			}
+			bucket := e2eCredentialBucket(uid, def, manifest, agentID)
+			if e2eCredentials[bucket] == nil {
+				e2eCredentials[bucket] = make(map[string]string)
+			}
 			if v == "" {
-				delete(e2eCredentials[key], k)
+				delete(e2eCredentials[bucket], k)
 				continue
 			}
-			e2eCredentials[key][k] = v
+			e2eCredentials[bucket][k] = v
 		}
 		mu.Unlock()
 		respondSuccess(w, nil)
@@ -5362,6 +5375,38 @@ func e2eModuleOnlineFromManifest(manifestJSON string) bool {
 	}
 	m := e2eModules[moduleID]
 	return m != nil && m.Online
+}
+
+// e2eCredentialBucket 决定 e2e 凭证存储桶：scope=module 存 uid:module:<driver>（同 driver 共享），否则 uid:<agentID>。
+func e2eCredentialBucket(uid string, def model.CredentialDef, manifest *model.ToolManifest, agentID string) string {
+	if def.Scope == model.CredentialScopeModule && manifest != nil && manifest.Driver != "" {
+		return uid + ":module:" + string(manifest.Driver)
+	}
+	return uid + ":" + agentID
+}
+
+// e2eCredentialComplete 判断 SKU 声明的必填凭证是否已配齐（按 scope 分桶校验）
+func e2eCredentialComplete(uid string, a *AgentItem) bool {
+	if uid == "" {
+		return true
+	}
+	manifest, err := a.Manifest()
+	if err != nil || manifest == nil || len(manifest.Credentials) == 0 {
+		return true
+	}
+	for k, def := range manifest.Credentials {
+		if !def.Required {
+			continue
+		}
+		bucket := e2eCredentialBucket(uid, def, manifest, a.ID)
+		mu.RLock()
+		stored := e2eCredentials[bucket]
+		mu.RUnlock()
+		if stored == nil || stored[k] == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // e2eDriverRegisteredFromManifest 判断 SKU 声明的驱动别名是否已注册

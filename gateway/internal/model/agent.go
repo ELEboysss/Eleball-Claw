@@ -67,8 +67,9 @@ type AgentItem struct {
 	// 以下字段不在数据库中，由列表接口根据当前用户动态填充
 	IsActive         bool  `gorm:"-" json:"is_active"`
 	ActiveCount      int64 `gorm:"-" json:"active_count"`
-	DriverRegistered bool  `gorm:"-" json:"driver_registered"`   // 是否已注册对应驱动别名（仅对非内置驱动有效）
-	ModuleOnline     *bool `gorm:"-" json:"module_online,omitempty"` // nil 表示无模块依赖，false 表示模块离线/未注册，true 表示在线
+	DriverRegistered   bool  `gorm:"-" json:"driver_registered"`   // 是否已注册对应驱动别名（仅对非内置驱动有效）
+	CredentialComplete bool  `gorm:"-" json:"credential_complete"` // 当前用户是否已配齐该 SKU 声明的必填凭证（缺则不可激活）
+	ModuleOnline       *bool `gorm:"-" json:"module_online,omitempty"` // nil 表示无模块依赖，false 表示模块离线/未注册，true 表示在线
 }
 
 // Manifest 解析 ManifestJSON 为 ToolManifest

@@ -21,8 +21,9 @@ type AgentMarketService struct {
 	moduleRegistry  *ModuleRegistry
 	moduleService   *ModuleService
 	moduleRepo      *repository.ModuleRepo
-	db              *gorm.DB
-	agentToolLoader *AgentToolLoader
+	db                     *gorm.DB
+	agentToolLoader        *AgentToolLoader
+	agentCredentialService *AgentCredentialService
 	// localFreeOnly=true 时仅允许免费 SKU 本地购买（claw：付费秘技统一引导到云端 eleball.cn 购买）。
 	// 云端 cmd/server 不设置，保持原有余额扣费购买行为。
 	localFreeOnly bool
@@ -57,6 +58,11 @@ func (s *AgentMarketService) SetModuleService(svc *ModuleService) {
 // SetModuleRepo 设置模块仓库（claw 用：判定云端秘技 provenance）。
 func (s *AgentMarketService) SetModuleRepo(repo *repository.ModuleRepo) {
 	s.moduleRepo = repo
+}
+
+// SetAgentCredentialService 设置凭证服务，用于列表展示「凭证是否配齐」与激活门控。
+func (s *AgentMarketService) SetAgentCredentialService(svc *AgentCredentialService) {
+	s.agentCredentialService = svc
 }
 
 // IsCloudPurchasedAgent 判定某秘技是否为云端安装来源（provenance）。
@@ -275,6 +281,7 @@ func (s *AgentMarketService) enrichAgents(userID string, items []*model.AgentIte
 		items[i].IsActive = isActive
 		items[i].DriverRegistered = s.checkDriverRegistered(item)
 		items[i].ModuleOnline = s.checkModuleOnline(item)
+		items[i].CredentialComplete = s.checkCredentialComplete(userID, item)
 
 		// 动态评分：收藏率横向排名，最低 1 最高 5
 		var ratio float64
@@ -317,6 +324,29 @@ func (s *AgentMarketService) enrichAgents(userID string, items []*model.AgentIte
 	})
 
 	return items
+}
+
+// checkCredentialComplete 校验当前用户是否已配齐该 SKU 声明的必填凭证。
+// 无凭证服务 / 未登录 / 无 manifest / 无必填凭证时返回 true（不阻断展示与激活）。
+func (s *AgentMarketService) checkCredentialComplete(userID string, item *model.AgentItem) bool {
+	if s.agentCredentialService == nil || userID == "" {
+		return true
+	}
+	manifest, err := item.Manifest()
+	if err != nil || manifest == nil || len(manifest.Credentials) == 0 {
+		return true
+	}
+	hasRequired := false
+	for _, def := range manifest.Credentials {
+		if def.Required {
+			hasRequired = true
+			break
+		}
+	}
+	if !hasRequired {
+		return true
+	}
+	return s.agentCredentialService.ValidateRequired(userID, item.ID, manifest.Credentials) == nil
 }
 
 // ====== 购买 ======
@@ -478,6 +508,13 @@ func (s *AgentMarketService) ToggleAgentActive(userID, agentID string) (bool, er
 	// 查询当前状态
 	active, _ := s.agentRepo.IsToolActive(userID, agentID)
 	newActive := !active
+
+	// 激活（非取消）时校验必填凭证是否配齐：缺则拒绝激活，提示用户先配置凭证
+	if newActive && s.agentCredentialService != nil && manifest != nil && len(manifest.Credentials) > 0 {
+		if err := s.agentCredentialService.ValidateRequired(userID, agentID, manifest.Credentials); err != nil {
+			return false, fmt.Errorf("配置凭证不全，无法激活：%w", err)
+		}
+	}
 
 	if err := s.agentRepo.SetToolActive(userID, agentID, toolName, newActive); err != nil {
 		return false, err

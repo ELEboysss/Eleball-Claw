@@ -75,7 +75,7 @@ func NewAgentService(
 	if maxSteps <= 0 {
 		maxSteps = 500
 	}
-	return &AgentService{
+	svc := &AgentService{
 		conversationSvc:      conversationSvc,
 		sessionRepo:          sessionRepo,
 		userRepo:             userRepo,
@@ -92,6 +92,8 @@ func NewAgentService(
 		maxSteps:             maxSteps,
 		logger:               logger,
 	}
+	svc.toolLoop.SetLogger(logger)
+	return svc
 }
 
 // SetMaxRetries 设置 Agent 工具循环上游可重试错误的最大尝试次数（对应 llm.max_retries 配置）
