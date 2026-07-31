@@ -99,6 +99,7 @@ func main() {
 		logger, _ = zap.NewDevelopment()
 	}
 	defer logger.Sync()
+	service.SetCloudProxyLogger(logger)
 
 	logger.Info("Eleball-claw 本地网关启动",
 		zap.String("git_sha", getGitSHA()),
@@ -358,6 +359,7 @@ func main() {
 	agentService.SetAgentToolLoader(agentToolLoader)
 	agentService.SetModuleService(moduleService)
 	// claw 云端秘技 provenance 判定（激活云端来源秘技需 VIP1+）
+	agentService.SetAgentCredentialService(agentCredentialService)
 	agentService.SetModuleRepo(moduleRepo)
 	// 助手服务（已激活秘技的命名组合）；Agent 执行按请求/会话绑定的助手过滤动态工具
 	assistantService := service.NewAssistantService(db, assistantRepo, agentRepo)

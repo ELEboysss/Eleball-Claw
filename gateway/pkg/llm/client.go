@@ -40,6 +40,7 @@ type Message struct {
 
 // ToolCall 模型生成的工具调用
 type ToolCall struct {
+	Index    int              `json:"index,omitempty"` // 流式增量标识（OpenAI 流式协议），非流式响应不返回
 	ID       string           `json:"id"`
 	Type     string           `json:"type"`
 	Function ToolCallFunction `json:"function"`
@@ -49,6 +50,38 @@ type ToolCall struct {
 type ToolCallFunction struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
+}
+
+// MergeToolCalls 将流式增量 tool_calls 合并到累加器（按 Index 对齐槽位）。
+// OpenAI 流式协议：首个分片携带 index/id/type/function.name，后续分片仅携带 function.arguments 增量片段，
+// 需按 index 累加拼接。非流式场景 acc 可为 nil。
+func MergeToolCalls(acc []ToolCall, delta []ToolCall) []ToolCall {
+	for _, d := range delta {
+		idx := -1
+		for i := range acc {
+			if acc[i].Index == d.Index {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			acc = append(acc, d)
+			continue
+		}
+		if d.ID != "" {
+			acc[idx].ID = d.ID
+		}
+		if d.Type != "" {
+			acc[idx].Type = d.Type
+		}
+		if d.Function.Name != "" {
+			acc[idx].Function.Name = d.Function.Name
+		}
+		if d.Function.Arguments != "" {
+			acc[idx].Function.Arguments += d.Function.Arguments
+		}
+	}
+	return acc
 }
 
 // StreamOptions 流式选项

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/eleball/gateway/pkg/llm"
 )
 
@@ -63,6 +65,13 @@ type ToolCallingLoop struct {
 	// tokenBudget 单次执行 token 预算上限（0 表示不限制，AR-03）。
 	// 循环内每轮累计 usage 后校验，超限强制进入最终回答，防止单次执行耗尽用户余额。
 	tokenBudget int
+	// logger 调试日志（内联工具调用解析路径诊断）；nil 时静默
+	logger *zap.Logger
+}
+
+// SetLogger 设置调试日志（用于诊断内联工具调用解析路径）。临时排查用，可后续移除。
+func (l *ToolCallingLoop) SetLogger(logger *zap.Logger) {
+	l.logger = logger
 }
 
 // NewToolCallingLoop 创建循环控制器
@@ -210,11 +219,33 @@ func (l *ToolCallingLoop) RunWithRegistry(
 		// tool_calls 并剥离标记，否则标记会透传给用户（表现为「调用了却没执行」）：
 		// (1) <|FunctionCallBegin|>...<|FunctionCallEnd|>（MiMo 系列）
 		// (2) [ToolName]{json}[/ToolName] 方括号标签（中小厂商 / BYOK 弱模型，AR-20）
+		if l.logger != nil {
+			head := resp.Delta
+			if len(head) > 300 {
+				head = head[:300]
+			}
+			l.logger.Debug("[inline-parse] 收到上游响应",
+				zap.Int("tool_calls", len(resp.ToolCalls)),
+				zap.Int("delta_len", len(resp.Delta)),
+				zap.String("delta_head", head),
+				zap.Int("reasoning_len", len(resp.ReasoningContent)),
+				zap.String("finish_reason", resp.FinishReason),
+			)
+		}
 		if len(resp.ToolCalls) == 0 {
 			if calls, cleaned := parseInlineFunctionCalls(resp.Delta); len(calls) > 0 {
+				if l.logger != nil {
+					l.logger.Debug("[inline-parse] 内联标记解析成功",
+						zap.Int("calls", len(calls)),
+						zap.Int("cleaned_len", len(cleaned)),
+					)
+				}
 				resp.ToolCalls = calls
 				resp.Delta = cleaned
 			} else {
+				if l.logger != nil {
+					l.logger.Debug("[inline-parse] 内联未命中，尝试 bracket/bareJSON")
+				}
 				bc, bcCleaned, malformed := parseBracketToolCalls(resp.Delta)
 				if malformed {
 					// 形似 [tool] 标签但格式错误（非 JSON 体等）：不当最终回答透传，

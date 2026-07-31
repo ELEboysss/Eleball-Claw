@@ -192,12 +192,14 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, req ChatRequest) (<-chan 
 
 			var delta string
 			var reasoning string
+			var toolCalls []ToolCall
 			if len(streamResp.Choices) > 0 {
 				choice := streamResp.Choices[0]
 				delta = contentToString(choice.Delta.Content)
 				reasoning = contentToString(choice.Delta.ReasoningContent)
+				toolCalls = choice.Delta.ToolCalls
 				finishReason = choice.FinishReason
-				if delta == "" && reasoning == "" {
+				if delta == "" && reasoning == "" && len(toolCalls) == 0 {
 					emptyChoiceCount++
 				}
 			} else {
@@ -210,6 +212,7 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, req ChatRequest) (<-chan 
 				ReasoningContent: reasoning,
 				FinishReason:     finishReason,
 				Usage:            normalizeUsage(streamResp.Usage, streamResp.InputTokens, streamResp.OutputTokens),
+				ToolCalls:        toolCalls,
 			}
 			if chunk.Usage != nil {
 				usageEmitted = true

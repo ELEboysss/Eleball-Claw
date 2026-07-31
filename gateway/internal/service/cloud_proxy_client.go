@@ -4,8 +4,18 @@ import (
 	"context"
 	"strings"
 
+	"go.uber.org/zap"
+
 	"github.com/eleball/gateway/pkg/llm"
 )
+
+// cloudProxyLogger 临时调试日志（cloudEnvelopeCompatClient 聚合诊断）。临时排查用，可后续移除。
+var cloudProxyLogger *zap.Logger
+
+// SetCloudProxyLogger 设置 cloudEnvelopeCompatClient 调试日志。
+func SetCloudProxyLogger(l *zap.Logger) {
+	cloudProxyLogger = l
+}
 
 // cloudEnvelopeCompatClient 云端网关信封兼容包装。
 //
@@ -48,7 +58,7 @@ func (c *cloudEnvelopeCompatClient) Chat(ctx context.Context, req llm.ChatReques
 			usage = chunk.Usage
 		}
 		if len(chunk.ToolCalls) > 0 {
-			toolCalls = chunk.ToolCalls
+			toolCalls = llm.MergeToolCalls(toolCalls, chunk.ToolCalls)
 		}
 		if chunk.FinishReason != "" {
 			finishReason = chunk.FinishReason
@@ -56,6 +66,19 @@ func (c *cloudEnvelopeCompatClient) Chat(ctx context.Context, req llm.ChatReques
 	}
 	if usage == nil {
 		usage = llm.EstimateUsageFromMessages(req.Messages, content.String())
+	}
+	if cloudProxyLogger != nil {
+		head := content.String()
+		if len(head) > 300 {
+			head = head[:300]
+		}
+		cloudProxyLogger.Debug("[cloud-proxy] Chat 聚合完成",
+			zap.Int("delta_len", content.Len()),
+			zap.String("delta_head", head),
+			zap.Int("reasoning_len", reasoning.Len()),
+			zap.Int("tool_calls", len(toolCalls)),
+			zap.String("finish_reason", finishReason),
+		)
 	}
 	return &llm.ChatChunk{
 		Delta:            content.String(),

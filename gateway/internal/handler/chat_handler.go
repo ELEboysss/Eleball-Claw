@@ -93,9 +93,7 @@ func (h *ChatHandler) ChatCompletion(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"code":    0,
-		"message": "success",
-		"data":    chunk,
-	})
+	// 非流式响应：标准 OpenAI 兼容结构（choices[0].message），替代旧 {code,message,data} 私有信封，
+	// 便于标准 OpenAI 客户端直连 /v1/chat/completions
+	c.JSON(http.StatusOK, service.ToOpenAICompletion(*chunk, originalModel))
 }
