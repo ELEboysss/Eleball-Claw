@@ -97,7 +97,8 @@ marketplace/{module-id}/
       "label": "{标签}",
       "description": "{获取入口说明}",
       "placeholder": "{占位文案}",
-      "required": true
+      "required": true,
+      "scope": "module | sku"
     }
   },
   "timeout_seconds": 30,
@@ -108,7 +109,9 @@ marketplace/{module-id}/
 要点（参照 `search-web/skus/baidu.json`）：
 
 - `driver` 填**已注册驱动别名**，不要写 `module_id`（`metadata.module` 仅兼容保留）。
-- 需用户预配 Cookie/API Key/Token 时在 `credentials` 声明，网关按 `(user_id, agent_id)` 注入。
+- 需用户预配 Cookie/API Key/Token 时在 `credentials` 声明，用 `scope` 控制存储粒度：
+  - `scope: "module"`：同模块多 SKU 共用一份（存模块桶 `module:<driver>`），用户配一次即可。**同模块 ≥2 个 SKU 会用到同一凭证值时必标**--如模块统一上游 API Key（firecrawl 的 scrape/crawl/extract 共用 `firecrawl_api_key`）、多 SKU 共用平台 Cookie（agent-reach 的 `bilibili_cookie` 在「视频解析器」与「社媒雷达」间共享）。
+  - `scope: "sku"`（默认，可省略）：仅本 SKU 使用（存 SKU 桶）。
 - 多 action 必须合并时，`parameters` 保留 `action` 字段，业务参数与之平级。
 - 字段全集与校验见 `specs/tool-manifest-schema.json`。
 
@@ -126,6 +129,7 @@ marketplace/{module-id}/
 - ❌ 写死上游地址/搜索源到代码（用 env + `params` 传入）。
 - ❌ 日志打印凭证或上游响应中的敏感字段。
 - ❌ 一个 SKU 塞太多 action（拆分为多个单 action SKU）。
+- ❌ 同模块多 SKU 共享的凭证漏标 `scope: "module"`，导致用户重复配置同一 key。
 - ❌ 重复 `docs/tool-driver-guide.md` / `docs/agent-market-modular-architecture.md` 的全文——本秘技只给方法论与骨架，细节指向那些权威文档。
 
 ## 交付方式

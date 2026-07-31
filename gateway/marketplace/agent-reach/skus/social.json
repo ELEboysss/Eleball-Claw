@@ -51,6 +51,14 @@
       "description": "用于小红书搜索/阅读的浏览器登录态 Cookie Header String（登录态缓存）。",
       "placeholder": "粘贴小红书 Cookie",
       "required": false
+    },
+    "bilibili_cookie": {
+      "type": "cookie",
+      "label": "B站 Cookie",
+      "description": "用于 B站搜索/阅读的 SESSDATA 或完整 Cookie Header String。与「视频解析器」共享此凭证（模块级）。",
+      "placeholder": "粘贴 B站 Cookie",
+      "required": false,
+      "scope": "module"
     }
   },
   "timeout_seconds": 120
