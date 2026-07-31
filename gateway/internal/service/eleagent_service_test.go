@@ -22,7 +22,7 @@ func setupEleAgentService(t *testing.T) *EleAgentService {
 func TestEleAgentService_GetCredentials_Success(t *testing.T) {
 	svc := setupEleAgentService(t)
 
-	creds, err := svc.GetCredentials("user-1", "openai", "gpt-4o")
+	creds, err := svc.GetCredentials("user-1", "openai", "gpt-4o", "")
 
 	assert.NoError(t, err)
 	assert.NotNil(t, creds)
@@ -35,11 +35,11 @@ func TestEleAgentService_GetCredentials_Success(t *testing.T) {
 func TestEleAgentService_GetCredentials_EmptyParams(t *testing.T) {
 	svc := setupEleAgentService(t)
 
-	_, err := svc.GetCredentials("user-1", "", "gpt-4o")
+	_, err := svc.GetCredentials("user-1", "", "gpt-4o", "")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "子平台 Provider 和模型名不能为空")
 
-	_, err = svc.GetCredentials("user-1", "openai", "")
+	_, err = svc.GetCredentials("user-1", "openai", "", "")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "子平台 Provider 和模型名不能为空")
 }
@@ -47,7 +47,7 @@ func TestEleAgentService_GetCredentials_EmptyParams(t *testing.T) {
 func TestEleAgentService_GetCredentials_UnsupportedProvider(t *testing.T) {
 	svc := setupEleAgentService(t)
 
-	_, err := svc.GetCredentials("user-1", "nonexist", "model")
+	_, err := svc.GetCredentials("user-1", "nonexist", "model", "")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "不支持的 Ele Agent 模型")
 }
@@ -57,7 +57,7 @@ func TestEleAgentService_DefaultBaseURL(t *testing.T) {
 	// 传入空字符串时使用默认生产地址
 	svc := NewEleAgentService(chatService, testEleAgentModelService(), nil, "")
 
-	creds, err := svc.GetCredentials("user-1", "openai", "gpt-4o")
+	creds, err := svc.GetCredentials("user-1", "openai", "gpt-4o", "")
 	assert.NoError(t, err)
 	assert.Equal(t, "https://api.eleball.cn/v1", creds.BaseURL)
 }

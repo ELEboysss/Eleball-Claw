@@ -211,18 +211,18 @@ export default function VisualCreationInput({
   }
 
   return (
-    <div className="relative bg-[#1c1c2b] border-t border-[#26263a]">
+    <div className="relative bg-eleball-vs-surface border-t border-eleball-vs-border">
       {/* 顶部浮动参数面板 */}
       {paramsOpen && (
-        <div className="absolute bottom-full left-0 right-0 z-20 mb-2 mx-4 rounded-xl border border-[#26263a] bg-[#1c1c2b] p-4 shadow-2xl">
+        <div className="absolute bottom-full left-0 right-0 z-20 mb-2 mx-4 rounded-xl border border-eleball-vs-border bg-eleball-vs-surface p-4 shadow-2xl">
           <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2 text-sm font-semibold text-[#a0a0b8]">
+            <div className="flex items-center gap-2 text-sm font-semibold text-eleball-vs-text-muted">
               {mediaType === 'video' ? <Film className="w-4 h-4" /> : <ImageIcon className="w-4 h-4" />}
               {mediaType === 'video' ? '视频创作' : '图片创作'}
             </div>
             <button
               onClick={() => setParamsOpen(false)}
-              className="p-1.5 rounded-md text-[#a0a0b8] hover:bg-[#6750A4]/20 hover:text-[#b8a5ff] transition-colors"
+              className="p-1.5 rounded-md text-eleball-vs-text-muted hover:bg-eleball-primary/20 hover:text-eleball-vs-accent transition-colors"
               title="收起参数"
             >
               <ChevronDown className="w-4 h-4" />
@@ -237,12 +237,12 @@ export default function VisualCreationInput({
 
           <div className="space-y-3">
             <div>
-              <label className="block text-xs font-medium text-[#a0a0b8] mb-1">模型</label>
+              <label className="block text-xs font-medium text-eleball-vs-text-muted mb-1">模型</label>
               <select
                 value={modelName ? `${provider}:${modelName}` : ''}
                 onChange={(e) => handleModelChange(e.target.value)}
                 disabled={modelsLoading || !hasModels}
-                className="w-full rounded-lg border border-[#2e2e45] bg-[#252538] px-3 py-2 text-sm text-[#e8e8f0] focus:outline-none focus:ring-2 focus:ring-[#6750A4] disabled:opacity-50"
+                className="w-full rounded-lg border border-eleball-vs-border-variant bg-eleball-vs-surface-variant px-3 py-2 text-sm text-eleball-vs-text focus:outline-none focus:ring-2 focus:ring-eleball-primary disabled:opacity-50"
               >
                 {!hasModels && <option value="">暂无可用模型</option>}
                 {hasModels && models.map((m) => {
@@ -259,13 +259,13 @@ export default function VisualCreationInput({
             {mediaType === 'image' ? (
               <>
                 <div>
-                  <label className="block text-xs font-medium text-[#a0a0b8] mb-1">尺寸</label>
+                  <label className="block text-xs font-medium text-eleball-vs-text-muted mb-1">尺寸</label>
                   {protocol === 'seedream' ? (
                     // Seedream（即梦）协议：size 支持 1K/2K/4K 档位或「宽x高」像素尺寸（1280x720 ~ 4096x4096）
                     <select
                       value={size}
                       onChange={(e) => setSize(e.target.value)}
-                      className="w-full rounded-lg border border-[#2e2e45] bg-[#252538] px-3 py-2 text-sm text-[#e8e8f0]"
+                      className="w-full rounded-lg border border-eleball-vs-border-variant bg-eleball-vs-surface-variant px-3 py-2 text-sm text-eleball-vs-text"
                     >
                       <optgroup label="档位（比例由模型根据画面决定）">
                         <option value="2K">2K 标准（推荐）</option>
@@ -287,7 +287,7 @@ export default function VisualCreationInput({
                     <select
                       value={size}
                       onChange={(e) => setSize(e.target.value)}
-                      className="w-full rounded-lg border border-[#2e2e45] bg-[#252538] px-3 py-2 text-sm text-[#e8e8f0]"
+                      className="w-full rounded-lg border border-eleball-vs-border-variant bg-eleball-vs-surface-variant px-3 py-2 text-sm text-eleball-vs-text"
                     >
                       <option value="1024x1024">1024 × 1024</option>
                       <option value="1024x1536">1024 × 1536</option>
@@ -296,12 +296,12 @@ export default function VisualCreationInput({
                   )}
                 </div>
                 {protocol === 'seedream' && (
-                  <label className="flex items-center gap-2 text-xs text-[#a0a0b8] cursor-pointer">
+                  <label className="flex items-center gap-2 text-xs text-eleball-vs-text-muted cursor-pointer">
                     <input
                       type="checkbox"
                       checked={watermark}
                       onChange={(e) => setWatermark(e.target.checked)}
-                      className="w-3.5 h-3.5 rounded border-[#2e2e45] bg-[#252538]"
+                      className="w-3.5 h-3.5 rounded border-eleball-vs-border-variant bg-eleball-vs-surface-variant"
                     />
                     添加水印（watermark，默认关闭）
                   </label>
@@ -312,11 +312,11 @@ export default function VisualCreationInput({
                 <div className="grid grid-cols-2 gap-3">
                   {protocol === 'seedance' && (
                     <div>
-                      <label className="block text-xs font-medium text-[#a0a0b8] mb-1">比例</label>
+                      <label className="block text-xs font-medium text-eleball-vs-text-muted mb-1">比例</label>
                       <select
                         value={ratio}
                         onChange={(e) => setRatio(e.target.value)}
-                        className="w-full rounded-lg border border-[#2e2e45] bg-[#252538] px-3 py-2 text-sm text-[#e8e8f0]"
+                        className="w-full rounded-lg border border-eleball-vs-border-variant bg-eleball-vs-surface-variant px-3 py-2 text-sm text-eleball-vs-text"
                       >
                         {/* adaptive 仅图生视频（有首帧参考图）时被上游接受 */}
                         {image?.status === 'done' && (
@@ -332,12 +332,12 @@ export default function VisualCreationInput({
                     </div>
                   )}
                   <div>
-                    <label className="block text-xs font-medium text-[#a0a0b8] mb-1">时长（秒）</label>
+                    <label className="block text-xs font-medium text-eleball-vs-text-muted mb-1">时长（秒）</label>
                     {currentModel?.video_max_duration > 0 ? (
                       <select
                         value={duration}
                         onChange={(e) => setDuration(Number(e.target.value))}
-                        className="w-full rounded-lg border border-[#2e2e45] bg-[#252538] px-3 py-2 text-sm text-[#e8e8f0]"
+                        className="w-full rounded-lg border border-eleball-vs-border-variant bg-eleball-vs-surface-variant px-3 py-2 text-sm text-eleball-vs-text"
                       >
                         {(() => {
                           const options = []
@@ -356,19 +356,19 @@ export default function VisualCreationInput({
                         min={1}
                         value={duration}
                         onChange={(e) => setDuration(Math.max(1, Number(e.target.value)))}
-                        className="w-full rounded-lg border border-[#2e2e45] bg-[#252538] px-3 py-2 text-sm text-[#e8e8f0]"
+                        className="w-full rounded-lg border border-eleball-vs-border-variant bg-eleball-vs-surface-variant px-3 py-2 text-sm text-eleball-vs-text"
                         placeholder="自定义时长"
                       />
                     )}
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-[#a0a0b8] mb-1">分辨率</label>
+                    <label className="block text-xs font-medium text-eleball-vs-text-muted mb-1">分辨率</label>
                     {protocol === 'seedance' ? (
                       // Seedance 协议：resolution 取值 480p / 720p / 1080p
                       <select
                         value={resolution}
                         onChange={(e) => setResolution(e.target.value)}
-                        className="w-full rounded-lg border border-[#2e2e45] bg-[#252538] px-3 py-2 text-sm text-[#e8e8f0]"
+                        className="w-full rounded-lg border border-eleball-vs-border-variant bg-eleball-vs-surface-variant px-3 py-2 text-sm text-eleball-vs-text"
                       >
                         <option value="480p">480p</option>
                         <option value="720p">720p</option>
@@ -379,7 +379,7 @@ export default function VisualCreationInput({
                       <select
                         value={resolution}
                         onChange={(e) => setResolution(e.target.value)}
-                        className="w-full rounded-lg border border-[#2e2e45] bg-[#252538] px-3 py-2 text-sm text-[#e8e8f0]"
+                        className="w-full rounded-lg border border-eleball-vs-border-variant bg-eleball-vs-surface-variant px-3 py-2 text-sm text-eleball-vs-text"
                       >
                         <option value="720p">720p（1280×720）</option>
                         <option value="1080p">1080p（1920×1080）</option>
@@ -389,21 +389,21 @@ export default function VisualCreationInput({
                 </div>
                 {protocol === 'seedance' && (
                   <div className="flex items-center gap-4">
-                    <label className="flex items-center gap-2 text-xs text-[#a0a0b8] cursor-pointer">
+                    <label className="flex items-center gap-2 text-xs text-eleball-vs-text-muted cursor-pointer">
                       <input
                         type="checkbox"
                         checked={generateAudio}
                         onChange={(e) => setGenerateAudio(e.target.checked)}
-                        className="w-3.5 h-3.5 rounded border-[#2e2e45] bg-[#252538]"
+                        className="w-3.5 h-3.5 rounded border-eleball-vs-border-variant bg-eleball-vs-surface-variant"
                       />
                       生成音频（仅 Seedance 1.5 等模型支持）
                     </label>
-                    <label className="flex items-center gap-2 text-xs text-[#a0a0b8] cursor-pointer">
+                    <label className="flex items-center gap-2 text-xs text-eleball-vs-text-muted cursor-pointer">
                       <input
                         type="checkbox"
                         checked={watermark}
                         onChange={(e) => setWatermark(e.target.checked)}
-                        className="w-3.5 h-3.5 rounded border-[#2e2e45] bg-[#252538]"
+                        className="w-3.5 h-3.5 rounded border-eleball-vs-border-variant bg-eleball-vs-surface-variant"
                       />
                       添加水印（默认关闭）
                     </label>
@@ -418,16 +418,16 @@ export default function VisualCreationInput({
       {/* 已上传图片缩略图 */}
       {image && (
         <div className="px-4 pt-3">
-          <div className="inline-flex items-center gap-2 rounded-lg border border-[#2e2e45] bg-[#252538] px-2 py-1.5">
+          <div className="inline-flex items-center gap-2 rounded-lg border border-eleball-vs-border-variant bg-eleball-vs-surface-variant px-2 py-1.5">
             {image.status === 'uploading' ? (
-              <Loader2 className="w-4 h-4 animate-spin text-[#b8a5ff]" />
+              <Loader2 className="w-4 h-4 animate-spin text-eleball-vs-accent" />
             ) : (
               <img src={image.url} alt="参考图" className="w-8 h-8 rounded object-cover" />
             )}
-            <span className="text-xs text-[#a0a0b8]">{image.status === 'uploading' ? '上传中…' : '参考图'}</span>
+            <span className="text-xs text-eleball-vs-text-muted">{image.status === 'uploading' ? '上传中…' : '参考图'}</span>
             <button
               onClick={clearImage}
-              className="p-1 rounded-md text-[#6e6e8a] hover:text-[#ff7b7b] hover:bg-[#ff7b7b]/10"
+              className="p-1 rounded-md text-eleball-vs-text-dim hover:text-eleball-vs-error hover:bg-eleball-vs-error/10"
             >
               <X className="w-3.5 h-3.5" />
             </button>
@@ -442,8 +442,8 @@ export default function VisualCreationInput({
           onClick={() => setParamsOpen((prev) => !prev)}
           className={`flex-shrink-0 p-2.5 rounded-lg border transition-colors ${
             paramsOpen
-              ? 'border-[#6750A4] bg-[#6750A4]/20 text-[#b8a5ff]'
-              : 'border-[#2e2e45] bg-[#252538] text-[#a0a0b8] hover:bg-[#6750A4]/10 hover:text-[#b8a5ff]'
+              ? 'border-eleball-primary bg-eleball-primary/20 text-eleball-vs-accent'
+              : 'border-eleball-vs-border-variant bg-eleball-vs-surface-variant text-eleball-vs-text-muted hover:bg-eleball-primary/10 hover:text-eleball-vs-accent'
           }`}
           title="创作参数"
         >
@@ -458,8 +458,8 @@ export default function VisualCreationInput({
               disabled={image?.status === 'uploading'}
               className={`flex-shrink-0 p-2.5 rounded-lg border transition-colors ${
                 image
-                  ? 'border-[#6750A4] bg-[#6750A4]/20 text-[#b8a5ff]'
-                  : 'border-[#2e2e45] bg-[#252538] text-[#a0a0b8] hover:bg-[#6750A4]/10 hover:text-[#b8a5ff]'
+                  ? 'border-eleball-primary bg-eleball-primary/20 text-eleball-vs-accent'
+                  : 'border-eleball-vs-border-variant bg-eleball-vs-surface-variant text-eleball-vs-text-muted hover:bg-eleball-primary/10 hover:text-eleball-vs-accent'
               } disabled:opacity-50`}
               title="上传参考图"
             >
@@ -486,21 +486,21 @@ export default function VisualCreationInput({
           onKeyDown={handleKeyDown}
           rows={1}
           placeholder={`描述你想要的${mediaType === 'video' ? '视频' : '画面'}，按 Enter 发送...`}
-          className="flex-1 max-h-32 min-h-[44px] rounded-lg border border-[#2e2e45] bg-[#252538] px-3 py-2.5 text-sm text-[#e8e8f0] placeholder-[#6e6e8a] focus:outline-none focus:ring-2 focus:ring-[#6750A4] resize-none"
+          className="flex-1 max-h-32 min-h-[44px] rounded-lg border border-eleball-vs-border-variant bg-eleball-vs-surface-variant px-3 py-2.5 text-sm text-eleball-vs-text placeholder-eleball-vs-text-dim focus:outline-none focus:ring-2 focus:ring-eleball-primary resize-none"
         />
 
         {/* 发送按钮 */}
         <button
           onClick={handleSubmit}
           disabled={!canSubmit}
-          className="flex-shrink-0 flex items-center justify-center gap-1.5 rounded-lg bg-[#6750A4] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#4a3b7a] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="flex-shrink-0 flex items-center justify-center gap-1.5 rounded-lg bg-eleball-primary px-4 py-2.5 text-sm font-medium text-white hover:bg-eleball-vs-primary-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
           {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
           <span className="hidden sm:inline">发送</span>
         </button>
       </div>
 
-      {error && <p className="px-4 pb-3 text-xs text-[#ff7b7b]">{error}</p>}
+      {error && <p className="px-4 pb-3 text-xs text-eleball-vs-error">{error}</p>}
     </div>
   )
 }

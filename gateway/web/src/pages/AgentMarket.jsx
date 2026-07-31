@@ -585,6 +585,12 @@ export default function AgentMarket() {
                       在线
                     </span>
                   )}
+                  {agent.credential_complete === false && (
+                    <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-amber-50 text-amber-600 flex items-center gap-1" title="该秘技需配置凭证才能激活，点击齿轮图标配置">
+                      <AlertCircle className="w-3 h-3" />
+                      凭证不全
+                    </span>
+                  )}
                   <span
                     className={`text-xs px-2 py-0.5 rounded-full font-medium ${
                       levelColors[agent.level] || levelColors[1]
@@ -662,12 +668,12 @@ export default function AgentMarket() {
                     )}
                   </button>
                 ) : isPurchased && agent.manifest_json ? (
-                  <label className={`inline-flex items-center gap-2 px-3 py-2 rounded-full text-xs font-medium transition-colors ${agent.driver_registered === false ? 'cursor-not-allowed bg-gray-100 text-gray-400' : 'cursor-pointer ' + (agent.is_active ? 'bg-emerald-50 text-emerald-600' : 'bg-eleball-surface-variant text-eleball-text-secondary')}`}>
+                  <label className={`inline-flex items-center gap-2 px-3 py-2 rounded-full text-xs font-medium transition-colors ${agent.driver_registered === false || agent.credential_complete === false ? 'cursor-not-allowed bg-gray-100 text-gray-400' : 'cursor-pointer ' + (agent.is_active ? 'bg-emerald-50 text-emerald-600' : 'bg-eleball-surface-variant text-eleball-text-secondary')}`}>
                     <input
                       type="checkbox"
                       className="sr-only"
                       checked={!!agent.is_active}
-                      disabled={agent.driver_registered === false || togglingId === agent.id}
+                      disabled={agent.driver_registered === false || agent.credential_complete === false || togglingId === agent.id}
                       onChange={() => handleToggleActive(agent)}
                     />
                     <span className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${agent.is_active ? 'bg-emerald-500' : 'bg-gray-300'}`}>
@@ -675,13 +681,15 @@ export default function AgentMarket() {
                     </span>
                     {agent.driver_registered === false
                       ? '驱动未注册'
-                      : togglingId === agent.id
-                        ? '处理中...'
-                        : agent.is_active
-                          ? agent.module_online === false
-                            ? '已激活（离线）'
-                            : '已激活'
-                          : '未激活'}
+                      : agent.credential_complete === false
+                        ? '凭证不全'
+                        : togglingId === agent.id
+                          ? '处理中...'
+                          : agent.is_active
+                            ? agent.module_online === false
+                              ? '已激活（离线）'
+                              : '已激活'
+                            : '未激活'}
                   </label>
                 ) : isPurchased ? (
                   <span className="px-4 py-2 rounded-full text-sm font-medium bg-eleball-surface-variant text-eleball-text-secondary">
@@ -789,7 +797,14 @@ export default function AgentMarket() {
               {Object.entries(credentialSchema).map(([key, def]) => (
                 <div key={key} className="border border-eleball-outline rounded-xl p-3 space-y-2">
                   <div className="flex items-center justify-between">
-                    <span className="font-medium text-eleball-text">{def.label || key}</span>
+                    <span className="font-medium text-eleball-text flex items-center gap-1.5">
+                      {def.label || key}
+                      {def.scope === 'module' && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 font-normal" title="此凭证在同模块所有 SKU 间共享，配置一次即可">
+                          模块级共享
+                        </span>
+                      )}
+                    </span>
                     {def.required && <span className="text-xs text-red-500">必填</span>}
                   </div>
                   {def.description && (

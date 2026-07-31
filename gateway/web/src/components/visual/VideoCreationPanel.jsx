@@ -59,7 +59,7 @@ export default function VideoCreationPanel({ onCreate, initialPrompt = '', disab
         </div>
       )}
       <div>
-        <label className="block text-sm font-medium text-[#a0a0b8] mb-1">模型</label>
+        <label className="block text-sm font-medium text-eleball-vs-text-muted mb-1">模型</label>
         <select
           value={modelName ? `${provider}:${modelName}` : ''}
           onChange={(e) => {
@@ -78,7 +78,7 @@ export default function VideoCreationPanel({ onCreate, initialPrompt = '', disab
             onModelChange?.(selected)
           }}
           disabled={modelsLoading || !hasModels}
-          className="w-full rounded-lg border border-[#2e2e45] bg-[#252538] px-3 py-2 text-sm text-[#e8e8f0] focus:outline-none focus:ring-2 focus:ring-[#6750A4] disabled:opacity-50"
+          className="w-full rounded-lg border border-eleball-vs-border-variant bg-eleball-vs-surface-variant px-3 py-2 text-sm text-eleball-vs-text focus:outline-none focus:ring-2 focus:ring-eleball-primary disabled:opacity-50"
         >
           {!hasModels && <option value="">暂无可用模型</option>}
           {hasModels && videoModels.map((m) => {
@@ -101,34 +101,34 @@ export default function VideoCreationPanel({ onCreate, initialPrompt = '', disab
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-[#a0a0b8] mb-1">视频描述</label>
+        <label className="block text-sm font-medium text-eleball-vs-text-muted mb-1">视频描述</label>
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           rows={5}
           placeholder="描述你想要的视频内容、镜头、动作与风格，例如：无人机视角拍摄的海浪拍打礁石，夕阳金光洒落……"
-          className="w-full rounded-lg border border-[#2e2e45] bg-[#252538] px-3 py-2 text-sm text-[#e8e8f0] placeholder-[#6e6e8a] focus:outline-none focus:ring-2 focus:ring-[#6750A4] resize-none"
+          className="w-full rounded-lg border border-eleball-vs-border-variant bg-eleball-vs-surface-variant px-3 py-2 text-sm text-eleball-vs-text placeholder-eleball-vs-text-dim focus:outline-none focus:ring-2 focus:ring-eleball-primary resize-none"
         />
       </div>
 
       <div className="grid grid-cols-2 gap-4">
         <div>
-          <label className="block text-sm font-medium text-[#a0a0b8] mb-1">时长（秒）</label>
+          <label className="block text-sm font-medium text-eleball-vs-text-muted mb-1">时长（秒）</label>
           <select
             value={duration}
             onChange={(e) => setDuration(Number(e.target.value))}
-            className="w-full rounded-lg border border-[#2e2e45] bg-[#252538] px-3 py-2 text-sm text-[#e8e8f0] focus:outline-none focus:ring-2 focus:ring-[#6750A4]"
+            className="w-full rounded-lg border border-eleball-vs-border-variant bg-eleball-vs-surface-variant px-3 py-2 text-sm text-eleball-vs-text focus:outline-none focus:ring-2 focus:ring-eleball-primary"
           >
             <option value={5}>5 秒</option>
             <option value={10}>10 秒</option>
           </select>
         </div>
         <div>
-          <label className="block text-sm font-medium text-[#a0a0b8] mb-1">分辨率</label>
+          <label className="block text-sm font-medium text-eleball-vs-text-muted mb-1">分辨率</label>
           <select
             value={resolution}
             onChange={(e) => setResolution(e.target.value)}
-            className="w-full rounded-lg border border-[#2e2e45] bg-[#252538] px-3 py-2 text-sm text-[#e8e8f0] focus:outline-none focus:ring-2 focus:ring-[#6750A4]"
+            className="w-full rounded-lg border border-eleball-vs-border-variant bg-eleball-vs-surface-variant px-3 py-2 text-sm text-eleball-vs-text focus:outline-none focus:ring-2 focus:ring-eleball-primary"
           >
             <option value="720p">720p</option>
             <option value="1080p">1080p</option>
@@ -138,13 +138,13 @@ export default function VideoCreationPanel({ onCreate, initialPrompt = '', disab
 
       <ImageUploader value={image} onChange={setImage} label="首帧图（可选）" />
 
-      {error && <p className="text-sm text-[#ff7b7b]">{error}</p>}
+      {error && <p className="text-sm text-eleball-vs-error">{error}</p>}
 
       <button
         type="submit"
         disabled={submitting || !canSubmit}
         title={!hasModels ? '请先配置视频生成模型' : !modelName ? '请选择模型' : !prompt.trim() ? '请输入提示词' : ''}
-        className="w-full flex items-center justify-center gap-2 rounded-lg bg-[#6750A4] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#4a3b7a] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        className="w-full flex items-center justify-center gap-2 rounded-lg bg-eleball-primary px-4 py-2.5 text-sm font-medium text-white hover:bg-eleball-vs-primary-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
       >
         {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Film className="w-4 h-4" />}
         {submitting ? '提交中……' : '生成视频'}

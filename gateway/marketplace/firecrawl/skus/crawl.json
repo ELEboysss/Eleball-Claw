@@ -32,7 +32,8 @@
       "label": "Firecrawl API Key",
       "description": "用于调用 Firecrawl Cloud API，可从 https://firecrawl.dev 获取。",
       "placeholder": "fc-...",
-      "required": false
+      "required": false,
+      "scope": "module"
     }
   },
   "timeout_seconds": 120

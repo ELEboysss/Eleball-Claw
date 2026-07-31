@@ -66,7 +66,7 @@ func TestRunnerShellSplitIntegration(t *testing.T) {
 	runner := &windowsToolRunner{}
 
 	// 日志场景1：command 塞整行 "which aider"（归一化后 which 内置，输出可用性）
-	out, err := runner.Shell(context.Background(), "which aider", nil)
+	out, err := runner.Shell(context.Background(), "which aider", nil, "")
 	if err != nil {
 		t.Fatalf("整行 which 应可执行: %v", err)
 	}
@@ -77,13 +77,13 @@ func TestRunnerShellSplitIntegration(t *testing.T) {
 	// 日志场景2：command 塞 "grep <pattern> <file>"（归一化后走内置 grep）
 	dir := t.TempDir()
 	f := writeTestFile(t, dir, "n.txt", "aider here\n")
-	out, err = runner.Shell(context.Background(), "grep aider "+f, nil)
+	out, err = runner.Shell(context.Background(), "grep aider "+f, nil, "")
 	if err != nil || !strings.Contains(out, "1:aider here") {
 		t.Fatalf("整行 grep 应可执行: %q err=%v", out, err)
 	}
 
 	// 日志场景3：管道/重定向仍然拒绝，但错误带格式提示
-	_, err = runner.Shell(context.Background(), "pip show aider-chat 2>/dev/null || echo not installed", nil)
+	_, err = runner.Shell(context.Background(), "pip show aider-chat 2>/dev/null || echo not installed", nil, "")
 	if err == nil {
 		t.Fatal("管道/重定向应被拒绝")
 	}
@@ -92,7 +92,7 @@ func TestRunnerShellSplitIntegration(t *testing.T) {
 	}
 
 	// 日志场景4：python3 -c 仍然禁止（安全底线）
-	_, err = runner.Shell(context.Background(), "python3", []string{"-c", "print(1)"})
+	_, err = runner.Shell(context.Background(), "python3", []string{"-c", "print(1)"}, "")
 	if err == nil || !strings.Contains(err.Error(), "内联执行") {
 		t.Fatalf("-c 应被禁止: %v", err)
 	}

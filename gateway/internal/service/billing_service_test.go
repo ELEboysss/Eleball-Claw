@@ -6,8 +6,8 @@ import (
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
 	"github.com/eleball/gateway/pkg/llm"
-	"github.com/stretchr/testify/assert"
 	sqlite "github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/assert"
 	"gorm.io/gorm"
 )
 
@@ -37,10 +37,10 @@ func TestBillingService_Deduct(t *testing.T) {
 
 	// 创建用户并充值
 	user := &model.User{
-		ID:      "user-001",
-		Username:   "test@example.com",
-		Balance: 10000,
-		Role:    model.UserRoleUser,
+		ID:       "user-001",
+		Username: "test@example.com",
+		Balance:  10000,
+		Role:     model.UserRoleUser,
 	}
 	db.Create(user)
 
@@ -59,12 +59,36 @@ func TestBillingService_Deduct(t *testing.T) {
 	assert.Equal(t, int64(10000-5), updated.Balance)
 }
 
+// TestBillingService_DeductWithSource 扣费标注用量来源（Agent Team P5 协同计费对账）
+func TestBillingService_DeductWithSource(t *testing.T) {
+	svc, db := setupBillingService(t)
+	user := &model.User{ID: "user-src", Username: "src@example.com", Balance: 10000, Role: model.UserRoleUser}
+	db.Create(user)
+
+	usage := &llm.Usage{PromptTokens: 1000, CompletionTokens: 500, TotalTokens: 1500}
+
+	// 协同委派子任务用量：source=call_assistant:子session
+	err := svc.DeductWithSource("user-src", "eleagent", "deepseek/deepseek-chat", CurrencyDanwan, "call_assistant:sub-1", usage)
+	assert.NoError(t, err)
+	// Deduct 包装默认 source=agent（向后兼容）
+	err = svc.Deduct("user-src", "eleagent", "deepseek/deepseek-chat", CurrencyDanwan, usage)
+	assert.NoError(t, err)
+
+	// 两条 TokenUsage 记录，source 分别为 call_assistant:sub-1 与 agent
+	var tus []model.TokenUsage
+	db.Find(&tus, "user_id = ?", "user-src")
+	assert.Len(t, tus, 2)
+	sources := []string{tus[0].Source, tus[1].Source}
+	assert.Contains(t, sources, "call_assistant:sub-1")
+	assert.Contains(t, sources, "agent")
+}
+
 func TestBillingService_DeductElegant(t *testing.T) {
 	svc, db := setupBillingService(t)
 
 	user := &model.User{
 		ID:             "user-001-elegant",
-		Username:          "elegant@example.com",
+		Username:       "elegant@example.com",
 		Balance:        0,
 		ElegantBalance: 10000,
 		Role:           model.UserRoleUser,
@@ -91,10 +115,10 @@ func TestBillingService_DeductInsufficientBalance(t *testing.T) {
 
 	// 创建余额为 0 的用户
 	user := &model.User{
-		ID:      "user-002",
-		Username:   "poor@example.com",
-		Balance: 0,
-		Role:    model.UserRoleUser,
+		ID:       "user-002",
+		Username: "poor@example.com",
+		Balance:  0,
+		Role:     model.UserRoleUser,
 	}
 	db.Create(user)
 
@@ -114,7 +138,7 @@ func TestBillingService_GetBalance(t *testing.T) {
 
 	user := &model.User{
 		ID:             "user-003",
-		Username:          "rich@example.com",
+		Username:       "rich@example.com",
 		Balance:        50000,
 		ElegantBalance: 20000,
 		Role:           model.UserRoleUser,
@@ -131,10 +155,10 @@ func TestBillingService_NonEleAgentFree(t *testing.T) {
 	svc, db := setupBillingService(t)
 
 	user := &model.User{
-		ID:      "user-004",
-		Username:   "direct@example.com",
-		Balance: 10000,
-		Role:    model.UserRoleUser,
+		ID:       "user-004",
+		Username: "direct@example.com",
+		Balance:  10000,
+		Role:     model.UserRoleUser,
 	}
 	db.Create(user)
 
@@ -156,10 +180,10 @@ func TestBillingService_EleAgentFreeWhenPriceZero(t *testing.T) {
 	svc, db := setupBillingService(t)
 
 	user := &model.User{
-		ID:      "user-005",
-		Username:   "free@example.com",
-		Balance: 100,
-		Role:    model.UserRoleUser,
+		ID:       "user-005",
+		Username: "free@example.com",
+		Balance:  100,
+		Role:     model.UserRoleUser,
 	}
 	db.Create(user)
 

@@ -4,15 +4,17 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
 	"github.com/eleball/gateway/pkg/llm"
+	sqlite "github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	sqlite "github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -36,6 +38,31 @@ func setupAgentService(t *testing.T) (*AgentService, *ConversationService, *mock
 	}
 	agentSvc := NewAgentService(convSvc, sessionRepo, userRepo, vipService, nil, NewNoOpEleAgentModelService(), NewFileSandbox(t.TempDir(), ""), NewToolRegistry(), NewToolSchemaBuilder(NewToolRegistry()), NewAgentTrigger(), resolver, "", 10, nil)
 	return agentSvc, convSvc, mockClient
+}
+
+// TestAgentService_GetResource_CwdReadBack AR-27：claw（unrestricted）下 WriteFile 写到 cwd 内，
+// DiskPath 是 cwd 下绝对路径。GetResource 须按所属 session 的 cwd 克隆沙箱读回真实字节，
+// 否则共享沙箱单例（projectRoot 为空）拒绝读取 -> 下载返回 JSON 404（浏览器存成 ar-xxxxx.json）。
+func TestAgentService_GetResource_CwdReadBack(t *testing.T) {
+	agentSvc, _, _ := setupAgentService(t)
+	agentSvc.SetUnrestricted(true) // claw 模式：启用 cwd 解析
+
+	cwd := t.TempDir()
+	outPath := filepath.Join(cwd, "out.md")
+	require.NoError(t, os.WriteFile(outPath, []byte("# hello"), 0o640))
+
+	// session 记录 cwd；output 记录 cwd 内绝对路径（模拟 toolWriteFile 的 SaveOutput）
+	require.NoError(t, agentSvc.sessionRepo.Create(&model.AgentSession{ID: "s1", UserID: "u1", Status: "succeeded", Cwd: cwd}))
+	require.NoError(t, agentSvc.sessionRepo.SaveOutput(&model.AgentSessionOutput{
+		ID: "o1", SessionID: "s1", ResourceID: "ar-test1234",
+		FileName: "out.md", MimeType: "text/markdown", DiskPath: outPath,
+	}))
+
+	data, mime, name, err := agentSvc.GetResource(context.Background(), "ar-test1234")
+	require.NoError(t, err)
+	assert.Equal(t, "# hello", string(data))
+	assert.Equal(t, "text/markdown", mime)
+	assert.Equal(t, "out.md", name)
 }
 
 func TestAgentService_Execute_Unauthorized(t *testing.T) {
@@ -137,7 +164,7 @@ func TestAgentService_ListSessions(t *testing.T) {
 	conv, err := convSvc.CreateConversation(ctx, "u2", CreateConversationReq{Title: "t"})
 	require.NoError(t, err)
 
-	_, err = agentSvc.createSession(ctx, "u2", conv.ID, "test")
+	_, err = agentSvc.createSession(ctx, "u2", conv.ID, "test", "")
 	require.NoError(t, err)
 
 	items, total, err := agentSvc.ListSessions(ctx, "u2", 1, 10)
@@ -151,7 +178,7 @@ func TestAgentService_GetSession_OwnerCheck(t *testing.T) {
 	ctx := context.Background()
 	conv, err := convSvc.CreateConversation(ctx, "u2", CreateConversationReq{Title: "t"})
 	require.NoError(t, err)
-	session, err := agentSvc.createSession(ctx, "u2", conv.ID, "test")
+	session, err := agentSvc.createSession(ctx, "u2", conv.ID, "test", "")
 	require.NoError(t, err)
 
 	_, err = agentSvc.GetSession(ctx, session.ID, "u1")
@@ -168,7 +195,7 @@ func TestAgentService_DeleteSession(t *testing.T) {
 	ctx := context.Background()
 	conv, err := convSvc.CreateConversation(ctx, "u2", CreateConversationReq{Title: "t"})
 	require.NoError(t, err)
-	session, err := agentSvc.createSession(ctx, "u2", conv.ID, "test")
+	session, err := agentSvc.createSession(ctx, "u2", conv.ID, "test", "")
 	require.NoError(t, err)
 
 	err = agentSvc.DeleteSession(ctx, session.ID, "u2")
@@ -180,11 +207,26 @@ func TestAgentService_DeleteSession(t *testing.T) {
 
 func TestAgentService_buildInitialMessages(t *testing.T) {
 	agentSvc, _, _ := setupAgentService(t)
-	msgs := agentSvc.buildInitialMessages(AgentExecuteRequest{Message: "hello", History: []llm.Message{{Role: "user", Content: "prev"}}}, nil)
+	msgs := agentSvc.buildInitialMessages(context.Background(), AgentExecuteRequest{Message: "hello", History: []llm.Message{{Role: "user", Content: "prev"}}}, nil, "u1", "", "", false)
 	require.Len(t, msgs, 3)
 	assert.Equal(t, "system", msgs[0].Role)
 	assert.Equal(t, "prev", msgs[1].Content)
 	assert.Equal(t, "hello", msgs[2].Content)
+}
+
+func TestAgentService_buildInitialMessages_ToolsEnabled(t *testing.T) {
+	// AR-26：toolsEnabled=true 时 system prompt 含 FunctionGet 拉取说明；false 时不含。
+	agentSvc, _, _ := setupAgentService(t)
+	msgs := agentSvc.buildInitialMessages(context.Background(), AgentExecuteRequest{Message: "hi"}, nil, "u1", "", "", true)
+	require.NotEmpty(t, msgs)
+	sys, ok := msgs[0].Content.(string)
+	require.True(t, ok)
+	assert.Contains(t, sys, "FunctionGet")
+	assert.Contains(t, sys, "FunctionCallBegin")
+
+	msgs2 := agentSvc.buildInitialMessages(context.Background(), AgentExecuteRequest{Message: "hi"}, nil, "u1", "", "", false)
+	sys2, _ := msgs2[0].Content.(string)
+	assert.NotContains(t, sys2, "FunctionGet")
 }
 
 func TestAgentService_normalizeRequest(t *testing.T) {

@@ -45,7 +45,8 @@
       "label": "B站 Cookie",
       "description": "用于 B站搜索/字幕的 SESSDATA 或完整 Cookie Header String。",
       "placeholder": "粘贴 B站 Cookie",
-      "required": false
+      "required": false,
+      "scope": "module"
     }
   },
   "timeout_seconds": 120

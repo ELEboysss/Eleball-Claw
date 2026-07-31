@@ -30,6 +30,7 @@ import (
 	"github.com/eleball/gateway/internal/router"
 	"github.com/eleball/gateway/internal/seed"
 	"github.com/eleball/gateway/internal/service"
+	"github.com/eleball/gateway/pkg/crypto"
 	"github.com/eleball/gateway/pkg/llm"
 	"github.com/eleball/gateway/pkg/util"
 	sqlite "github.com/glebarez/sqlite"
@@ -98,6 +99,7 @@ func main() {
 		logger, _ = zap.NewDevelopment()
 	}
 	defer logger.Sync()
+	service.SetCloudProxyLogger(logger)
 
 	logger.Info("Eleball-claw 本地网关启动",
 		zap.String("git_sha", getGitSHA()),
@@ -146,6 +148,8 @@ func main() {
 		&model.AgentUserCredential{},
 		&model.Assistant{},
 		&model.AssistantItem{},
+		&model.Team{},
+		&model.TeamMemory{},
 		&model.VisualGenerationTask{},
 		&model.VisualConversation{},
 	); err != nil {
@@ -192,6 +196,7 @@ func main() {
 	moduleRepo := repository.NewModuleRepo(db)
 	driverRepo := repository.NewDriverRepo(db)
 	assistantRepo := repository.NewAssistantRepo(db)
+	teamRepo := repository.NewTeamRepo(db)
 
 	// 6. 服务
 
@@ -209,6 +214,11 @@ func main() {
 	keyManagerService, err := service.NewKeyManagerService(apiKeyRepo, masterKey)
 	if err != nil {
 		logger.Fatal("初始化 API Key 管理器失败", zap.Error(err))
+	}
+	// Agent Team P5：BYOK api_key 加密器（助手级 LLM 配置用，AES-256-GCM）
+	keyEncryption, err := crypto.NewKeyEncryption(masterKey)
+	if err != nil {
+		logger.Fatal("初始化密钥加密器失败", zap.Error(err))
 	}
 
 	clientFactory := service.NewClientFactory(cfg.LLM.Timeout)
@@ -276,6 +286,11 @@ func main() {
 		logger.Warn("预置 SearchWeb 官方搜索秘技失败", zap.Error(err))
 	}
 
+	// 预置官方 Prompt 型秘技「秘技制造机」（免费、免 VIP；激活并绑定助手后注入造模块方法论）
+	if err := seed.SkillMakerSKU(agentRepo, logger); err != nil {
+		logger.Warn("预置秘技制造机失败", zap.Error(err))
+	}
+
 	// 启动模块后台健康探测（每 5 分钟一次）
 	moduleRegistry.Start()
 	defer moduleRegistry.Stop()
@@ -311,13 +326,31 @@ func main() {
 		return client, nil
 	}
 
+	// 对话分组服务（Agent Team）
+	teamService := service.NewTeamService(db, teamRepo)
+	// 组共享记忆仓库（Agent Team P2）：删除组时级联清理组记忆
+	teamMemoryRepo := repository.NewTeamMemoryRepo(db)
+	teamService.SetTeamMemoryRepo(teamMemoryRepo)
+	teamMemoryService := service.NewTeamMemoryService(teamMemoryRepo, teamService)
+	// AR-09：记忆向量检索（EmbeddingModel 配置时启用；claw 默认不配置 -> 留空降级 LIKE）
+	if cfg.Agent.EmbeddingModel != "" {
+		embedClient := llm.NewOpenAIClient(cfg.Agent.APIKey, cfg.Agent.BaseURL, 30*time.Second)
+		embedClient.SetLogger(logger)
+		teamMemoryService.SetEmbedder(embedClient, cfg.Agent.EmbeddingModel)
+	}
 	conversationService := service.NewConversationService(chatConversationRepo, vipService, cfg.Agent.BasePath)
+	// 对话归组（PATCH team_id）需校验分组归属
+	conversationService.SetTeamService(teamService)
 	visualUploadService := service.NewVisualUploadService(agentSandbox)
 	visualConversationService := service.NewVisualConversationService(visualConversationRepo, visualTaskRepo, visualUploadService)
 	settingService := service.NewSettingService(settingRepo)
 	visualGenerationService := service.NewVisualGenerationService(visualTaskRepo, visualConversationService, billingService, eleAgentModelService, settingService, chatService, visualUploadService, logger)
 	agentWorkflowService := service.NewAgentService(conversationService, agentSessionRepo, userRepo, vipService, billingService, eleAgentModelService, agentSandbox, agentRegistry, agentSchemaBuilder, agentTrigger, agentClientResolver, cfg.Agent.Model, cfg.Agent.MaxSteps, logger)
 	agentWorkflowService.SetMaxRetries(cfg.LLM.MaxRetries)
+	// AR-03：单次 Agent 执行 token 预算上限（0 表示不限制）
+	agentWorkflowService.SetTokenBudget(cfg.Agent.MaxTokensPerExecute)
+	// AR-03：CallAssistant 子任务单次成本上限（0 表示不限制），每轮按估算成本门控
+	agentWorkflowService.SetMaxCostPerTask(cfg.Agent.MaxCostPerTask)
 	// claw 本地不限 Agent 模式（云端账户统一后跳过 VIP 门控，容忍无本地 user）
 	agentWorkflowService.SetUnrestricted(true)
 	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry(), moduleRegistry)
@@ -326,10 +359,17 @@ func main() {
 	agentService.SetAgentToolLoader(agentToolLoader)
 	agentService.SetModuleService(moduleService)
 	// claw 云端秘技 provenance 判定（激活云端来源秘技需 VIP1+）
+	agentService.SetAgentCredentialService(agentCredentialService)
 	agentService.SetModuleRepo(moduleRepo)
 	// 助手服务（已激活秘技的命名组合）；Agent 执行按请求/会话绑定的助手过滤动态工具
 	assistantService := service.NewAssistantService(db, assistantRepo, agentRepo)
+	// Agent Team P3：助手 PATCH team_id 时同样校验组归属
+	assistantService.SetTeamService(teamService)
+	// Agent Team P5：装配 BYOK api_key 加密器
+	assistantService.SetKeyEncryption(keyEncryption)
 	agentWorkflowService.SetAssistantService(assistantService)
+	// 组共享记忆服务（Agent Team P2）：执行前检索注入 + 执行后异步提取
+	agentWorkflowService.SetTeamMemoryService(teamMemoryService)
 	// 云端账户/VIP 缓存（claw 仅从云端取 VIP 一项用于门控）
 	cloudAccountService := service.NewCloudAccountService(cfg.Server.EleagentBaseURL)
 
@@ -368,7 +408,12 @@ func main() {
 	adminSettingHandler := handler.NewAdminSettingHandler(settingService)
 	releaseHandler := handler.NewReleaseHandler(releaseService, logger)
 	clawConsoleHandler := handler.NewClawConsoleHandler(db)
+	clawCwdHandler := handler.NewClawCwdHandler()
+	clawFilesHandler := handler.NewClawFilesHandler(agentSandbox)
+	clawWorktreeHandler := handler.NewClawWorktreeHandler(service.NewWorktreeService())
 	assistantHandler := handler.NewAssistantHandler(assistantService)
+	teamHandler := handler.NewTeamHandler(teamService)
+	teamMemoryHandler := handler.NewTeamMemoryHandler(teamMemoryService)
 	// 本地系统状态（docker/compose 可用性 + 模块自动上下线开关）
 	systemHandler := handler.NewSystemHandler(cfg.Modules)
 
@@ -377,8 +422,8 @@ func main() {
 		chatHandler, syncHandler, eleAgentHandler,
 		conversationHandler, moduleHandler, agentWorkflowHandler, agentHandler,
 		agentCredentialHandler, visualHandler, publicSettingHandler, releaseHandler,
-		clawConsoleHandler, cloudAccountService, adminEleAgentModelHandler, adminSettingHandler,
-		assistantHandler, systemHandler,
+		clawConsoleHandler, clawCwdHandler, clawFilesHandler, clawWorktreeHandler, cloudAccountService, adminEleAgentModelHandler, adminSettingHandler,
+		assistantHandler, teamHandler, teamMemoryHandler, systemHandler,
 	)
 
 	// 9. 启动

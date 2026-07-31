@@ -230,9 +230,17 @@ function AgentSteps({ steps, loading }) {
 
   return (
     <div className="space-y-3">
-      {steps.map((step, idx) => (
-        <StepItem key={`${step.type}-${idx}`} step={step} />
-      ))}
+      {steps.map((step, idx) => {
+        // Agent Team P5：子任务进度（sessionId 非空）缩进 + 左边框，与主循环步骤视觉分组
+        const isSub = !!step.sessionId
+        const showLabel = isSub && (!steps[idx - 1] || !steps[idx - 1].sessionId)
+        return (
+          <div key={`${step.type}-${idx}`} className={isSub ? 'ml-3 pl-3 border-l-2 border-eleball-primary/30' : ''}>
+            {showLabel && <div className="text-[10px] text-eleball-primary/70 mb-0.5">↳ 委派子任务进度</div>}
+            <StepItem step={step} />
+          </div>
+        )
+      })}
       {loading && (
         <div className="flex items-center gap-2 text-eleball-text-secondary text-xs">
           <Loader2 className="w-3.5 h-3.5 animate-spin text-eleball-primary" />

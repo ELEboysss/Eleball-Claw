@@ -26,6 +26,7 @@ from urllib.parse import urlparse, parse_qs
 import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO)
@@ -36,6 +37,27 @@ app = FastAPI(title="Eleball search-web Module", version="1.0.0")
 MODULE_ID = "search-web"
 VERSION = "1.0.0"
 CAPABILITIES = ["list_sources", "search", "fetch"]
+
+
+class ModuleError(Exception):
+    """模块标准错误：携带 error_code + error_message + 可选 upstream_status。
+
+    标准错误码（供网关透传给 LLM 与调试者精确理解失败原因）：
+      credential_missing   必填凭证未配置
+      credential_invalid   凭证被上游拒绝（401/403）
+      upstream_error       上游返回非 200（其它 4xx/5xx）
+      upstream_timeout     上游调用超时
+      parameter_invalid    参数缺失/非法
+      unsupported_action   未知 action
+      unsupported_provider 未知 provider
+      module_internal_error 模块内部异常
+    """
+
+    def __init__(self, code: str, message: str, upstream_status: int | None = None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.upstream_status = upstream_status
 
 # 搜索 HTTP 客户端统一超时（与上游 searchHTTPClient 15s 对齐）
 SEARCH_TIMEOUT = 15
@@ -107,6 +129,15 @@ def _first_available_provider() -> str:
     return "duckduckgo"  # duckduckgo 始终 available
 
 
+def _first_available_provider_with_credentials(credentials: dict[str, str] | None = None) -> str:
+    """优先按用户凭证（params["credentials"]）选可用源，再回落 env，最后 duckduckgo。
+    避免用户配了 baidu_api_key 但模块容器 env 没设 BAIDU_API_KEY 时误选 duckduckgo。"""
+    for name in ("baidu", "bing", "searxng"):
+        if _provider_key_available(name, credentials):
+            return name
+    return "duckduckgo"
+
+
 # ====== 请求/响应模型 ======
 
 class ExecuteRequest(BaseModel):
@@ -163,7 +194,7 @@ _KEY_MISSING_HINTS = {
 def _search_baidu(query: str, credentials: dict[str, str] | None = None) -> list[SearchResult]:
     api_key = (credentials or {}).get("baidu_api_key") or os.environ.get("BAIDU_API_KEY", "")
     if not api_key:
-        raise RuntimeError(_KEY_MISSING_HINTS["baidu"])
+        raise ModuleError("credential_missing", _KEY_MISSING_HINTS["baidu"])
     endpoint = os.environ.get(
         "BAIDU_SEARCH_ENDPOINT",
         "https://qianfan.baidubce.com/v2/ai_search/web_search",
@@ -175,17 +206,21 @@ def _search_baidu(query: str, credentials: dict[str, str] | None = None) -> list
         "search_recency_filter": "year",
         "resource_type_filter": [{"type": "web", "top_k": 5}],
     }
-    resp = requests.post(
-        endpoint,
-        json=body,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        timeout=SEARCH_TIMEOUT,
-    )
+    try:
+        resp = requests.post(
+            endpoint,
+            json=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            timeout=SEARCH_TIMEOUT,
+        )
+    except requests.exceptions.Timeout:
+        raise ModuleError("upstream_timeout", "百度 AI 搜索调用超时")
     if resp.status_code != 200:
-        raise RuntimeError(f"百度 AI 搜索 API 返回 {resp.status_code}: {resp.text}")
+        code = "credential_invalid" if resp.status_code in (401, 403) else "upstream_error"
+        raise ModuleError(code, f"百度 AI 搜索 API 返回 {resp.status_code}: {resp.text}", resp.status_code)
     refs = resp.json().get("references", [])
     results = []
     for v in refs:
@@ -197,18 +232,22 @@ def _search_baidu(query: str, credentials: dict[str, str] | None = None) -> list
 def _search_bing(query: str, credentials: dict[str, str] | None = None) -> list[SearchResult]:
     api_key = (credentials or {}).get("bing_search_api_key") or os.environ.get("BING_SEARCH_API_KEY", "")
     if not api_key:
-        raise RuntimeError(_KEY_MISSING_HINTS["bing"])
+        raise ModuleError("credential_missing", _KEY_MISSING_HINTS["bing"])
     endpoint = os.environ.get(
         "BING_SEARCH_ENDPOINT", "https://api.bing.microsoft.com/v7.0/search"
     )
-    resp = requests.get(
-        endpoint,
-        params={"q": query, "count": 5, "mkt": "zh-CN"},
-        headers={"Ocp-Apim-Subscription-Key": api_key},
-        timeout=SEARCH_TIMEOUT,
-    )
+    try:
+        resp = requests.get(
+            endpoint,
+            params={"q": query, "count": 5, "mkt": "zh-CN"},
+            headers={"Ocp-Apim-Subscription-Key": api_key},
+            timeout=SEARCH_TIMEOUT,
+        )
+    except requests.exceptions.Timeout:
+        raise ModuleError("upstream_timeout", "Bing 搜索调用超时")
     if resp.status_code != 200:
-        raise RuntimeError(f"Bing API 返回 {resp.status_code}: {resp.text}")
+        code = "credential_invalid" if resp.status_code in (401, 403) else "upstream_error"
+        raise ModuleError(code, f"Bing API 返回 {resp.status_code}: {resp.text}", resp.status_code)
     values = resp.json().get("webPages", {}).get("value", [])
     return [
         SearchResult(title=v.get("name", ""), url=v.get("url", ""), snippet=v.get("snippet", ""))
@@ -219,14 +258,17 @@ def _search_bing(query: str, credentials: dict[str, str] | None = None) -> list[
 def _search_searxng(query: str) -> list[SearchResult]:
     base_url = os.environ.get("SEARXNG_URL", "").rstrip("/")
     if not base_url:
-        raise RuntimeError("SearXNG 未配置：未设置 SEARXNG_URL")
-    resp = requests.get(
-        f"{base_url}/search",
-        params={"q": query, "format": "json"},
-        timeout=SEARCH_TIMEOUT,
-    )
+        raise ModuleError("credential_missing", "SearXNG 未配置：未设置 SEARXNG_URL")
+    try:
+        resp = requests.get(
+            f"{base_url}/search",
+            params={"q": query, "format": "json"},
+            timeout=SEARCH_TIMEOUT,
+        )
+    except requests.exceptions.Timeout:
+        raise ModuleError("upstream_timeout", "SearXNG 调用超时")
     if resp.status_code != 200:
-        raise RuntimeError(f"SearXNG 返回 {resp.status_code}: {resp.text}")
+        raise ModuleError("upstream_error", f"SearXNG 返回 {resp.status_code}: {resp.text}", resp.status_code)
     items = resp.json().get("results", [])
     return [
         SearchResult(title=v.get("title", ""), url=v.get("url", ""), snippet=v.get("content", ""))
@@ -271,13 +313,13 @@ def do_search(query: str, provider: str | None = None,
     credentials 为本次调用的用户凭证（params["credentials"]），对 baidu/bing
     等需 key 的源优先生效；缺 key 时返回明确的配置引导错误。
     """
-    name = (provider or _first_available_provider()).lower().strip()
+    name = (provider or _first_available_provider_with_credentials(credentials)).lower().strip()
     if not provider:
-        logger.info("search 未传 provider，兜底使用 %s；上游应先调 list_sources 显式选源", name)
+        logger.info("search 未传 provider，按凭证兜底使用 %s", name)
     if not _provider_key_available(name, credentials):
         hint = _KEY_MISSING_HINTS.get(
             name, f"搜索源 {name} 不可用（未配置凭据），请先调 list_sources 查看可用源")
-        raise HTTPException(status_code=400, detail=hint)
+        raise ModuleError("credential_missing", hint)
     if name == "baidu":
         return _search_baidu(query, credentials)
     if name == "bing":
@@ -286,7 +328,7 @@ def do_search(query: str, provider: str | None = None,
         return _search_searxng(query)
     if name == "duckduckgo":
         return _search_duckduckgo(query)
-    raise HTTPException(status_code=400, detail=f"不支持的搜索源: {name}")
+    raise ModuleError("unsupported_provider", f"不支持的搜索源: {name}")
 
 
 def do_fetch(url: str) -> dict[str, Any]:
@@ -325,21 +367,36 @@ def execute(req: ExecuteRequest) -> dict[str, Any]:
         if action == "search":
             query = params.get("query") or params.get("q")
             if not query:
-                raise HTTPException(status_code=400, detail="search 需要参数 query")
+                raise ModuleError("parameter_invalid", "search 需要参数 query")
             provider = params.get("provider") or params.get("source")
             results = do_search(str(query), provider, _read_credentials(params))
             return {"provider": provider or _first_available_provider(), "results": [r.model_dump() for r in results]}
         if action == "fetch":
             url = params.get("url")
             if not url:
-                raise HTTPException(status_code=400, detail="fetch 需要参数 url")
+                raise ModuleError("parameter_invalid", "fetch 需要参数 url")
             return do_fetch(str(url))
-        raise HTTPException(status_code=400, detail=f"不支持的 action: {action}")
-    except HTTPException:
-        raise
+        raise ModuleError("unsupported_action", f"不支持的 action: {action}")
+    except ModuleError as e:
+        # 返回结构化错误码（error_code/error_message/upstream_status），网关透传给 LLM 与调试者
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error_code": e.code,
+                "error_message": e.message,
+                "upstream_status": e.upstream_status,
+            },
+        )
     except Exception as e:
         logger.exception("execute 失败")
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error_code": "module_internal_error",
+                "error_message": str(e),
+                "upstream_status": None,
+            },
+        )
 
 
 if __name__ == "__main__":

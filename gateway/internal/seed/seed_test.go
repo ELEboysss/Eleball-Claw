@@ -75,3 +75,47 @@ func TestSearchWebSKUs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), total)
 }
+
+// TestSkillMakerSKU 预置官方 Prompt 型秘技「秘技制造机」：SystemPrompt 非空、ManifestJSON 空，
+// 免费、官方、开发类；幂等重跑不产生重复。
+func TestSkillMakerSKU(t *testing.T) {
+	repo := setupSeedTestRepo(t)
+	logger := zap.NewNop()
+
+	require.NoError(t, SkillMakerSKU(repo, logger))
+
+	item, err := repo.GetByID("skill-maker")
+	require.NoError(t, err)
+	assert.Equal(t, "秘技制造机", item.Name)
+	assert.Equal(t, int64(0), item.PriceDanwan)
+	assert.Nil(t, item.PriceElegant)
+	assert.Equal(t, model.AgentStatusApproved, item.Status)
+	assert.Equal(t, "开发", item.Category)
+	assert.Equal(t, "官方", item.CreatorName)
+	assert.Equal(t, model.AgentLevelXuan, item.Level)
+
+	// Prompt 型关键断言：SystemPrompt 非空、ManifestJSON 为空、Manifest() 返回 nil
+	assert.NotEmpty(t, item.SystemPrompt)
+	assert.Empty(t, item.ManifestJSON)
+	m, err := item.Manifest()
+	require.NoError(t, err)
+	assert.Nil(t, m)
+	// SystemPrompt 含方法论关键短语
+	assert.Contains(t, item.SystemPrompt, "标准接口")
+	assert.Contains(t, item.SystemPrompt, "ToolManifest")
+
+	// 幂等：重跑不报错、不产生重复
+	require.NoError(t, SkillMakerSKU(repo, logger))
+	total, err := repo.Count()
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), total)
+
+	// 同步路径：篡改后重跑能回写文件内容
+	item.SystemPrompt = "被改坏的旧值"
+	require.NoError(t, repo.Update(item))
+	require.NoError(t, SkillMakerSKU(repo, logger))
+	restored, err := repo.GetByID("skill-maker")
+	require.NoError(t, err)
+	assert.NotEqual(t, "被改坏的旧值", restored.SystemPrompt)
+	assert.Contains(t, restored.SystemPrompt, "标准接口")
+}

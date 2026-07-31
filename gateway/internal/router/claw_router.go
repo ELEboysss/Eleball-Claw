@@ -42,10 +42,15 @@ func NewClawRouter(
 	publicSettingHandler *handler.PublicSettingHandler,
 	releaseHandler *handler.ReleaseHandler,
 	clawConsoleHandler *handler.ClawConsoleHandler,
+	clawCwdHandler *handler.ClawCwdHandler,
+	clawFilesHandler *handler.ClawFilesHandler,
+	clawWorktreeHandler *handler.ClawWorktreeHandler,
 	cloudAccount *service.CloudAccountService,
 	adminEleAgentModelHandler *handler.AdminEleAgentModelHandler,
 	adminSettingHandler *handler.AdminSettingHandler,
 	assistantHandler *handler.AssistantHandler,
+	teamHandler *handler.TeamHandler,
+	teamMemoryHandler *handler.TeamMemoryHandler,
 	systemHandler *handler.SystemHandler,
 ) *gin.Engine {
 	if cfg.Server.Mode == "release" {
@@ -140,6 +145,8 @@ func NewClawRouter(
 				auth.GET("/agent/sessions", agentWorkflowHandler.ListSessions)
 				auth.DELETE("/agent/sessions", agentWorkflowHandler.DeleteSessions)
 				auth.GET("/agent/sessions/:id", agentWorkflowHandler.GetSession)
+				auth.GET("/agent/sessions/:id/audit", agentWorkflowHandler.GetSessionAudit)
+				auth.POST("/agent/sessions/:id/fork", agentWorkflowHandler.ForkSession)
 				auth.DELETE("/agent/sessions/:id", agentWorkflowHandler.DeleteSession)
 			}
 
@@ -172,6 +179,20 @@ func NewClawRouter(
 			auth.PATCH("/assistants/:id", assistantHandler.UpdateAssistant)
 			auth.DELETE("/assistants/:id", assistantHandler.DeleteAssistant)
 			auth.PUT("/assistants/:id/items", assistantHandler.SetAssistantItems)
+
+			// 对话分组（Agent Team）：组内对话共享记忆的前置实体，按 user_id 隔离
+			auth.GET("/teams", teamHandler.ListTeams)
+			auth.POST("/teams", teamHandler.CreateTeam)
+			auth.GET("/teams/:id", teamHandler.GetTeam)
+			auth.PATCH("/teams/:id", teamHandler.UpdateTeam)
+			auth.DELETE("/teams/:id", teamHandler.DeleteTeam)
+
+			// 组共享记忆（Agent Team P2，校验组归属当前用户）
+			if teamMemoryHandler != nil {
+				auth.GET("/teams/:id/memories", teamMemoryHandler.ListMemories)
+				auth.POST("/teams/:id/memories", teamMemoryHandler.CreateMemory)
+				auth.DELETE("/teams/:id/memories/:memoryId", teamMemoryHandler.DeleteMemory)
+			}
 
 			// 本地控制台（替代云端 /v1/admin/*）：P3 扩充，仅 JWT 用户登录（无 admin gate / admin auth）。
 			// 复用既有 handler，端点挂到 /claw-console/* 下。
@@ -214,6 +235,23 @@ func NewClawRouter(
 				// 本地设置（读写；页面已裁剪为本地生效项，云端运营类设置不在此暴露）
 				console.GET("/settings", adminSettingHandler.GetSettings)
 				console.PUT("/settings", adminSettingHandler.UpdateSettings)
+
+				// AR-06：本地工作目录选择与校验（DirectoryPicker 消费，仅 claw）
+				console.GET("/cwd/browse", clawCwdHandler.BrowseCwd)
+				console.POST("/cwd/validate", clawCwdHandler.ValidateCwd)
+
+				// AR-11：文件浏览器/预览（FileExplorer/FileViewer 消费，仅 claw）
+				console.GET("/files", clawFilesHandler.Files)
+				console.GET("/git/status", clawFilesHandler.GitStatus)
+				// AR-21：文件管理（新建/移动/删除目录与文件，FileExplorer 消费，仅 claw）
+				console.POST("/files/mkdir", clawFilesHandler.CreateDir)
+				console.POST("/files/move", clawFilesHandler.Move)
+				console.DELETE("/files", clawFilesHandler.Delete)
+
+				// AR-17 O16：worktree 列出/创建/删除（WorktreeSwitcher 消费，仅 claw）
+				console.GET("/worktrees", clawWorktreeHandler.ListWorktrees)
+				console.POST("/worktrees", clawWorktreeHandler.CreateWorktree)
+				console.DELETE("/worktrees", clawWorktreeHandler.RemoveWorktree)
 			}
 		}
 

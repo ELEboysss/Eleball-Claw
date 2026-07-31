@@ -202,6 +202,13 @@ func (l *AgentToolLoader) buildToolFunc(manifest *model.ToolManifest, agentID st
 			if moduleID != "" {
 				input["__module_id__"] = moduleID
 			}
+			// SKU 封装的固定参数（如 search-web baidu SKU 的 provider=baidu）：
+			// 从 metadata 注入，LLM 无需感知也无需传递，避免误选源或漏传 provider。
+			if fixedProvider, ok := manifest.Metadata["provider"]; ok && fixedProvider != "" {
+				if _, exists := input["provider"]; !exists {
+					input["provider"] = fixedProvider
+				}
+			}
 		}
 
 		return driver.Execute(ctx, action, input, env)

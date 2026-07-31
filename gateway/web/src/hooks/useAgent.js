@@ -15,6 +15,8 @@ export function useAgent() {
   // 按真实时间顺序维护的 Agent 执行步骤，用于线性展示 thinking / tool / answer
   const [steps, setSteps] = useState([])
   const abortRef = useRef(false)
+  // AR-02：AbortController 真正断连，让服务端 ctx 取消停止后续工具调用与 token 消耗
+  const abortControllerRef = useRef(null)
 
   const reset = useCallback(() => {
     setStatus('idle')
@@ -29,12 +31,16 @@ export function useAgent() {
     setWarning('')
     setSteps([])
     abortRef.current = false
+    abortControllerRef.current = null
   }, [])
 
-  const execute = useCallback(({ conversationId, message, attachments = [], history = [], model, provider, baseUrl, apiKey, enableTools, enableWebSearch, searchProvider, assistantId }) => {
+  const execute = useCallback(({ conversationId, message, attachments = [], history = [], model, provider, baseUrl, apiKey, enableTools, enableWebSearch, searchProvider, assistantId, cwd }) => {
     reset()
     setStatus('executing')
     abortRef.current = false
+    // AR-02：为本次执行创建 AbortController，abort() 调 controller.abort() 真正断连
+    const controller = new AbortController()
+    abortControllerRef.current = controller
 
     return new Promise((resolve, reject) => {
       let finalAnswer = ''
@@ -61,6 +67,8 @@ export function useAgent() {
           enable_tools: enableTools,
           enable_web_search: enableWebSearch,
           search_provider: searchProvider,
+          // AR-11：claw 本地工作目录（cwd），文件工具/Shell 据此解析；空时不传
+          cwd: cwd || undefined,
           // 会话绑定的助手；空字符串时不传该字段，后端回退到会话值/全部已激活工具
           assistant_id: assistantId || undefined
         },
@@ -68,11 +76,13 @@ export function useAgent() {
           if (abortRef.current) return
           switch (event.event) {
             case 'tool_call': {
+              const sessionId = event.data.session_id || ''
               const callStep = {
                 step: event.data.step,
                 tool: event.data.tool,
                 arguments: event.data.arguments,
-                status: 'running'
+                status: 'running',
+                sessionId
               }
               finalToolSteps.push(callStep)
               finalSteps = [...finalSteps, { type: 'tool_call', ...callStep }]
@@ -83,7 +93,10 @@ export function useAgent() {
             }
             case 'tool_result': {
               const { step, tool, status, output, error_message } = event.data
-              const resultIndex = finalToolSteps.findIndex(s => s.step === step)
+              // Agent Team P5：子循环 step 编号从 1 重启，按 (sessionId, step) 匹配避免与主循环撞号
+              const sessionId = event.data.session_id || ''
+              const matchKey = (s) => s.step === step && (s.sessionId || '') === sessionId
+              const resultIndex = finalToolSteps.findIndex(matchKey)
               if (resultIndex >= 0) {
                 finalToolSteps[resultIndex] = {
                   ...finalToolSteps[resultIndex],
@@ -92,8 +105,7 @@ export function useAgent() {
                   error: error_message
                 }
               }
-              // 同步更新 finalSteps，确保 resolve 时一定拿到最新状态
-              const stepIndex = finalSteps.findIndex(s => (s.type === 'tool_call' || s.type === 'tool_result') && s.step === step)
+              const stepIndex = finalSteps.findIndex(s => (s.type === 'tool_call' || s.type === 'tool_result') && matchKey(s))
               if (stepIndex >= 0) {
                 finalSteps = finalSteps.map((s, idx) =>
                   idx === stepIndex
@@ -101,16 +113,15 @@ export function useAgent() {
                     : s
                 )
               } else {
-                finalSteps = [...finalSteps, { type: 'tool_result', step, tool, status, output, error: error_message }]
+                finalSteps = [...finalSteps, { type: 'tool_result', step, tool, status, output, error: error_message, sessionId }]
               }
-              // 函数式更新 React state，避免闭包被覆盖
               setToolSteps(prev => prev.map(s =>
-                s.step === step
+                matchKey(s)
                   ? { ...s, status, output, error: error_message }
                   : s
               ))
               setSteps(prev => {
-                const idx = prev.findIndex(s => (s.type === 'tool_call' || s.type === 'tool_result') && s.step === step)
+                const idx = prev.findIndex(s => (s.type === 'tool_call' || s.type === 'tool_result') && matchKey(s))
                 if (idx >= 0) {
                   return prev.map((s, i) =>
                     i === idx
@@ -118,61 +129,65 @@ export function useAgent() {
                       : s
                   )
                 }
-                return [...prev, { type: 'tool_result', step, tool, status, output, error: error_message }]
+                return [...prev, { type: 'tool_result', step, tool, status, output, error: error_message, sessionId }]
               })
               break
             }
             case 'reasoning': {
+              const sessionId = event.data.session_id || ''
               const delta = event.data.delta || ''
-              finalReasoning += delta
+              // Agent Team P5：子 agent 推理不污染主对话 reasoning（仅主循环 sessionId='' 累入）
+              if (sessionId === '') finalReasoning += delta
               const last = finalSteps[finalSteps.length - 1]
-              if (last && last.type === 'thinking') {
+              if (last && last.type === 'thinking' && (last.sessionId || '') === sessionId) {
                 finalSteps = finalSteps.map((s, idx) =>
                   idx === finalSteps.length - 1
                     ? { ...s, content: s.content + delta }
                     : s
                 )
               } else {
-                finalSteps = [...finalSteps, { type: 'thinking', content: delta }]
+                finalSteps = [...finalSteps, { type: 'thinking', content: delta, sessionId }]
               }
-              setReasoningContent(prev => prev + delta)
+              if (sessionId === '') setReasoningContent(prev => prev + delta)
               setSteps(prev => {
                 const lastStep = prev[prev.length - 1]
-                if (lastStep && lastStep.type === 'thinking') {
+                if (lastStep && lastStep.type === 'thinking' && (lastStep.sessionId || '') === sessionId) {
                   return prev.map((s, idx) =>
                     idx === prev.length - 1
                       ? { ...s, content: s.content + delta }
                       : s
                   )
                 }
-                return [...prev, { type: 'thinking', content: delta }]
+                return [...prev, { type: 'thinking', content: delta, sessionId }]
               })
               break
             }
             case 'intermediate_answer': {
+              const sessionId = event.data.session_id || ''
               const delta = event.data.delta || ''
-              finalIntermediate += delta
+              // Agent Team P5：子 agent 中间回答不污染主对话 intermediate（仅主循环累入）
+              if (sessionId === '') finalIntermediate += delta
               const last = finalSteps[finalSteps.length - 1]
-              if (last && last.type === 'intermediate') {
+              if (last && last.type === 'intermediate' && (last.sessionId || '') === sessionId) {
                 finalSteps = finalSteps.map((s, idx) =>
                   idx === finalSteps.length - 1
                     ? { ...s, content: s.content + delta }
                     : s
                 )
               } else {
-                finalSteps = [...finalSteps, { type: 'intermediate', content: delta }]
+                finalSteps = [...finalSteps, { type: 'intermediate', content: delta, sessionId }]
               }
-              setIntermediateAnswer(prev => prev + delta)
+              if (sessionId === '') setIntermediateAnswer(prev => prev + delta)
               setSteps(prev => {
                 const lastStep = prev[prev.length - 1]
-                if (lastStep && lastStep.type === 'intermediate') {
+                if (lastStep && lastStep.type === 'intermediate' && (lastStep.sessionId || '') === sessionId) {
                   return prev.map((s, idx) =>
                     idx === prev.length - 1
                       ? { ...s, content: s.content + delta }
                       : s
                   )
                 }
-                return [...prev, { type: 'intermediate', content: delta }]
+                return [...prev, { type: 'intermediate', content: delta, sessionId }]
               })
               break
             }
@@ -245,6 +260,13 @@ export function useAgent() {
               setSteps(prev => [...prev, { type: 'error', message: finalError }])
               break
             }
+            case 'cancelled': {
+              // AR-02：服务端确认取消（ctx 取消后尽力下发，连接可能已断无法收到）
+              setStatus('done')
+              finalSteps = [...finalSteps, { type: 'cancelled' }]
+              setSteps(prev => [...prev, { type: 'cancelled' }])
+              break
+            }
             case 'done':
               setStatus('done')
               if (finalError) {
@@ -259,13 +281,21 @@ export function useAgent() {
                   toolSummary: finalToolSummary,
                   warning: finalWarning,
                   sessionId: event.data?.session_id || '',
+                  usage: event.data?.usage || null, // AR-07：用量可见性（tokens/cost/步数/上下文规模）
                   steps: finalSteps
                 })
               }
               break
           }
-        }
+        },
+        controller.signal // AR-02：传入 AbortController.signal
       ).catch(err => {
+        // AR-02：用户主动取消（AbortError）不算错误，置为 done/cancelled 状态
+        if (err.name === 'AbortError' || abortRef.current) {
+          setStatus('done')
+          resolve({ answer: finalAnswer, toolSteps: finalToolSteps, reasoningContent: finalReasoning, intermediateAnswer: finalIntermediate, resources: finalResources, toolSummary: finalToolSummary, warning: finalWarning, sessionId: '', usage: null, steps: finalSteps, cancelled: true })
+          return
+        }
         setStatus('error')
         setError(err.message || '请求失败')
         reject(err)
@@ -275,6 +305,11 @@ export function useAgent() {
 
   const abort = useCallback(() => {
     abortRef.current = true
+    // AR-02：真正断连，触发服务端 ctx 取消，停止后续工具调用与 token 消耗
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      abortControllerRef.current = null
+    }
   }, [])
 
   return {

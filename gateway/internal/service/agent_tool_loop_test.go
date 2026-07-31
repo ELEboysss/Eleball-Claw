@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/eleball/gateway/pkg/llm"
@@ -161,6 +162,58 @@ func TestToolCallingLoop_ReachMaxSteps(t *testing.T) {
 	}
 }
 
+func TestToolCallingLoop_BareJSONFeedback(t *testing.T) {
+	// 模型第一轮用裸 JSON 调 Shell（无标记），应被反馈而非执行；
+	// 第二轮改用结构化 tool_calls，正常执行。AR-25 反馈式。
+	registry := NewToolRegistryWithDeps(&mockRunner{shellOutput: "ok"}, &mockSearchProvider{result: map[string]interface{}{"results": []string{"r1"}}})
+	loop := NewToolCallingLoop(registry, 5)
+	client := &mockAgentLLM{
+		responses: []llm.ChatChunk{
+			{Delta: `[{"name":"Shell","parameters":{"command":"echo","args":["hello"]}}]`},
+			{ToolCalls: []llm.ToolCall{
+				{ID: "tc1", Type: "function", Function: llm.ToolCallFunction{Name: "Shell", Arguments: `{"command":"echo","args":["hello"]}`}},
+			}},
+			{Delta: "done"},
+		},
+	}
+
+	result, err := loop.Run(context.Background(), client, "m", nil, []llm.Message{{Role: "user", Content: "run echo"}}, &ToolEnv{}, nil, nil)
+	if err != nil {
+		t.Fatalf("不应报错: %v", err)
+	}
+	// 裸 JSON 那轮被反馈（不执行），只有结构化那轮执行 -> 1 条记录
+	if len(result.Records) != 1 {
+		t.Fatalf("裸 JSON 应被反馈不执行，期望 1 条记录，实际 %d: %v", len(result.Records), result.Records)
+	}
+	if result.Records[0].Tool != "Shell" {
+		t.Fatalf("工具名不对: %v", result.Records[0].Tool)
+	}
+	if result.FinalContent != "done" {
+		t.Fatalf("最终回答不对: %v", result.FinalContent)
+	}
+}
+
+func TestToolCallingLoop_BareJSONNotResolvedTransfers(t *testing.T) {
+	// 裸 JSON name 不命中 registry（如正文里的 JSON 数据/示例）-> 不当工具调用，透传原文。AR-25。
+	registry := NewToolRegistry()
+	loop := NewToolCallingLoop(registry, 3)
+	client := &mockAgentLLM{
+		responses: []llm.ChatChunk{
+			{Delta: `{"name":"SomeData","parameters":{"x":1}}`},
+		},
+	}
+	result, err := loop.Run(context.Background(), client, "m", nil, []llm.Message{{Role: "user", Content: "hi"}}, &ToolEnv{}, nil, nil)
+	if err != nil {
+		t.Fatalf("不应报错: %v", err)
+	}
+	if len(result.Records) != 0 {
+		t.Fatalf("不命中的裸 JSON 不应执行工具: %v", result.Records)
+	}
+	if result.FinalContent != `{"name":"SomeData","parameters":{"x":1}}` {
+		t.Fatalf("应透传原 JSON，实际: %v", result.FinalContent)
+	}
+}
+
 func TestToolResultToString(t *testing.T) {
 	if s := toolResultToString(nil, "error"); s != "工具执行失败: error" {
 		t.Fatalf("错误结果转换不对: %v", s)
@@ -169,6 +222,98 @@ func TestToolResultToString(t *testing.T) {
 	b, _ := json.Marshal(out)
 	if s := toolResultToString(out, ""); s != string(b) {
 		t.Fatalf("正常结果转换不对: %v", s)
+	}
+}
+
+func TestToolCallingLoop_FunctionGet(t *testing.T) {
+	// AR-26：模型发 FunctionGet 元工具调用 -> 拦截返回工具列表 -> 模型随后调真实工具执行。
+	registry := NewToolRegistryWithDeps(&mockRunner{shellOutput: "ok"}, &mockSearchProvider{})
+	loop := NewToolCallingLoop(registry, 5)
+	tools := []map[string]interface{}{
+		{"type": "function", "function": map[string]interface{}{
+			"name":        "Shell",
+			"description": "执行 shell 命令",
+			"parameters":  map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
+		}},
+	}
+	client := &mockAgentLLM{
+		responses: []llm.ChatChunk{
+			{ToolCalls: []llm.ToolCall{
+				{ID: "fg1", Type: "function", Function: llm.ToolCallFunction{Name: "FunctionGet", Arguments: `{}`}},
+			}},
+			{ToolCalls: []llm.ToolCall{
+				{ID: "tc1", Type: "function", Function: llm.ToolCallFunction{Name: "Shell", Arguments: `{"command":"echo","args":["hello"]}`}},
+			}},
+			{Delta: "done"},
+		},
+	}
+
+	result, err := loop.Run(context.Background(), client, "m", tools, []llm.Message{{Role: "user", Content: "run echo"}}, &ToolEnv{}, nil, nil)
+	if err != nil {
+		t.Fatalf("不应报错: %v", err)
+	}
+	// 第一轮 FunctionGet 拦截（返回工具列表，不执行真实工具），第二轮 Shell 执行 -> 2 条记录
+	if len(result.Records) != 2 {
+		t.Fatalf("期望 2 条记录（FunctionGet + Shell），实际 %d: %v", len(result.Records), result.Records)
+	}
+	if result.Records[0].Tool != "FunctionGet" {
+		t.Fatalf("第一条记录应为 FunctionGet: %v", result.Records[0].Tool)
+	}
+	list, ok := result.Records[0].Output["tool_list"].(string)
+	if !ok || !strings.Contains(list, "Shell") {
+		t.Fatalf("FunctionGet 应返回含 Shell 的工具列表: %v", result.Records[0].Output)
+	}
+	if result.Records[1].Tool != "Shell" {
+		t.Fatalf("第二条记录应为 Shell: %v", result.Records[1].Tool)
+	}
+	if result.FinalContent != "done" {
+		t.Fatalf("最终回答不对: %v", result.FinalContent)
+	}
+}
+
+func TestToolCallingLoop_FunctionGetLimit(t *testing.T) {
+	// AR-26：FunctionGet 累积超过 maxFunctionGetCalls(2) -> 第三次返回「勿重复请求」，不循环塞。
+	// 中间穿插 Shell 调用避免触发连续同参数 loop 检测，单独验证 FunctionGet 累积限流。
+	registry := NewToolRegistryWithDeps(&mockRunner{shellOutput: "ok"}, &mockSearchProvider{})
+	loop := NewToolCallingLoop(registry, 10)
+	tools := []map[string]interface{}{
+		{"type": "function", "function": map[string]interface{}{"name": "Shell", "description": "shell"}},
+	}
+	client := &mockAgentLLM{
+		responses: []llm.ChatChunk{
+			{ToolCalls: []llm.ToolCall{{ID: "fg1", Type: "function", Function: llm.ToolCallFunction{Name: "FunctionGet", Arguments: `{}`}}}},
+			{ToolCalls: []llm.ToolCall{{ID: "s1", Type: "function", Function: llm.ToolCallFunction{Name: "Shell", Arguments: `{"command":"echo","args":["a"]}`}}}},
+			{ToolCalls: []llm.ToolCall{{ID: "fg2", Type: "function", Function: llm.ToolCallFunction{Name: "FunctionGet", Arguments: `{}`}}}},
+			{ToolCalls: []llm.ToolCall{{ID: "s2", Type: "function", Function: llm.ToolCallFunction{Name: "Shell", Arguments: `{"command":"echo","args":["b"]}`}}}},
+			{ToolCalls: []llm.ToolCall{{ID: "fg3", Type: "function", Function: llm.ToolCallFunction{Name: "FunctionGet", Arguments: `{}`}}}},
+			{Delta: "done"},
+		},
+	}
+
+	result, err := loop.Run(context.Background(), client, "m", tools, []llm.Message{{Role: "user", Content: "hi"}}, &ToolEnv{}, nil, nil)
+	if err != nil {
+		t.Fatalf("不应报错: %v", err)
+	}
+	// 记录：fg1, s1, fg2, s2, fg3 = 5 条
+	if len(result.Records) != 5 {
+		t.Fatalf("期望 5 条记录，实际 %d: %v", len(result.Records), result.Records)
+	}
+	var fgLists []string
+	for _, r := range result.Records {
+		if r.Tool == "FunctionGet" {
+			if list, ok := r.Output["tool_list"].(string); ok {
+				fgLists = append(fgLists, list)
+			}
+		}
+	}
+	if len(fgLists) != 3 {
+		t.Fatalf("期望 3 次 FunctionGet，实际 %d", len(fgLists))
+	}
+	if !strings.Contains(fgLists[0], "Shell") {
+		t.Fatalf("第一次 FunctionGet 应返回工具列表: %v", fgLists[0])
+	}
+	if !strings.Contains(fgLists[2], "勿重复请求") {
+		t.Fatalf("第三次 FunctionGet 应返回勿重复请求: %v", fgLists[2])
 	}
 }
 

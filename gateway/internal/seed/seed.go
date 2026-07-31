@@ -306,6 +306,90 @@ func SearchWebSKUs(repo *repository.AgentRepo, logger *zap.Logger) error {
 	return nil
 }
 
+// SkillMakerSKU 预置官方 Prompt 型秘技「秘技制造机」（driver=none）。
+// 与 SearchWebSKUs 不同，它是纯 Prompt 型：SystemPrompt 非空、ManifestJSON 为空，
+// 不注入工具列表、不走 tool_call，激活并绑定到 Agent Team 助手后，其 SystemPrompt
+// 经 buildChildSystemPrompt 以「技能提示」注入子 agent，全程指导开发集市秘技模块。
+// 免费上架（PriceDanwan=0）、无模块依赖 -> IsCloudPurchasedAgent 返回 false -> 免 VIP 门控，
+// claw 本地走 0 元购买路径自动激活。参照 docs/tool-driver-guide.md §13 Prompt 型 SKU。
+func SkillMakerSKU(repo *repository.AgentRepo, logger *zap.Logger) error {
+	adminID := "00000000-0000-0000-0000-000000000000"
+	now := time.Now()
+	prompt := loadSkillMakerPrompt(logger)
+	if prompt == "" {
+		logger.Warn("秘技制造机 SystemPrompt 加载为空，跳过预置")
+		return nil
+	}
+	item := &model.AgentItem{
+		ID:           "skill-maker",
+		Name:         "秘技制造机",
+		Description:  "官方专家秘技：指导从零开发符合 Eleball 集市标准接口的秘技模块（定位、/health+/execute、module.json、ToolManifest、验证），激活并绑定助手后注入造模块方法论。",
+		Category:     "开发",
+		PriceDanwan:  0,
+		PriceElegant: nil,
+		Status:       model.AgentStatusApproved,
+		Level:        model.AgentLevelXuan,
+		CreatorID:    adminID,
+		CreatorName:  "官方",
+		CreatedAt:    now,
+		SystemPrompt: prompt,
+		// ManifestJSON 留空：Prompt 型秘技不携带可执行 manifest，不进工具列表。
+	}
+
+	existing, err := repo.GetByID(item.ID)
+	if err == nil && existing != nil {
+		if shouldSyncPrompt(existing.SystemPrompt, prompt) {
+			existing.SystemPrompt = prompt
+			if err := repo.Update(existing); err != nil {
+				logger.Warn("同步秘技制造机 SystemPrompt 失败", zap.String("id", item.ID), zap.Error(err))
+			} else {
+				logger.Info("已同步秘技制造机 SystemPrompt")
+			}
+		}
+		return nil
+	}
+	if err := repo.Create(item); err != nil {
+		return err
+	}
+	logger.Info("已预置官方秘技「秘技制造机」", zap.String("id", item.ID))
+	return nil
+}
+
+// shouldSyncPrompt 判断是否需要用文件中的 SystemPrompt 覆盖数据库值。
+// 仅当文件加载成功（非空）且与数据库内容不一致时才覆盖，逻辑与 shouldSyncManifest 一致。
+func shouldSyncPrompt(existing, fromFile string) bool {
+	if fromFile == "" {
+		return false
+	}
+	return strings.TrimSpace(existing) != strings.TrimSpace(fromFile)
+}
+
+// loadSkillMakerPrompt 加载秘技制造机的 SystemPrompt 纯文本（marketplace/skill-maker/SKILL.md）。
+// 优先从内嵌 marketplace.FS 读取（单文件二进制分发可用），失败回退文件系统候选路径。
+// 与 loadManifestJSON 不同：返回纯文本而非 JSON，空串表示加载失败。
+func loadSkillMakerPrompt(logger *zap.Logger) string {
+	const relativePath = "skill-maker/SKILL.md"
+	if data, err := marketplace.FS.ReadFile(relativePath); err == nil {
+		return string(data)
+	}
+	candidates := []string{
+		filepath.Join("marketplace", relativePath),
+		filepath.Join("..", "marketplace", relativePath),
+		filepath.Join("..", "..", "marketplace", relativePath),
+		filepath.Join("..", "..", "..", "marketplace", relativePath),
+		filepath.Join("gateway", "marketplace", relativePath),
+		filepath.Join("..", "gateway", "marketplace", relativePath),
+	}
+	for _, p := range candidates {
+		data, err := os.ReadFile(p)
+		if err == nil {
+			return string(data)
+		}
+	}
+	logger.Warn("无法加载秘技制造机 SystemPrompt", zap.String("path", relativePath))
+	return ""
+}
+
 // shouldSyncManifest 判断是否需要用 marketplace 文件中的 manifest 覆盖数据库值。
 // 仅当文件加载成功（非空、非 "{}"）且与数据库内容不一致时才覆盖：
 // 既能让历史预置的旧 manifest 自动补齐后续新增字段（如 credentials），

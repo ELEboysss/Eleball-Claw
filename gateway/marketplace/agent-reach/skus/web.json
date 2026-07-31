@@ -2,7 +2,7 @@
   "$schema": "../../../specs/tool-manifest-schema.json",
   "id": "com.eleball.tools.agent_reach.web",
   "name": "全网洞察",
-  "description": "基于 Agent-Reach 的网页阅读与全网语义搜索，零配置即用。",
+  "description": "基于 Agent-Reach 的网页阅读与全网语义搜索，搜索需配置 Exa API Key。",
   "driver": "agent_reach",
   "runtime_type": "remote",
   "category": "互联网",
@@ -32,5 +32,15 @@
     { "name": "web_read", "description": "读取任意网页正文" },
     { "name": "search", "description": "全网语义搜索" }
   ],
+  "credentials": {
+    "exa_api_key": {
+      "type": "api_key",
+      "label": "Exa API Key",
+      "description": "全网语义搜索依赖 Exa.ai，需填写 API Key；缺失则该秘技不可激活",
+      "placeholder": "exa-xxxxxxxx",
+      "required": true,
+      "scope": "module"
+    }
+  },
   "timeout_seconds": 60
 }

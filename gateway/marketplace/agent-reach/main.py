@@ -17,6 +17,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import requests
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -195,9 +196,8 @@ def build_command(action: str, params: dict, user_id: str) -> list[str]:
         platform = str(params.get("platform", "")).lower()
         if platform == "bilibili":
             return ["bili", "search", query, "--type", "video", "-n", str(limit)]
-        q = json.dumps(query)
-        call = f"exa.web_search_exa(query: {q}, numResults: {limit})"
-        return ["mcporter", "call", call]
+        # 默认走 exa HTTP API（由 execute 直接处理，需 exa_api_key 凭证）
+        return None
 
     if action == "youtube_subtitles":
         cookies_file = user_cookie_dir(user_id) / "youtube_cookies.txt"
@@ -247,6 +247,46 @@ def build_command(action: str, params: dict, user_id: str) -> list[str]:
     raise ValueError(f"不支持的 action: {action}")
 
 
+def do_search(query: str, limit: int, exa_key: str) -> dict:
+    """调用 Exa HTTP API 执行全网语义搜索。exa_key 由网关注入 params.credentials.exa_api_key。"""
+    if not exa_key:
+        return {
+            "content": "",
+            "error": "缺少 Exa API Key，请在秘技凭证配置中填写 exa_api_key",
+            "error_code": "agent_reach_credential_missing",
+        }
+    if not query:
+        raise HTTPException(status_code=400, detail="query 不能为空")
+    try:
+        resp = requests.post(
+            "https://api.exa.ai/search",
+            headers={"x-api-key": exa_key, "Content-Type": "application/json"},
+            json={"query": query, "numResults": limit, "contents": {"text": {"maxCharacters": 1000}}},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return {
+                "content": "",
+                "error": f"exa HTTP {resp.status_code}: {resp.text[:200]}",
+                "error_code": "agent_reach_execution_failed",
+            }
+        results = resp.json().get("results", [])
+        lines, sources = [], []
+        for r in results:
+            title = r.get("title", "")
+            url = r.get("url", "")
+            text = r.get("text", "")
+            sources.append(url)
+            lines.append(f"## {title}\n{url}\n{text}")
+        return {"content": "\n\n".join(lines), "sources": sources}
+    except requests.RequestException as e:
+        return {
+            "content": "",
+            "error": f"exa 请求失败: {e}",
+            "error_code": "agent_reach_execution_failed",
+        }
+
+
 # ---------------------------------------------------------------------------
 # 标准模块接口
 # ---------------------------------------------------------------------------
@@ -280,6 +320,15 @@ def execute(req: ExecuteRequest):
         cmd = build_command(req.action, req.params, req.user_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    # search 默认走 exa HTTP API（需 exa_api_key 凭证，由网关注入 params.credentials）
+    if cmd is None:
+        exa_key = credentials.get("exa_api_key") or ""
+        return do_search(
+            query=str(req.params.get("query", "")),
+            limit=int(req.params.get("limit", 5) or 5),
+            exa_key=exa_key,
+        )
 
     timeout = 120 if req.action in ("youtube_subtitles", "social_search", "social_read") else 60
     result = run(cmd, req.user_id, timeout, github_token=github_token)

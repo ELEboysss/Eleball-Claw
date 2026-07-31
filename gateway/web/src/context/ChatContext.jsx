@@ -108,9 +108,13 @@ export function ChatProvider({ children }) {
             searchProvider: conv.search_provider || 'baidu',
             // 会话绑定的助手（空字符串 = 未绑定，使用全部已激活工具）
             assistantId: conv.assistant_id || '',
+            // 会话所属的对话分组（空字符串 = 未分组）
+            teamId: conv.team_id || '',
             // 会话绑定的模型配置（model 身份），切换对话时据此恢复 currentProfileId
             model: conv.model || '',
             provider: conv.provider || '',
+            // AR-23/AR-27：会话持久化的工作目录（claw 本地）。重启后从后端恢复，避免 cwd 丢失
+            cwd: conv.cwd || '',
             createdAt: conv.created_at,
             updatedAt: conv.updated_at
           }
@@ -227,6 +231,7 @@ export function ChatProvider({ children }) {
             }
           }
           return {
+            id: m.id,
             role: m.role,
             content: m.content,
             reasoningContent: m.reasoning_content || '',

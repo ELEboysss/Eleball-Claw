@@ -71,6 +71,17 @@ const (
 	CredentialTypeToken CredentialType = "token"
 )
 
+// CredentialScope 凭证存储粒度：决定同模块多 SKU 是否共享同一份凭证值
+type CredentialScope string
+
+const (
+	// CredentialScopeModule 模块级共享：同 driver 下所有 SKU 共用一份（存 module:<driver> 桶）
+	// 适用于同模块 ≥2 个 SKU 共用的上游 API Key / 平台 Cookie
+	CredentialScopeModule CredentialScope = "module"
+	// CredentialScopeSKU SKU 专属：仅本 SKU 使用（存 SKU 桶，默认）
+	CredentialScopeSKU CredentialScope = "sku"
+)
+
 // CredentialDef 单个凭证字段定义
 // SKU 通过 credentials 声明自己需要用户预先填入哪些登录态或密钥。
 type CredentialDef struct {
@@ -84,6 +95,8 @@ type CredentialDef struct {
 	Placeholder string `json:"placeholder,omitempty"`
 	// Required 是否必填
 	Required bool `json:"required,omitempty"`
+	// Scope 存储粒度：module=同模块共享 / sku=仅本 SKU（默认，空值等同 sku）
+	Scope CredentialScope `json:"scope,omitempty"`
 }
 
 // ToolManifest 工具/秘技标准描述格式

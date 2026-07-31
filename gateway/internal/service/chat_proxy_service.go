@@ -209,12 +209,25 @@ func (s *ChatProxyService) ChatStream(ctx context.Context, req *ChatRequest, w i
 
 	llmReq := toLLMChatRequest(*req, messages)
 
-	chunkChan, err := client.ChatStream(ctx, llmReq)
+	// AR-04 P0-3：建立流连接失败时按可重试上游错误（5xx/429/网络层）重试，重试可换 Key。
+	// 仅「建立连接失败」（ChatStream 返回 err）可重试；一旦开始返回 chunk 即不可重试。
+	var chunkChan <-chan llm.ChatChunk
+	err = callWithUpstreamRetry(ctx, s.maxRetries, func() error {
+		var cerr error
+		chunkChan, cerr = client.ChatStream(ctx, llmReq)
+		if cerr != nil {
+			if keyID != "" {
+				_ = s.keyManager.ReportFailureWithErr(keyID, cerr)
+			}
+			// 失败后尝试换 Key 重建客户端，供下一次重试使用（无可用 Key 时保留原 client）
+			if nc, nk, gerr := s.getClient(req.Provider); gerr == nil {
+				client, keyID = nc, nk
+			}
+		}
+		return cerr
+	})
 	if err != nil {
 		s.logger.Error("调用上游模型流式接口失败", zap.String("provider", req.Provider), zap.Error(err))
-		if keyID != "" {
-			_ = s.keyManager.ReportFailure(keyID, err.Error())
-		}
 		return nil, err
 	}
 
@@ -556,6 +569,8 @@ type openAIDeltaContent struct {
 	Content          string `json:"content,omitempty"`
 	ReasoningContent string `json:"reasoning_content,omitempty"`
 	Role             string `json:"role,omitempty"`
+	// ToolCalls 透传上游返回的 Function Calling 调用，Agent 工作流依赖该字段解析工具调用
+	ToolCalls []llm.ToolCall `json:"tool_calls,omitempty"`
 }
 
 // supportsChat 判断当前 provider/model 是否支持文字对话。
@@ -818,9 +833,47 @@ func toOpenAIStreamChunk(chunk llm.ChatChunk) openAIStreamChunk {
 				Delta: openAIDeltaContent{
 					Content:          chunk.Delta,
 					ReasoningContent: chunk.ReasoningContent,
+					ToolCalls:        chunk.ToolCalls,
 				},
 				FinishReason: finishReason,
 			},
 		},
 	}
+}
+
+// ToOpenAICompletion 将内部 llm.ChatChunk 转为标准 OpenAI 非流式响应。
+// /v1/chat/completions 非流式响应须兼容标准 OpenAI 结构（choices[0].message），
+// 便于标准 OpenAI 客户端直连；替代旧的 {code,message,data:chunk} 私有信封。
+func ToOpenAICompletion(chunk llm.ChatChunk, model string) map[string]interface{} {
+	message := map[string]interface{}{
+		"role":    "assistant",
+		"content": chunk.Delta,
+	}
+	if chunk.ReasoningContent != "" {
+		message["reasoning_content"] = chunk.ReasoningContent
+	}
+	if len(chunk.ToolCalls) > 0 {
+		message["tool_calls"] = chunk.ToolCalls
+	}
+	finishReason := chunk.FinishReason
+	if finishReason == "" {
+		finishReason = "stop"
+	}
+	resp := map[string]interface{}{
+		"id":      "chatcmpl_eleball",
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   model,
+		"choices": []map[string]interface{}{
+			{
+				"index":         0,
+				"message":       message,
+				"finish_reason": finishReason,
+			},
+		},
+	}
+	if chunk.Usage != nil {
+		resp["usage"] = chunk.Usage
+	}
+	return resp
 }

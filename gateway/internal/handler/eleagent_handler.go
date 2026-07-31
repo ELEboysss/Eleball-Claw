@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -28,7 +29,19 @@ func (h *EleAgentHandler) GetCredentials(c *gin.Context) {
 	subProvider := c.Query("subProvider")
 	subModel := c.Query("subModel")
 
-	creds, err := h.eleAgentService.GetCredentials(userID.(string), subProvider, subModel)
+	// 凭证 BaseURL 指向网关自身（按请求实际 scheme://host），前端回调本网关 /chat/completions，
+	// 由网关本地解析模型配置并代理上游，使本地配置的 Ele Agent 模型在非 agent 对话也能命中
+	// （与 agent 模式一致），不再直接指向云端导致本地缺配的模型找不到。
+	scheme := "http"
+	if c.Request.TLS != nil {
+		scheme = "https"
+	}
+	if xfp := c.GetHeader("X-Forwarded-Proto"); xfp != "" {
+		scheme = xfp
+	}
+	gatewayBase := fmt.Sprintf("%s://%s/v1", scheme, c.Request.Host)
+
+	creds, err := h.eleAgentService.GetCredentials(userID.(string), subProvider, subModel, gatewayBase)
 	if err != nil {
 		// 余额不足返回 402 Payment Required
 		if _, ok := err.(*service.BalanceInsufficientError); ok {

@@ -3,11 +3,14 @@ import useSEO from '../hooks/useSEO'
 import { useNavigate } from 'react-router-dom'
 import {
   Send,
+  MoreHorizontal,
+  Square,
   Bot,
   User as UserIcon,
   AlertCircle,
   Settings,
   ChevronDown,
+  ChevronRight,
   Menu,
   Plus,
   Copy,
@@ -19,19 +22,31 @@ import {
   FileText,
   Download,
   Globe,
-  Wrench
+  Wrench,
+  Folders,
+  FolderInput,
+  GitFork,
+  Folder,
+  PanelRight
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { useChat } from '../context/ChatContext'
-import { modelApi, billingApi, eleAgentApi, conversationApi, agentApi, assistantApi } from '../api/client'
+import { modelApi, billingApi, eleAgentApi, conversationApi, agentApi, assistantApi, teamApi, clawFilesApi } from '../api/client'
 import { streamChat } from '../utils/sse'
 import LoginModal from '../components/LoginModal'
 import ModelSettings from '../components/ModelSettings'
 import AssistantPicker from '../components/AssistantPicker'
+import TeamModal from '../components/TeamModal'
 import AgentSwitch from '../components/AgentSwitch'
 import AgentStream from '../components/AgentStream'
 import AgentSteps from '../components/AgentSteps'
 import AgentSessionList from '../components/AgentSessionList'
+import ConfirmDialog from '../components/ConfirmDialog'
+import BranchNavigator from '../components/BranchNavigator'
+import DirectoryPicker from '../components/DirectoryPicker'
+import FileExplorer from '../components/FileExplorer'
+import WorktreeSwitcher from '../components/WorktreeSwitcher'
+import FileViewer from '../components/FileViewer'
 import { useAgent } from '../hooks/useAgent'
 import { Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
@@ -55,7 +70,9 @@ import {
   deleteConversation,
   generateTitle,
   loadKeepThinking,
-  saveKeepThinking
+  saveKeepThinking,
+  loadForkLinks,
+  saveForkLinks
 } from '../utils/conversation'
 import {
   fileToContentPart,
@@ -86,8 +103,11 @@ export default function Chat() {
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState([])
   const [loading, setLoading] = useState(false)
+  // AR-05-O5：替代原生 confirm() 的确认弹窗状态
+  const [confirmState, setConfirmState] = useState({ open: false })
   const [models, setModels] = useState([])
   const [balance, setBalance] = useState(null)
+  const [lastUsage, setLastUsage] = useState(null) // AR-07：最近一次 Agent 执行用量（tokens/cost/步数/上下文规模）
   const [loginOpen, setLoginOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -99,10 +119,27 @@ export default function Chat() {
   // 会话绑定的助手（'' = 默认，全部已激活工具）与我的助手列表
   const [assistantId, setAssistantId] = useState('')
   const [assistants, setAssistants] = useState([])
+  // AR-11：本地工作目录（cwd）+ 文件浏览器/预览侧栏
+  const [cwd, setCwd] = useState('')
+  const [cwdPickerOpen, setCwdPickerOpen] = useState(false)
+  const [filePanelOpen, setFilePanelOpen] = useState(false)
+  const [selectedFile, setSelectedFile] = useState(null) // 相对 cwd 的路径
+  const [gitStatus, setGitStatus] = useState(null)
+  const [fileRefreshKey, setFileRefreshKey] = useState(0)
   // 助手切换弹窗：以独立按钮触发、弹窗内切换，避免下拉浮层被输入框 overflow-hidden 裁切
   const [assistantPickerOpen, setAssistantPickerOpen] = useState(false)
   const [keepThinking, setKeepThinking] = useState(() => loadKeepThinking(user?.user_id))
+  // AR-13 O12：< sm 折叠次级工具开关到「更多」
+  const [moreToolsOpen, setMoreToolsOpen] = useState(false)
+  // AR-12 会话分叉：分支链接图 { [convId]: { parent, children[] } }，持久化按 userId 隔离
+  const [forkLinks, setForkLinks] = useState(() => loadForkLinks(user?.user_id))
+  const [forkingMessageId, setForkingMessageId] = useState(null) // AR-12：分叉中状态（禁用按钮 + 指示）
   const [agentSessionRefresh, setAgentSessionRefresh] = useState(0)
+  // 对话分组（Agent Team）：侧栏分组展示与「移动到组」用
+  const [teams, setTeams] = useState([])
+  const [teamModalOpen, setTeamModalOpen] = useState(false)
+  // 移动到组下拉：记录当前展开归属选择的对话 ID
+  const [moveMenuConvId, setMoveMenuConvId] = useState(null)
   // 当前正在流式更新的 Agent assistant 消息 ID，用于把 steps 实时写入对话消息
   const [streamingAgentMsgId, setStreamingAgentMsgId] = useState(null)
   const messagesEndRef = useRef(null)
@@ -120,7 +157,8 @@ export default function Chat() {
     resources: agentResources,
     error: agentError,
     warning: agentWarning,
-    steps: agentSteps
+    steps: agentSteps,
+    abort: abortAgent
   } = useAgent()
 
   // 模型 Profile 状态（与 App 端 ModelProfile 对齐），按当前登录用户隔离
@@ -169,6 +207,7 @@ export default function Chat() {
       nextProfiles[0]?.id
     setCurrentProfileId(nextProfileId)
     setKeepThinking(loadKeepThinking(user.user_id))
+    setForkLinks(loadForkLinks(user.user_id))
 
     // 强制重新获取 Ele Agent 凭证，避免使用旧账户缓存
     nextProfiles.filter((p) => p.provider === 'ELE_AGENT').forEach((p) => clearCachedCredentials(p.id, user.user_id))
@@ -178,6 +217,11 @@ export default function Chat() {
   useEffect(() => {
     saveKeepThinking(keepThinking, user?.user_id)
   }, [keepThinking, user?.user_id])
+
+  // AR-12：分叉链接图变更后持久化
+  useEffect(() => {
+    saveForkLinks(forkLinks, user?.user_id)
+  }, [forkLinks, user?.user_id])
 
   // 拉取 Ele Agent 模型列表与余额；账户切换时也会重新拉取
   useEffect(() => {
@@ -234,6 +278,23 @@ export default function Chat() {
 
   // BYOK 模型不支持 Agent 工具，切换模型时自动关闭
   const supportsAgent = currentProfile?.provider === 'ELE_AGENT'
+  // AR-07：token 数值紧凑格式化（1234 -> 1.2k，1234567 -> 1.2M）
+  const formatTokens = (n) => {
+    if (n == null) return ''
+    if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M'
+    if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
+    return String(n)
+  }
+  // AR-05：aria-live 执行状态播报文本（思考中/调用工具/生成回答/出错），供屏幕阅读器感知 Agent 执行进度
+  const statusAnnouncement = agentStatus === 'error'
+    ? '生成出错'
+    : !loading
+      ? ''
+      : agentStatus === 'executing'
+        ? '正在调用工具'
+        : agentStatus === 'answering'
+          ? '正在生成回答'
+          : '正在思考'
   useEffect(() => {
     if (!supportsAgent && enableTools) {
       setEnableTools(false)
@@ -280,6 +341,64 @@ export default function Chat() {
     }
   }, [isLoggedIn])
 
+  // 拉取对话分组列表（与助手列表同节奏：切回页面时刷新，保证分组管理后及时同步）
+  const loadTeams = useCallback(() => {
+    if (!isLoggedIn) return
+    teamApi
+      .list()
+      .then((d) => setTeams(Array.isArray(d) ? d : d?.items || []))
+      .catch(() => {})
+  }, [isLoggedIn])
+
+  useEffect(() => {
+    loadTeams()
+    const onFocus = () => {
+      if (document.visibilityState === 'visible') loadTeams()
+    }
+    document.addEventListener('visibilitychange', onFocus)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      document.removeEventListener('visibilitychange', onFocus)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [loadTeams])
+
+  // 侧栏分组：按 team_id 分桶，未分组单列一组（key ''）
+  const groupedConversations = useMemo(() => {
+    const buckets = new Map()
+    for (const conv of conversations) {
+      const key = conv.teamId || ''
+      if (!buckets.has(key)) buckets.set(key, [])
+      buckets.get(key).push(conv)
+    }
+    return buckets
+  }, [conversations])
+
+  // 移动对话到组：PATCH team_id（空串=移出分组）并就地更新本地会话的 teamId。
+  // 新建后尚未产生消息的对话后端尚无记录（PATCH 返回「对话不存在」），
+  // 此时无法归组，提示用户先发送消息落库后再试。
+  const handleMoveConversation = async (convId, teamId) => {
+    setMoveMenuConvId(null)
+    const target = teamId || ''
+    try {
+      await conversationApi.update(convId, { team_id: target })
+    } catch (err) {
+      const msg = err.message || ''
+      const isNotFound = /不存在|not found|404/i.test(msg)
+      if (isNotFound) {
+        setError('对话未落库，请发送消息后再试')
+      } else {
+        console.error('移动分组失败:', err)
+        setError('移动分组失败')
+      }
+      return
+    }
+    setConversations((prev) =>
+      prev.map((c) => (c.id === convId ? { ...c, teamId: target } : c))
+    )
+    loadTeams()
+  }
+
   // 切换对话时恢复该对话的 Agent / 联网 / 搜索源 / 助手 / 模型设置
   useEffect(() => {
     if (!currentConversation) return
@@ -289,6 +408,8 @@ export default function Chat() {
     const exists = availableSearchProviders.some((p) => p.name === savedProvider)
     setSearchProvider(exists ? savedProvider : (availableSearchProviders[0]?.name || 'baidu'))
     setAssistantId(currentConversation.assistantId || '')
+    // AR-23：恢复该会话持久化的工作目录（cwd 跟会话走）
+    setCwd(currentConversation.cwd || '')
     // 恢复该对话绑定的模型：按 model+provider 找匹配 profile（直接 setState，不触发后端写）
     if (currentConversation.model && currentConversation.provider) {
       const matched = profiles.find(
@@ -329,6 +450,16 @@ export default function Chat() {
       .catch(() => {})
   }, [enableTools, enableWebSearch, searchProvider, assistantId, currentConversation?.id, isLoggedIn])
 
+  // AR-11：cwd 变化或手动刷新时拉取 Git 状态，供 FileExplorer 色标
+  useEffect(() => {
+    if (!cwd) { setGitStatus(null); return }
+    let cancelled = false
+    clawFilesApi.gitStatus(cwd)
+      .then((d) => { if (!cancelled) setGitStatus(d) })
+      .catch(() => { if (!cancelled) setGitStatus(null) })
+    return () => { cancelled = true }
+  }, [cwd, fileRefreshKey])
+
   const updateConversations = (next) => {
     setConversations(next)
   }
@@ -353,6 +484,27 @@ export default function Chat() {
         })
       }
       const res = await conversationApi.saveMessage(conversationId, payload)
+      // AR-12/AR-28：对齐服务端消息 ID（服务端生成 msg_xxx），供分叉 entry_id 解析。
+      // assistant 消息传入的常是拷贝（未开「保留思考」时 {…msg, reasoningContent:''}），
+      // 直接改 message.id 只改到拷贝；必须用占位 ID 在会话状态里定位显示消息并回写真实 ID，
+      // 否则分叉 ListMessagesUpTo 按占位 entry_id 找不到记录（「分叉点消息无效：record not found」）。
+      const realId = res?.message?.id
+      if (realId && realId !== message.id) {
+        const placeholderId = message.id
+        message.id = realId
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.id === conversationId
+              ? {
+                  ...c,
+                  messages: c.messages.map((m) =>
+                    m.id === placeholderId ? { ...m, id: realId } : m
+                  )
+                }
+              : c
+          )
+        )
+      }
       return res?.title || null
     } catch (err) {
       console.error('保存消息失败:', err)
@@ -375,14 +527,77 @@ export default function Chat() {
     switchConversation(conv.id)
   }
 
+  // AR-12：从分叉点消息复制父 session 对话历史到新 session，切换到新分叉对话继续探索。
+  // sessionId 优先取消息自带（assistant 消息携带 agentResult.sessionId），否则懒加载当前对话最近 session。
+  const handleFork = async (messageId, sessionIdHint) => {
+    if (loading || forkingMessageId) return
+    if (!currentConversationId || !messageId) return
+    setForkingMessageId(messageId)
+    try {
+      let sid = sessionIdHint
+      if (!sid) {
+        try {
+          const res = await agentApi.listSessions(1, 100)
+          const s = (res?.items || []).find((it) => it.conversation_id === currentConversationId)
+          sid = s?.id
+        } catch (e) { /* ignore，下方兜底报错 */ }
+      }
+      if (!sid) {
+        setError('无法分叉：未找到当前会话')
+        return
+      }
+      const res = await agentApi.forkSession(sid, messageId)
+      const newConvId = res?.conversation_id
+      if (!newConvId) {
+        setError('分叉失败：未返回新会话')
+        return
+      }
+      // 本地建立分叉对话占位，随后从服务端拉取复制的历史消息
+      const parent = currentConversation
+      setConversations((prev) => [
+        {
+          id: newConvId,
+          title: (parent?.title || '分叉对话') + ' (分叉)',
+          model: parent?.model || '',
+          provider: parent?.provider || '',
+          teamId: parent?.teamId || '',
+          messages: [],
+          status: 'active'
+        },
+        ...prev
+      ])
+      await refreshMessages(newConvId)
+      // 记录分支链接：新对话 -> 父；父 -> 新对话（去重）
+      setForkLinks((prev) => {
+        const next = { ...prev }
+        next[newConvId] = { parent: currentConversationId, children: next[newConvId]?.children || [] }
+        const p = next[currentConversationId] || { parent: null, children: [] }
+        next[currentConversationId] = {
+          ...p,
+          children: Array.from(new Set([...(p.children || []), newConvId]))
+        }
+        return next
+      })
+      switchConversation(newConvId)
+      setAgentSessionRefresh((n) => n + 1)
+    } catch (e) {
+      console.error('分叉失败:', e)
+      setError('分叉失败：' + (e?.message || '未知错误'))
+    } finally {
+      setForkingMessageId(null)
+    }
+  }
+
   const handleNewChat = () => {
     const conv = createConversation()
     // 快照当前模型配置到新对话（model 身份），切换对话时据此恢复
     conv.model = currentProfile?.modelName || ''
     conv.provider = currentProfile?.provider || ''
+    conv.cwd = cwd || '' // AR-23：快照当前工作目录到新对话
     const next = [conv, ...conversations]
     updateConversations(next)
     switchConversation(conv.id)
+    setLastUsage(null) // AR-07：新对话清空用量状态条
   }
 
   const handleDeleteConversation = async (e, id) => {
@@ -408,7 +623,18 @@ export default function Chat() {
   }
 
   const handleDeleteAllConversations = async () => {
-    if (!confirm('确定删除所有对话吗？此操作不可恢复。')) return
+    // AR-05-O5：用 ConfirmDialog 替代原生 confirm()
+    const ok = await new Promise((resolve) => {
+      setConfirmState({
+        open: true,
+        title: '删除全部对话',
+        message: '确定删除所有对话吗？此操作不可恢复。',
+        confirmText: '删除',
+        onConfirm: () => { setConfirmState({ open: false }); resolve(true) },
+        onCancel: () => { setConfirmState({ open: false }); resolve(false) }
+      })
+    })
+    if (!ok) return
     // 串行删除，避免并发过多请求；未同步到后端的对话删除会失败，忽略即可
     for (const conv of conversations) {
       try {
@@ -420,7 +646,17 @@ export default function Chat() {
     const welcome = createConversation()
     updateConversations([welcome])
     switchConversation(welcome.id)
-    alert('对话历史已清空')
+    // AR-05-O5：用 ConfirmDialog 替代原生 alert()
+    setConfirmState({
+      open: true,
+      title: '已完成',
+      message: '对话历史已清空',
+      danger: false,
+      confirmText: '好的',
+      cancelText: '关闭',
+      onConfirm: () => setConfirmState({ open: false }),
+      onCancel: () => setConfirmState({ open: false })
+    })
   }
 
   const updateCurrentMessages = (updater) => {
@@ -580,12 +816,14 @@ export default function Chat() {
 
   const handleSend = useCallback(async () => {
     if (!input.trim() && attachments.length === 0) return
-    if (!isLoggedIn) {
-      setLoginOpen(true)
-      return
-    }
     if (!currentProfile) {
       setError('请先配置模型：点击右上角设置图标')
+      return
+    }
+    // BYOK（非 Ele Agent）自带 API Key，不依赖平台登录态，可直接对话；
+    // Ele Agent / agent 走云端 LLM API，需登录态。
+    if (!isLoggedIn && currentProfile.provider === 'ELE_AGENT') {
+      setLoginOpen(true)
       return
     }
     if (!currentConversation) {
@@ -676,6 +914,7 @@ export default function Chat() {
       setStreamingAgentMsgId(assistantMessage.id)
 
       let agentResult = null
+      setLastUsage(null) // AR-07：执行开始清空旧用量，避免流式期间显示陈旧数据
       try {
         agentResult = await executeAgent({
           conversationId: currentConversation.id,
@@ -689,7 +928,8 @@ export default function Chat() {
           enableTools: true,
           enableWebSearch,
           searchProvider,
-          assistantId
+          assistantId,
+          cwd
         })
       } catch (err) {
         const errorMsg = err.message || 'Agent 执行失败'
@@ -704,6 +944,7 @@ export default function Chat() {
         }))
         setError(errorMsg)
       }
+      setLastUsage(agentResult?.usage || null) // AR-07：用量可见性（claw 无 cost_amount，状态条自动裁剪成本）
 
       // Agent 流式结束或失败后，统一用 agentResult 中的最终字段覆盖占位消息，
       // 并做最终持久化。toolSummary 拼入 content 作为历史上下文。
@@ -711,9 +952,12 @@ export default function Chat() {
       const finalSteps = agentResult?.steps || assistantMessage.steps || []
       const finalAnswer = agentResult?.answer || agentResult?.intermediateAnswer || assistantMessage.answer || ''
       const finalToolSummary = agentResult?.toolSummary || assistantMessage.toolSummary || ''
+      const isCancelled = agentResult?.cancelled === true
       const hasErrorStep = finalSteps.some((s) => s.type === 'error')
       const hasWarningStep = finalSteps.some((s) => s.type === 'warning')
-      const fallbackContent = hasErrorStep
+      const fallbackContent = isCancelled
+        ? '已停止生成'
+        : hasErrorStep
         ? 'Agent 执行出错'
         : hasWarningStep
         ? 'Agent 已完成，但未生成有效回答'
@@ -1014,7 +1258,7 @@ export default function Chat() {
   }
 
   return (
-    <div className="relative h-[calc(100vh-64px)] flex overflow-hidden bg-eleball-bg">
+    <div className="relative h-[calc(100dvh-64px)] flex overflow-hidden bg-eleball-bg">
       {/* 侧边栏：对话历史 */}
       {sidebarOpen && (
         <div
@@ -1023,7 +1267,7 @@ export default function Chat() {
         />
       )}
       <aside
-        className={`fixed md:static left-0 top-16 md:top-0 bottom-0 w-64 bg-eleball-surface border-r border-eleball-outline-variant z-50 flex flex-col overflow-y-auto transition-transform duration-200 md:h-[calc(100vh-64px)] ${
+        className={`fixed md:static left-0 top-16 md:top-0 bottom-0 w-64 bg-eleball-surface border-r border-eleball-outline-variant z-50 flex flex-col overflow-y-auto transition-transform duration-200 md:h-[calc(100dvh-64px)] ${
           sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0 md:block'
         }`}
       >
@@ -1033,14 +1277,21 @@ export default function Chat() {
             <button
               onClick={handleNewChat}
               className="p-1.5 rounded-lg text-eleball-primary hover:bg-eleball-primary-light transition-colors"
-              title="新对话"
+              aria-label="新对话" title="新对话"
             >
               <Plus className="w-4 h-4" />
             </button>
             <button
+              onClick={() => setTeamModalOpen(true)}
+              className="p-1.5 rounded-lg text-eleball-text-secondary hover:bg-eleball-surface-variant transition-colors"
+              aria-label="分组管理" title="分组管理"
+            >
+              <Folders className="w-4 h-4" />
+            </button>
+            <button
               onClick={handleDeleteAllConversations}
               className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors"
-              title="删除全部对话"
+              aria-label="删除全部对话" title="删除全部对话"
             >
               <Trash2 className="w-4 h-4" />
             </button>
@@ -1052,42 +1303,64 @@ export default function Chat() {
             </button>
           </div>
         </div>
-        <div className="p-2 space-y-1">
-          {conversations.map((conv) => (
-            <div
-              key={conv.id}
-              onClick={() => switchConversation(conv.id)}
-              className={`group flex items-center gap-2 px-3 py-2 rounded-xl cursor-pointer transition-colors ${
-                conv.id === currentConversationId
-                  ? 'bg-eleball-primary-light text-eleball-primary'
-                  : 'hover:bg-eleball-surface-variant text-eleball-text'
-              }`}
-            >
-              <Bot className="w-4 h-4 flex-shrink-0" />
-              <div className="flex-1 min-w-0">
-                <p className="text-sm truncate">{conv.title || '新对话'}</p>
-                <p className="text-[10px] opacity-70 truncate">
-                  {new Date(conv.updatedAt).toLocaleString('zh-CN', {
-                    month: 'short',
-                    day: 'numeric',
-                    hour: '2-digit',
-                    minute: '2-digit'
-                  })}
-                </p>
+        <div className="p-2 space-y-2">
+          {/* 各分组：仅渲染有对话落入的组，组名可点击进入分组详情 */}
+          {teams.map((team) => {
+            const convs = groupedConversations.get(team.id) || []
+            if (convs.length === 0) return null
+            return (
+              <div key={team.id}>
+                <button
+                  onClick={() => navigate(`/teams/${team.id}`)}
+                  className="flex items-center gap-1 px-2 py-1 w-full text-left hover:bg-eleball-surface-variant rounded-lg transition-colors"
+                  aria-label="查看分组详情" title="查看分组详情"
+                >
+                  <ChevronRight className="w-3 h-3 text-eleball-text-tertiary flex-shrink-0" />
+                  <span className="text-xs font-medium text-eleball-text-secondary truncate">{team.name}</span>
+                  <span className="text-[10px] text-eleball-text-tertiary flex-shrink-0">({convs.length})</span>
+                </button>
+                <div className="space-y-0.5">
+                  {convs.map((conv) => (
+                    <ConversationItem
+                      key={conv.id}
+                      conv={conv}
+                      isActive={conv.id === currentConversationId}
+                      onSelect={switchConversation}
+                      onDelete={handleDeleteConversation}
+                      onMove={setMoveMenuConvId}
+                    />
+                  ))}
+                </div>
               </div>
-              <button
-                onClick={(e) => handleDeleteConversation(e, conv.id)}
-                className={`p-1 rounded-md opacity-0 group-hover:opacity-100 transition-opacity ${
-                  conv.id === currentConversationId
-                    ? 'hover:bg-eleball-primary/20 text-eleball-primary'
-                    : 'hover:bg-eleball-outline text-eleball-text-secondary'
-                }`}
-                title="删除对话"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          ))}
+            )
+          })}
+          {/* 未分组 */}
+          {(() => {
+            const convs = groupedConversations.get('') || []
+            if (convs.length === 0) return null
+            return (
+              <div>
+                {teams.length > 0 && (
+                  <div className="flex items-center gap-1 px-2 py-1">
+                    <span className="text-xs font-medium text-eleball-text-tertiary">未分组</span>
+                    <span className="text-[10px] text-eleball-text-tertiary">({convs.length})</span>
+                  </div>
+                )}
+                <div className="space-y-0.5">
+                  {convs.map((conv) => (
+                    <ConversationItem
+                      key={conv.id}
+                      conv={conv}
+                      isActive={conv.id === currentConversationId}
+                      onSelect={switchConversation}
+                      onDelete={handleDeleteConversation}
+                      onMove={setMoveMenuConvId}
+                    />
+                  ))}
+                </div>
+              </div>
+            )
+          })()}
         </div>
         <div className="p-3 border-t border-eleball-outline-variant flex-shrink-0">
           <AgentSessionList onRefresh={agentSessionRefresh} onSelect={handleSelectSession} />
@@ -1097,12 +1370,12 @@ export default function Chat() {
       {/* 主对话区 */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Chat Header - 粘顶 */}
-        <div className="flex-shrink-0 z-30 bg-eleball-surface/95 backdrop-blur border-b border-eleball-outline-variant px-4 py-3 flex items-center justify-between">
+        <div className="flex-shrink-0 z-30 bg-eleball-surface border-b border-eleball-outline-variant px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <button
               onClick={() => setSidebarOpen(true)}
               className="md:hidden p-1.5 rounded-full text-eleball-text-secondary hover:bg-eleball-surface-variant transition-colors"
-              title="对话列表"
+              aria-label="对话列表" title="对话列表"
             >
               <Menu className="w-4 h-4" />
             </button>
@@ -1114,7 +1387,7 @@ export default function Chat() {
             <button
               onClick={handleNewChat}
               className="hidden sm:inline-flex items-center gap-1 text-xs font-medium text-eleball-primary bg-eleball-primary-light/50 hover:bg-eleball-primary-light px-3 py-1.5 rounded-full transition-colors"
-              title="新对话"
+              aria-label="新对话" title="新对话"
             >
               <Plus className="w-3.5 h-3.5" />
               新对话
@@ -1141,15 +1414,63 @@ export default function Chat() {
               <ChevronDown className="w-3.5 h-3.5 text-eleball-primary absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             </div>
 
+            {/* AR-11：工作目录选择 + 文件浏览器侧栏开关（仅 claw 本地） */}
+            <button
+              onClick={() => setCwdPickerOpen(true)}
+              className="hidden sm:inline-flex items-center gap-1 text-xs font-medium text-eleball-text-secondary bg-eleball-surface hover:bg-eleball-surface-variant px-2.5 py-1.5 rounded-full border border-eleball-outline transition-colors max-w-[140px]"
+              aria-label="选择工作目录" title={cwd || '选择工作目录'}
+            >
+              <Folder className="w-3.5 h-3.5 flex-shrink-0" />
+              <span className="truncate">{cwd ? cwd.split(/[\\/]/).pop() : '工作目录'}</span>
+            </button>
+            <button
+              onClick={() => setFilePanelOpen((v) => !v)}
+              className={`hidden sm:inline-flex flex-shrink-0 p-1.5 rounded-full transition-colors ${filePanelOpen ? 'text-eleball-primary bg-eleball-primary-light' : 'text-eleball-text-secondary bg-eleball-surface hover:bg-eleball-surface-variant'}`}
+              aria-label="文件浏览器" title="文件浏览器"
+            >
+              <PanelRight className="w-4 h-4" />
+            </button>
+
             {/* 模型配置入口：固定尺寸，防止被 flex 压缩导致显示不全 */}
             <button
               onClick={() => setSettingsOpen(true)}
               className="flex-shrink-0 p-1.5 rounded-full text-eleball-primary bg-eleball-primary-light/50 hover:bg-eleball-primary-light transition-colors"
-              title="模型配置"
+              aria-label="模型配置" title="模型配置"
             >
               <Settings className="w-3.5 h-3.5" />
             </button>
           </div>
+        </div>
+
+        {/* AR-07：用量可见性状态条（tokens/步数/成本/上下文规模），Agent 完成后展示；claw 无 cost_amount 自动裁剪成本 */}
+        {lastUsage && agentStatus === 'done' && !loading && (
+          <div className="flex-shrink-0 bg-eleball-surface/95 border-b border-eleball-outline-variant px-4 py-1 flex items-center gap-3 text-[11px] text-eleball-text-secondary overflow-x-auto">
+            <span className="inline-flex items-center gap-1 whitespace-nowrap">
+              <Check className="w-3 h-3 text-green-500" /> 完成
+            </span>
+            {lastUsage.total_tokens != null && (
+              <span className="whitespace-nowrap">{formatTokens(lastUsage.total_tokens)} tokens</span>
+            )}
+            {lastUsage.step_count > 0 && (
+              <span className="whitespace-nowrap">{lastUsage.step_count} 步</span>
+            )}
+            {lastUsage.prompt_tokens != null && (
+              <span className="whitespace-nowrap">上下文 {formatTokens(lastUsage.prompt_tokens)}</span>
+            )}
+            {lastUsage.cost_amount != null && (
+              <span className="whitespace-nowrap">{lastUsage.cost_amount} 弹丸</span>
+            )}
+          </div>
+        )}
+
+        {/* AR-12：会话分叉分支导航（父对话/子分叉跳转）；无分叉关系时组件返回 null */}
+        <div className="flex-shrink-0 bg-eleball-surface border-b border-eleball-outline-variant px-4 py-1 flex items-center gap-2">
+          <BranchNavigator
+            currentConversationId={currentConversationId}
+            forkLinks={forkLinks}
+            conversations={conversations}
+            onNavigate={switchConversation}
+          />
         </div>
 
         {/* Messages */}
@@ -1160,6 +1481,8 @@ export default function Chat() {
               message={message}
               isLast={idx === currentConversation.messages.length - 1}
               loading={loading}
+              onFork={handleFork}
+              forkingMessageId={forkingMessageId}
             />
           ))}
 
@@ -1173,7 +1496,7 @@ export default function Chat() {
         </div>
 
         {/* Input */}
-        <div className="flex-shrink-0 bg-eleball-surface border-t border-eleball-outline-variant p-3">
+        <div className="flex-shrink-0 bg-eleball-surface border-t border-eleball-outline-variant px-3 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
           <div className="max-w-3xl mx-auto">
             <div className="border border-eleball-outline rounded-2xl bg-white shadow-sm overflow-hidden focus-within:border-eleball-primary/40 focus-within:shadow-md transition-colors">
               <textarea
@@ -1210,7 +1533,7 @@ export default function Chat() {
                         onClick={() => handleAttachmentChange({ type: 'remove', id: att.id })}
                         disabled={loading}
                         className="p-0.5 rounded hover:bg-eleball-primary/20 text-eleball-text-secondary disabled:opacity-50"
-                        title="移除"
+                        aria-label="移除" title="移除"
                       >
                         <X className="w-3 h-3" />
                       </button>
@@ -1243,10 +1566,21 @@ export default function Chat() {
                     onChange={setEnableTools}
                     disabled={!supportsAgent || loading}
                   />
+                  {/* AR-13 O12：< sm 折叠次级工具开关到「更多」popover */}
+                  <button
+                    type="button"
+                    onClick={() => setMoreToolsOpen((v) => !v)}
+                    aria-label={moreToolsOpen ? '收起工具' : '更多工具'} title={moreToolsOpen ? '收起工具' : '更多工具'}
+                    className="sm:hidden inline-flex items-center gap-1 px-2 py-1.5 rounded-full text-xs font-medium border bg-transparent text-eleball-text-secondary border-eleball-outline hover:bg-gray-50 hover:text-eleball-text transition-colors"
+                  >
+                    <MoreHorizontal className="w-3.5 h-3.5" />
+                    <span>{moreToolsOpen ? '收起' : '更多'}</span>
+                  </button>
+                  <div className={`${moreToolsOpen ? 'flex' : 'hidden'} sm:flex items-center gap-2 flex-wrap`}>
                   <button
                     type="button"
                     onClick={() => setKeepThinking((v) => !v)}
-                    title="开启后将把模型的思考过程一并保存到对话历史"
+                    aria-label="开启后将把模型的思考过程一并保存到对话历史" title="开启后将把模型的思考过程一并保存到对话历史"
                     className={[
                       'inline-flex items-center gap-1 px-2 py-1.5 rounded-full text-xs font-medium border transition-colors',
                       keepThinking
@@ -1261,7 +1595,7 @@ export default function Chat() {
                     <button
                       type="button"
                       onClick={() => setEnableWebSearch((v) => !v)}
-                      title="启用后 Agent 可调用 SearchWeb / FetchURL 联网工具"
+                      aria-label="启用后 Agent 可调用 SearchWeb / FetchURL 联网工具" title="启用后 Agent 可调用 SearchWeb / FetchURL 联网工具"
                       className={[
                         'inline-flex items-center gap-1 px-2 py-1.5 rounded-full text-xs font-medium border transition-colors',
                         enableWebSearch
@@ -1279,7 +1613,7 @@ export default function Chat() {
                         value={searchProvider}
                         onChange={(e) => setSearchProvider(e.target.value)}
                         disabled={loading}
-                        title="选择联网搜索源"
+                        aria-label="选择联网搜索源" title="选择联网搜索源"
                         className="appearance-none bg-blue-50 hover:bg-blue-100 text-blue-600 text-xs font-medium pl-2.5 pr-7 py-1.5 rounded-full border border-blue-200 outline-none cursor-pointer transition-colors max-w-[120px] truncate disabled:opacity-50"
                       >
                         {availableSearchProviders.map((p) => (
@@ -1297,7 +1631,7 @@ export default function Chat() {
                       type="button"
                       onClick={() => setAssistantPickerOpen(true)}
                       disabled={loading}
-                      title="选择本会话使用的助手（已激活秘技的组合）"
+                      aria-label="选择本会话使用的助手（已激活秘技的组合）" title="选择本会话使用的助手（已激活秘技的组合）"
                       className="inline-flex items-center gap-1 px-2 py-1.5 rounded-full text-xs font-medium border transition-colors bg-purple-50 text-purple-600 border-purple-200 hover:bg-purple-100 disabled:opacity-50"
                     >
                       <span className="max-w-[96px] truncate">
@@ -1308,6 +1642,7 @@ export default function Chat() {
                       <ChevronDown className="w-3 h-3" />
                     </button>
                   )}
+                  </div>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
                   {supportsVisualGeneration && (
@@ -1319,7 +1654,7 @@ export default function Chat() {
                         navigate(`/visual?tab=${tab}${prompt ? `&prompt=${encodeURIComponent(prompt)}` : ''}`)
                       }}
                       className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-sm text-eleball-primary hover:bg-eleball-primary-light/30 transition-colors"
-                      title="去视觉页创作"
+                      aria-label="去视觉页创作" title="去视觉页创作"
                     >
                       {supportsVideo ? <Film className="w-4 h-4" /> : <Image className="w-4 h-4" />}
                       视觉创作
@@ -1329,30 +1664,114 @@ export default function Chat() {
                     type="button"
                     onClick={() => setSettingsOpen(true)}
                     className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-sm text-eleball-text-secondary hover:bg-eleball-surface-variant hover:text-eleball-text transition-colors"
-                    title="切换模型"
+                    aria-label="切换模型" title="切换模型"
                   >
                     <span className="max-w-[120px] truncate">
                       {currentProfile?.name || currentProfile?.modelName || '未配置模型'}
                     </span>
                     <ChevronDown className="w-4 h-4" />
                   </button>
-                  <button
-                    onClick={handleSend}
-                    disabled={loading || (!input.trim() && attachments.length === 0)}
-                    className="btn-primary p-3 rounded-full disabled:opacity-50"
-                    aria-label="发送消息"
-                  >
-                    <Send className="w-5 h-5" />
-                  </button>
+                  {/* AR-02：Agent 模式执行中显示停止按钮，调 abort 真正断连停止服务端工具循环 */}
+                  {loading && enableTools && supportsAgent && (agentStatus === 'executing' || agentStatus === 'answering') ? (
+                    <button
+                      onClick={abortAgent}
+                      className="p-3 rounded-full bg-red-500 hover:bg-red-600 text-white"
+                      aria-label="停止生成" title="停止生成"
+                    >
+                      <Square className="w-5 h-5" />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleSend}
+                      disabled={loading || (!input.trim() && attachments.length === 0)}
+                      className="btn-primary p-3 rounded-full disabled:opacity-50"
+                      aria-label="发送消息"
+                    >
+                      <Send className="w-5 h-5" />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
+          </div>
+          {/* AR-05：执行状态 aria-live 播报区（视觉隐藏，屏幕阅读器播报思考中/调用工具/生成回答/出错） */}
+          <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            {statusAnnouncement}
           </div>
           <p className="text-center text-xs text-eleball-text-tertiary mt-2">
             {user?.nickname || user?.username} · {currentLabel}
           </p>
         </div>
       </div>
+
+      {/* AR-11：文件浏览器/预览侧栏（仅 claw 本地，可折叠右栏；选中文件时切到 FileViewer） */}
+      {filePanelOpen && (
+        <aside className="hidden sm:flex flex-col w-80 lg:w-96 flex-shrink-0 border-l border-eleball-outline-variant bg-eleball-surface min-h-0">
+          {/* AR-17 O16：worktree 切换器（cwd 为 git 仓库顶层检出时显示） */}
+          {cwd && (
+            <div className="p-2 border-b border-eleball-outline-variant flex-shrink-0">
+              <WorktreeSwitcher
+                cwd={cwd}
+                onCwdChange={(newCwd) => {
+                  setCwd(newCwd)
+                  setSelectedFile(null)
+                  // AR-23/AR-27：持久化工作目录到会话（worktree 切换），并同步本地 conversation，
+                  // 避免恢复 effect（deps 含 availableSearchProviders）晚到时把 cwd 覆盖回旧值
+                  if (currentConversation?.id) {
+                    updateConversations((prev) =>
+                      prev.map((c) => (c.id === currentConversation.id ? { ...c, cwd: newCwd } : c))
+                    )
+                    conversationApi.update(currentConversation.id, { cwd: newCwd }).catch(() => {})
+                  }
+                }}
+              />
+            </div>
+          )}
+          <div className={`flex-1 min-h-0 ${selectedFile ? 'hidden' : 'flex flex-col'}`}>
+            <FileExplorer
+              cwd={cwd}
+              onOpenFile={(p) => setSelectedFile(p)}
+              gitStatus={gitStatus}
+              refreshKey={fileRefreshKey}
+            />
+          </div>
+          {selectedFile && (
+            <div className="flex-1 min-h-0 flex flex-col">
+              <FileViewer cwd={cwd} path={selectedFile} onClose={() => setSelectedFile(null)} />
+            </div>
+          )}
+        </aside>
+      )}
+
+      {/* AR-11：工作目录选择弹窗（选定后自动打开文件侧栏） */}
+      <DirectoryPicker
+        open={cwdPickerOpen}
+        onClose={() => setCwdPickerOpen(false)}
+        onSelect={(resolvedCwd) => {
+          setCwd(resolvedCwd)
+          setSelectedFile(null)
+          setFilePanelOpen(true)
+          // AR-23/AR-27：持久化工作目录到会话，供切换回来时恢复 + 后续 execute 回填；同步本地 conversation
+          if (currentConversation?.id) {
+            updateConversations((prev) =>
+              prev.map((c) => (c.id === currentConversation.id ? { ...c, cwd: resolvedCwd } : c))
+            )
+            conversationApi.update(currentConversation.id, { cwd: resolvedCwd }).catch(() => {})
+          }
+        }}
+      />
+
+      {/* AR-05-O5：确认弹窗（替代原生 confirm/alert） */}
+      <ConfirmDialog
+        open={confirmState.open}
+        title={confirmState.title}
+        message={confirmState.message}
+        danger={confirmState.danger !== false}
+        confirmText={confirmState.confirmText}
+        cancelText={confirmState.cancelText}
+        onConfirm={confirmState.onConfirm}
+        onCancel={confirmState.onCancel}
+      />
 
       <ModelSettings
         open={settingsOpen}
@@ -1373,6 +1792,111 @@ export default function Chat() {
       />
 
       <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} />
+
+      <TeamModal
+        open={teamModalOpen}
+        onClose={() => setTeamModalOpen(false)}
+        teams={teams}
+        onTeamsChange={loadTeams}
+      />
+
+      {/* 移动对话到分组：列出可选组 + 移出分组 */}
+      {moveMenuConvId && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setMoveMenuConvId(null)}
+        >
+          <div
+            className="bg-white rounded-2xl w-full max-w-xs max-h-[70vh] overflow-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-3 border-b border-eleball-outline flex items-center justify-between">
+              <h3 className="font-bold text-sm text-eleball-text">移动到分组</h3>
+              <button
+                onClick={() => setMoveMenuConvId(null)}
+                className="text-eleball-text-tertiary hover:text-eleball-text"
+              >
+                &times;
+              </button>
+            </div>
+            <div className="p-2 space-y-0.5">
+              {teams.length === 0 && (
+                <p className="text-xs text-eleball-text-secondary text-center py-4">
+                  还没有分组，请先到「分组管理」创建
+                </p>
+              )}
+              {teams.map((team) => (
+                <button
+                  key={team.id}
+                  onClick={() => handleMoveConversation(moveMenuConvId, team.id)}
+                  className="block w-full text-left px-3 py-2 rounded-lg text-sm text-eleball-text hover:bg-eleball-primary-light hover:text-eleball-primary transition-colors"
+                >
+                  {team.name}
+                </button>
+              ))}
+              {teams.length > 0 && <div className="my-1 border-t border-eleball-outline-variant" />}
+              <button
+                onClick={() => handleMoveConversation(moveMenuConvId, '')}
+                className="block w-full text-left px-3 py-2 rounded-lg text-sm text-eleball-text-secondary hover:bg-eleball-surface-variant transition-colors"
+              >
+                移出分组
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 对话侧栏条目：标题 + 时间 + 移动到组 / 删除（hover 显现）
+function ConversationItem({ conv, isActive, onSelect, onDelete, onMove }) {
+  return (
+    <div
+      onClick={() => onSelect(conv.id)}
+      className={`group flex items-center gap-2 px-3 py-2 rounded-xl cursor-pointer transition-colors ${
+        isActive
+          ? 'bg-eleball-primary-light text-eleball-primary'
+          : 'hover:bg-eleball-surface-variant text-eleball-text'
+      }`}
+    >
+      <Bot className="w-4 h-4 flex-shrink-0" />
+      <div className="flex-1 min-w-0">
+        <p className="text-sm truncate">{conv.title || '新对话'}</p>
+        <p className="text-[10px] opacity-70 truncate">
+          {new Date(conv.updatedAt).toLocaleString('zh-CN', {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+          })}
+        </p>
+      </div>
+      <button
+        onClick={(e) => {
+          e.stopPropagation()
+          onMove(conv.id)
+        }}
+        className={`p-1 rounded-md opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity ${
+          isActive
+            ? 'hover:bg-eleball-primary/20 text-eleball-primary'
+            : 'hover:bg-eleball-outline text-eleball-text-secondary'
+        }`}
+        aria-label="移动到分组" title="移动到分组"
+      >
+        <FolderInput className="w-3.5 h-3.5" />
+      </button>
+      <button
+        onClick={(e) => onDelete(e, conv.id)}
+        className={`p-1 rounded-md opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity ${
+          isActive
+            ? 'hover:bg-eleball-primary/20 text-eleball-primary'
+            : 'hover:bg-eleball-outline text-eleball-text-secondary'
+        }`}
+        aria-label="删除对话" title="删除对话"
+      >
+        <Trash2 className="w-3.5 h-3.5" />
+      </button>
     </div>
   )
 }
@@ -1409,7 +1933,7 @@ function ToolSummaryBlock({ summary }) {
   )
 }
 
-function MessageBubble({ message, isLast, loading }) {
+function MessageBubble({ message, isLast, loading, onFork, forkingMessageId }) {
   const isUser = message.role === 'user'
   const isAssistant = message.role === 'assistant'
 
@@ -1499,6 +2023,18 @@ function MessageBubble({ message, isLast, loading }) {
         )}
         {isAssistant && message.content && !loading && (
           <CopyButton text={message.content} />
+        )}
+        {/* AR-12：消息 hover「从此处分叉」按钮，复制到该消息为止的历史到新对话 */}
+        {message.id && !loading && onFork && (
+          <button
+            type="button"
+            onClick={() => onFork(message.id, message.sessionId)}
+            disabled={forkingMessageId === message.id}
+            aria-label="从此处分叉" title="从此处分叉"
+            className="absolute -bottom-2 -left-2 p-1 rounded-full bg-eleball-surface border border-eleball-outline-variant text-eleball-text-secondary opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity shadow-sm disabled:opacity-50"
+          >
+            <GitFork className="w-3 h-3" />
+          </button>
         )}
       </div>
     </div>
@@ -1599,8 +2135,8 @@ function CopyButton({ text }) {
   return (
     <button
       onClick={handleCopy}
-      className="absolute -bottom-2 -right-2 p-1 rounded-full bg-eleball-surface border border-eleball-outline-variant text-eleball-text-secondary opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"
-      title="复制内容"
+      className="absolute -bottom-2 -right-2 p-1 rounded-full bg-eleball-surface border border-eleball-outline-variant text-eleball-text-secondary opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity shadow-sm"
+      aria-label="复制内容" title="复制内容"
     >
       {copied ? (
         <Check className="w-3 h-3 text-eleball-success" />
@@ -1637,14 +2173,14 @@ function CodeBlock({ language, code }) {
           <button
             onClick={handleDownload}
             className="p-1 rounded hover:text-white"
-            title="下载文件"
+            aria-label="下载文件" title="下载文件"
           >
             <Download className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={handleCopy}
             className="p-1 rounded hover:text-white"
-            title="复制"
+            aria-label="复制" title="复制"
           >
             {copied ? <Check className="w-3.5 h-3.5 text-eleball-success" /> : <Copy className="w-3.5 h-3.5" />}
           </button>

@@ -42,7 +42,7 @@ func NewEleAgentService(chatService *ChatProxyService, eleAgentModelService *Ele
 // GetCredentials 获取 Ele Agent 调用凭证
 // subProvider: 子平台 Provider，如 qwen / openai / deepseek
 // subModel: 子平台模型名，如 Qwen/Qwen3-8B / gpt-4o
-func (s *EleAgentService) GetCredentials(userID, subProvider, subModel string) (*EleAgentCredentials, error) {
+func (s *EleAgentService) GetCredentials(userID, subProvider, subModel, gatewayBaseURL string) (*EleAgentCredentials, error) {
 	if subProvider == "" || subModel == "" {
 		return nil, errors.New("子平台 Provider 和模型名不能为空")
 	}
@@ -60,9 +60,16 @@ func (s *EleAgentService) GetCredentials(userID, subProvider, subModel string) (
 		}
 	}
 
-	// 后端代理模式下，凭证指向网关自身，API Key 为内部占位符
+	// 凭证 BaseURL 指向网关自身（gatewayBaseURL 由调用方按请求实际地址传入）：
+	// 前端据此回调本网关 /chat/completions，由网关本地解析模型配置并代理上游，
+	// 使本地配置的 Ele Agent 模型在非 agent 对话也能命中（与 agent 模式一致）；
+	// 缺省回落 eleagentBaseURL 兼容旧调用方。
+	base := gatewayBaseURL
+	if base == "" {
+		base = s.eleagentBaseURL
+	}
 	return &EleAgentCredentials{
-		BaseURL:   s.eleagentBaseURL,
+		BaseURL:   base,
 		APIKey:    "eleagent_" + uuid.New().String(),
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}, nil

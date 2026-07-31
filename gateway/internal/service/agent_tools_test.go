@@ -26,7 +26,7 @@ func (m *mockRunner) OCR(ctx context.Context, imagePath string) (string, error) 
 	return m.ocrResult, m.ocrErr
 }
 
-func (m *mockRunner) Shell(ctx context.Context, command string, args []string) (string, error) {
+func (m *mockRunner) Shell(ctx context.Context, command string, args []string, cwd string) (string, error) {
 	m.lastShellCmd = command
 	m.lastShellArgs = args
 	return m.shellOutput, m.shellErr
@@ -150,6 +150,7 @@ func TestToolRegistry_SearchWeb(t *testing.T) {
 	runner := &mockRunner{}
 	search := &mockSearchProvider{result: map[string]interface{}{"results": []string{"r1"}}}
 	registry := NewToolRegistryWithDeps(runner, search)
+	registry.RegisterBuiltinSearchWeb()
 	env := &ToolEnv{}
 
 	searchTool, _ := registry.Get("SearchWeb")
@@ -233,6 +234,40 @@ func TestToolRegistry_Grep(t *testing.T) {
 	if err == nil {
 		t.Fatal("Grep 应拒绝越界路径")
 	}
+
+	// 正则元字符（| 分支、.*、中文）必须可用：toolGrep 是纯 Go RE2 搜索，不经过 shell。
+	// 回归用户线上 bug：pattern "claw|Claw|CLAW" 曾被 shellSafe 误判为命令注入。
+	out, err = grepTool.Func(context.Background(), map[string]interface{}{
+		"path":    "test.txt",
+		"pattern": "claw|Claw|CLAW",
+	}, env)
+	if err != nil {
+		t.Fatalf("Grep 应接受含 | 的正则 pattern，实际报错: %v", err)
+	}
+	if m, ok := out["matches"].([]string); !ok || len(m) != 0 {
+		t.Fatalf("期望 0 条匹配（test.txt 无 claw），实际 %v", out["matches"])
+	}
+
+	// 复合正则 + 中文（用户实际 pattern 形态）
+	out, err = grepTool.Func(context.Background(), map[string]interface{}{
+		"path":    "test.txt",
+		"pattern": "hello.*golang|工具列表",
+	}, env)
+	if err != nil {
+		t.Fatalf("Grep 应接受复合正则+中文 pattern，实际报错: %v", err)
+	}
+	if m, ok := out["matches"].([]string); !ok || len(m) != 1 {
+		t.Fatalf("期望 1 条匹配（hello golang），实际 %v", out["matches"])
+	}
+
+	// 空字节仍应被拒绝
+	_, err = grepTool.Func(context.Background(), map[string]interface{}{
+		"path":    "test.txt",
+		"pattern": "hello\x00world",
+	}, env)
+	if err == nil {
+		t.Fatal("Grep 应拒绝含空字节的 pattern")
+	}
 }
 
 func TestToolRegistry_FetchURL(t *testing.T) {
@@ -274,6 +309,7 @@ func TestToolRegistry_FetchURL_EmptyURL(t *testing.T) {
 
 func TestToolSchemaBuilder_BuildWithOptions(t *testing.T) {
 	registry := NewToolRegistry()
+	registry.RegisterBuiltinSearchWeb()
 	builder := NewToolSchemaBuilder(registry)
 
 	// 启用联网：应包含 SearchWeb / FetchURL
@@ -309,13 +345,21 @@ func containsString(list []string, target string) bool {
 
 func TestToolRegistry_ListAvailable_RespectsVIP(t *testing.T) {
 	registry := NewToolRegistry()
+	registry.RegisterBuiltinSearchWeb()
 	all := registry.List()
 	if len(all) != 8 {
 		t.Fatalf("默认工具数量应为 8，实际 %d", len(all))
 	}
 	free := registry.ListAvailable(false)
-	if len(free) != 2 || free[0].Name != "SearchWeb" || free[1].Name != "FetchURL" {
-		t.Fatalf("非 VIP 用户应看到 SearchWeb 和 FetchURL，实际 %v", free)
+	if len(free) != 2 {
+		t.Fatalf("非 VIP 用户应看到 2 个免费工具，实际 %d", len(free))
+	}
+	freeNames := map[string]bool{}
+	for _, f := range free {
+		freeNames[f.Name] = true
+	}
+	if !freeNames["SearchWeb"] || !freeNames["FetchURL"] {
+		t.Fatalf("非 VIP 用户应看到 SearchWeb 和 FetchURL，实际 %v", freeNames)
 	}
 	vip := registry.ListAvailable(true)
 	if len(vip) != 8 {
@@ -361,5 +405,56 @@ func TestDefaultSearchProvider_NoConfig(t *testing.T) {
 	}
 }
 
+func TestRenderToolsAsText(t *testing.T) {
+	// AR-26：OpenAI schema -> Markdown 工具列表文本（供 FunctionGet 返回给走内嵌标记的模型）。
+	tools := []map[string]interface{}{
+		{"type": "function", "function": map[string]interface{}{
+			"name":        "Shell",
+			"description": "执行 shell 命令",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"command": map[string]interface{}{"type": "string"},
+				},
+			},
+		}},
+	}
+	text := RenderToolsAsText(tools)
+	if !strings.Contains(text, "Shell") {
+		t.Fatalf("应含工具名 Shell: %v", text)
+	}
+	if !strings.Contains(text, "执行 shell 命令") {
+		t.Fatalf("应含工具描述: %v", text)
+	}
+	if !strings.Contains(text, "FunctionCallBegin") {
+		t.Fatalf("应含调用方式说明: %v", text)
+	}
+	if !strings.Contains(text, "command") {
+		t.Fatalf("应含参数 schema: %v", text)
+	}
+	// 空列表
+	if got := RenderToolsAsText(nil); got != "（当前无可用工具）" {
+		t.Fatalf("空列表应返回提示，实际: %v", got)
+	}
+}
+
 var _ PlatformToolRunner = (*mockRunner)(nil)
 var _ SearchProvider = (*mockSearchProvider)(nil)
+
+func TestNormalizeToolName(t *testing.T) {
+	cases := map[string]string{
+		"WriteFile":            "WriteFile",
+		"write_file":           "WriteFile",
+		"WRITE_FILE":           "WriteFile",
+		"read_file":            "ReadFile",
+		"str_replace_file":     "StrReplaceFile",
+		"functions.write_file": "WriteFile",
+		"fetch_url":            "FetchURL",
+		"UnknownTool":          "UnknownTool",
+	}
+	for in, want := range cases {
+		if got := normalizeToolName(in); got != want {
+			t.Errorf("normalizeToolName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

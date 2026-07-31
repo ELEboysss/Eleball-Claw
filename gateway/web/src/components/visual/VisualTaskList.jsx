@@ -3,7 +3,7 @@ import VisualTaskCard from './VisualTaskCard'
 export default function VisualTaskList({ tasks, selectedTask, onSelect, onCancel, onDelete }) {
   if (tasks.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-8 text-[#6e6e8a] text-sm">
+      <div className="flex flex-col items-center justify-center py-8 text-eleball-vs-text-dim text-sm">
         <p>暂无生成任务</p>
         <p className="text-xs mt-1">生成的图片/视频将出现在这里</p>
       </div>

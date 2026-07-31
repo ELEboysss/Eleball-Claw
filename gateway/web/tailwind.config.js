@@ -24,7 +24,19 @@ export default {
           outline: '#E2E0E5',
           'outline-variant': '#F0EDF4',
           error: '#B3261E',
-          success: '#22C55E'
+          success: '#22C55E',
+          // UX-O14：视觉工作室 dark 主题 token（统一原硬编码 hex，便于主题维护）
+          'vs-bg': '#13131f',              // 画布/媒体占位背景
+          'vs-surface': '#1c1c2b',         // 面板/卡片/遮罩
+          'vs-surface-variant': '#252538', // 输入框/未激活按钮底
+          'vs-border': '#26263a',          // 面板分隔
+          'vs-border-variant': '#2e2e45',  // 输入框/虚线边框
+          'vs-text': '#e8e8f0',            // 主文本
+          'vs-text-muted': '#a0a0b8',      // 次要文本/标签
+          'vs-text-dim': '#6e6e8a',        // 三级文本/占位符
+          'vs-accent': '#b8a5ff',          // 选中/悬停浅紫强调
+          'vs-primary-hover': '#4a3b7a',   // 主按钮悬停
+          'vs-error': '#ff7b7b'            // 错误/删除悬停红
         }
       },
       fontFamily: {

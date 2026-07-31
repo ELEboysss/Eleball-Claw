@@ -3,6 +3,7 @@ import { getJSON, setJSON, removeItem } from './storage'
 const CONVERSATIONS_KEY = 'web_conversations'
 const CURRENT_CONVERSATION_KEY = 'web_current_conversation_id'
 const KEEP_THINKING_KEY = 'web_keep_thinking'
+const FORK_LINKS_KEY = 'web_fork_links'
 
 function conversationsKey(userId) {
   return userId ? `${CONVERSATIONS_KEY}_${userId}` : CONVERSATIONS_KEY
@@ -107,4 +108,23 @@ export function loadKeepThinking(userId = null) {
  */
 export function saveKeepThinking(value, userId = null) {
   setJSON(keepThinkingKey(userId), !!value)
+}
+
+function forkLinksKey(userId) {
+  return userId ? `${FORK_LINKS_KEY}_${userId}` : FORK_LINKS_KEY
+}
+
+/**
+ * AR-12：读取会话分叉链接图，按 userId 隔离。
+ * 结构 { [convId]: { parent: parentConvId, children: [childConvId, ...] } }
+ */
+export function loadForkLinks(userId = null) {
+  return getJSON(forkLinksKey(userId), {}) || {}
+}
+
+/**
+ * AR-12：保存会话分叉链接图，按 userId 隔离。
+ */
+export function saveForkLinks(value, userId = null) {
+  setJSON(forkLinksKey(userId), value || {})
 }

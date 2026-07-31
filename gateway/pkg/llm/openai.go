@@ -103,7 +103,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, req ChatRequest) (*ChatChunk, e
 	usage := normalizeUsage(resp.Usage, resp.InputTokens, resp.OutputTokens)
 	if usage == nil {
 		// 上游未返回 usage 时做兜底估算，避免漏记漏扣
-		usage = EstimateUsageFromMessages(req.Messages, content)
+		usage = EstimateUsageFromMessagesForModel(req.Messages, content, req.Model)
 	}
 	return &ChatChunk{
 		Delta:            content,
@@ -118,7 +118,7 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, req ChatRequest) (<-chan 
 	req.Stream = true
 	// 请求上游在最终 chunk 中返回 usage，否则无法精确计费
 	req.StreamOptions = &StreamOptions{IncludeUsage: true}
-	body, err := json.Marshal(req)
+	body, err := marshalOpenAIBody(req)
 	if err != nil {
 		return nil, err
 	}
@@ -192,12 +192,14 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, req ChatRequest) (<-chan 
 
 			var delta string
 			var reasoning string
+			var toolCalls []ToolCall
 			if len(streamResp.Choices) > 0 {
 				choice := streamResp.Choices[0]
 				delta = contentToString(choice.Delta.Content)
 				reasoning = contentToString(choice.Delta.ReasoningContent)
+				toolCalls = choice.Delta.ToolCalls
 				finishReason = choice.FinishReason
-				if delta == "" && reasoning == "" {
+				if delta == "" && reasoning == "" && len(toolCalls) == 0 {
 					emptyChoiceCount++
 				}
 			} else {
@@ -210,6 +212,7 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, req ChatRequest) (<-chan 
 				ReasoningContent: reasoning,
 				FinishReason:     finishReason,
 				Usage:            normalizeUsage(streamResp.Usage, streamResp.InputTokens, streamResp.OutputTokens),
+				ToolCalls:        toolCalls,
 			}
 			if chunk.Usage != nil {
 				usageEmitted = true
@@ -237,7 +240,7 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, req ChatRequest) (<-chan 
 
 		// 上游未返回 usage 且流正常结束时，补发一个带有兜底估算的 final chunk
 		if !usageEmitted && scanner.Err() == nil {
-			usage := EstimateUsageFromMessages(req.Messages, accumulatedDelta.String())
+			usage := EstimateUsageFromMessagesForModel(req.Messages, accumulatedDelta.String(), req.Model)
 			select {
 			case chunkChan <- ChatChunk{Usage: usage}:
 			case <-ctx.Done():
@@ -249,8 +252,23 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, req ChatRequest) (<-chan 
 	return chunkChan, nil
 }
 
+// marshalOpenAIBody 将 ChatRequest 序列化为 OpenAI 兼容请求体。
+// AR-19 P2-3：当 Thinking.Effort 设置时，提升为顶层 reasoning_effort（OpenAI o 系列 Chat Completions
+// 识别字段，参考 OmniRoute / jcode openai-runtime 约定）；原 thinking 字段保留以兼容 Kimi/Moonshot。
+func marshalOpenAIBody(req ChatRequest) ([]byte, error) {
+	type wrapper struct {
+		ChatRequest
+		ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	}
+	w := wrapper{ChatRequest: req}
+	if req.Thinking != nil && req.Thinking.Effort != "" {
+		w.ReasoningEffort = req.Thinking.Effort
+	}
+	return json.Marshal(w)
+}
+
 func (c *OpenAIClient) doRequest(ctx context.Context, req ChatRequest) ([]byte, error) {
-	body, err := json.Marshal(req)
+	body, err := marshalOpenAIBody(req)
 	if err != nil {
 		return nil, err
 	}
@@ -279,6 +297,57 @@ func (c *OpenAIClient) doRequest(ctx context.Context, req ChatRequest) ([]byte, 
 		return nil, &UpstreamError{StatusCode: httpResp.StatusCode, Body: string(respBody)}
 	}
 	return respBody, nil
+}
+
+// Embed 调用 OpenAI 兼容 /embeddings 端点获取向量（AR-09 记忆检索）。
+// model 为空时返回错误；inputs 为空时返回 nil；timeout 复用客户端配置作为整体超时。
+// 鉴权与 baseUrl 复用 Chat 的同套配置（EleAgent 模型中心 OpenAI 兼容）。
+func (c *OpenAIClient) Embed(ctx context.Context, model string, inputs []string) ([][]float32, error) {
+	if model == "" {
+		return nil, fmt.Errorf("embedding model 未配置")
+	}
+	if len(inputs) == 0 {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	body, err := json.Marshal(EmbeddingRequest{Model: model, Input: inputs})
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/embeddings", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.logger != nil {
+		c.logger.Debug("OpenAIClient 请求 embedding",
+			zap.String("baseURL", c.baseURL),
+			zap.String("model", model),
+			zap.Int("inputs", len(inputs)))
+	}
+	httpResp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer httpResp.Body.Close()
+	respBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, &UpstreamError{StatusCode: httpResp.StatusCode, Body: string(respBody)}
+	}
+	var resp EmbeddingResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return nil, fmt.Errorf("解析 embedding 响应失败: %w", err)
+	}
+	out := make([][]float32, len(resp.Data))
+	for i, d := range resp.Data {
+		out[i] = d.Embedding
+	}
+	return out, nil
 }
 
 // contentToString 将上游返回的 content（可能是 string 或数组）统一转为字符串。

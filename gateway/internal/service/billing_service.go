@@ -43,10 +43,65 @@ type BalanceInfo struct {
 	Elegant int64 `json:"elegant"`
 }
 
-// Deduct 按用量扣费
+// BillingAttribution 用量归集维度（AR-03 会话成本归集）。ConversationID 归属对话，
+// AgentTaskID 标识具体任务（主执行记 session ID，CallAssistant 子任务记子 session ID）。
+type BillingAttribution struct {
+	ConversationID string
+	AgentTaskID    string
+}
+
+// estimateTokenCost 估算 Ele Agent 模型调用的 token 成本（弹丸，未计 VIP 折扣）。
+// 供 DeductWithAttribution 扣费与 EstimateCost 预算门控复用；非 Ele Agent / 无用量返回 0。
+func (s *BillingService) estimateTokenCost(provider, modelName string, usage *llm.Usage) int64 {
+	if provider != "eleagent" || usage == nil {
+		return 0
+	}
+	// Ele Agent 模型单价由管理员后台配置，分别按输入/输出 token 计费，单位为 弹丸 / 1M tokens
+	// 同时支持按次附加费 price_per_generation，与 token 费用相加
+	// modelName 约定格式为 "subProvider/subModel"，如 "qwen/Qwen/Qwen3-8B"
+	var inputPrice, outputPrice, perGenPrice int64
+	if s.eleAgentModelService != nil {
+		searchProvider, searchModel := provider, modelName
+		if idx := strings.Index(modelName, "/"); idx > 0 {
+			searchProvider = modelName[:idx]
+			searchModel = modelName[idx+1:]
+		}
+		inputPrice, outputPrice, perGenPrice = s.eleAgentModelService.GetModelPricing(searchProvider, searchModel)
+	}
+	inputCost := int64(usage.PromptTokens) * inputPrice / 1_000_000
+	outputCost := int64(usage.CompletionTokens) * outputPrice / 1_000_000
+	totalCost := inputCost + outputCost + perGenPrice
+	// 输入或输出单价为正但 token 合计不足 1 弹丸时，最小按 1 弹丸计 token 费用；按次附加费仍额外累加
+	if totalCost == perGenPrice && (inputPrice > 0 || outputPrice > 0) {
+		totalCost = perGenPrice + 1
+	}
+	return totalCost
+}
+
+// EstimateCost 估算用量成本（弹丸，未计 VIP 折扣），AR-03 max_cost_per_task 每步成本门控用。
+// 非 Ele Agent / 非 danwan 货币返回 0（成本门控仅针对弹丸计费模型）。
+func (s *BillingService) EstimateCost(provider, modelName, currency string, usage *llm.Usage) int64 {
+	if currency != "" && currency != CurrencyDanwan {
+		return 0
+	}
+	return s.estimateTokenCost(provider, modelName, usage)
+}
+
+// Deduct 按用量扣费（默认 source=agent，向后兼容；协同委派用 DeductWithSource 标注来源）
+func (s *BillingService) Deduct(userID, provider, modelName, currency string, usage *llm.Usage) error {
+	return s.DeductWithSource(userID, provider, modelName, currency, "agent", usage)
+}
+
+// DeductWithSource 按用量扣费并标注来源（agent / chat / call_assistant:子session / visual）。
+// 向后兼容封装：无归集维度，委托 DeductWithAttribution。
+func (s *BillingService) DeductWithSource(userID, provider, modelName, currency, source string, usage *llm.Usage) error {
+	return s.DeductWithAttribution(userID, provider, modelName, currency, source, BillingAttribution{}, usage)
+}
+
+// DeductWithAttribution 按用量扣费并标注来源与会话/任务归集维度（AR-03 会话成本归集）。
 // 仅对 Ele Agent 代理的模型收费；用户使用自带 API Key 的直连模型不扣费。
 // currency 指定扣费货币：danwan / elegant，默认 danwan
-func (s *BillingService) Deduct(userID, provider, modelName, currency string, usage *llm.Usage) error {
+func (s *BillingService) DeductWithAttribution(userID, provider, modelName, currency, source string, attr BillingAttribution, usage *llm.Usage) error {
 	if currency == "" {
 		currency = CurrencyDanwan
 	}
@@ -61,26 +116,7 @@ func (s *BillingService) Deduct(userID, provider, modelName, currency string, us
 		return nil
 	}
 
-	// Ele Agent 模型单价由管理员后台配置，分别按输入/输出 token 计费，单位为 弹丸 / 1M tokens
-	// 同时支持按次附加费 price_per_generation，与 token 费用相加
-	// modelName 约定格式为 "subProvider/subModel"，如 "qwen/Qwen/Qwen3-8B"
-	var inputPrice, outputPrice, perGenPrice int64
-	if s.eleAgentModelService != nil {
-		searchProvider, searchModel := provider, modelName
-		if idx := strings.Index(modelName, "/"); idx > 0 {
-			searchProvider = modelName[:idx]
-			searchModel = modelName[idx+1:]
-		}
-		inputPrice, outputPrice, perGenPrice = s.eleAgentModelService.GetModelPricing(searchProvider, searchModel)
-	}
-
-	inputCost := int64(usage.PromptTokens) * inputPrice / 1_000_000
-	outputCost := int64(usage.CompletionTokens) * outputPrice / 1_000_000
-	totalCost := inputCost + outputCost + perGenPrice
-	// 输入或输出单价为正但 token 合计不足 1 弹丸时，最小按 1 弹丸计 token 费用；按次附加费仍额外累加
-	if totalCost == perGenPrice && (inputPrice > 0 || outputPrice > 0) {
-		totalCost = perGenPrice + 1
-	}
+	totalCost := s.estimateTokenCost(provider, modelName, usage)
 
 	// VIP 折扣（VIP2 及以上）
 	if s.vipService != nil {
@@ -122,14 +158,17 @@ func (s *BillingService) Deduct(userID, provider, modelName, currency string, us
 
 	// 记录 Token 用量
 	tokenUsage := &model.TokenUsage{
-		ID:           uuid.New().String(),
-		UserID:       userID,
-		ModelID:      modelName,
-		Provider:     provider,
-		InputTokens:  usage.PromptTokens,
-		OutputTokens: usage.CompletionTokens,
-		CostAmount:   totalCost,
-		Currency:     currency,
+		ID:             uuid.New().String(),
+		UserID:         userID,
+		ConversationID: attr.ConversationID,
+		AgentTaskID:    attr.AgentTaskID,
+		ModelID:        modelName,
+		Provider:       provider,
+		InputTokens:    usage.PromptTokens,
+		OutputTokens:   usage.CompletionTokens,
+		CostAmount:     totalCost,
+		Currency:       currency,
+		Source:         source,
 	}
 	if err := s.billRepo.CreateTokenUsage(tokenUsage); err != nil {
 		// 用量记录失败不阻断主流程，但记录日志

@@ -14,12 +14,6 @@
       "query": {
         "type": "string",
         "description": "搜索关键词"
-      },
-      "provider": {
-        "type": "string",
-        "enum": ["baidu"],
-        "default": "baidu",
-        "description": "搜索源，本秘技固定为 baidu（百度千帆），无需修改"
       }
     },
     "required": ["query"]
@@ -27,7 +21,7 @@
   "actions": [
     { "name": "search", "description": "按关键词搜索互联网内容（百度千帆）" }
   ],
-  "metadata": { "module": "search-web" },
+  "metadata": { "module": "search-web", "provider": "baidu" },
   "credentials": {
     "baidu_api_key": {
       "type": "api_key",
@@ -37,5 +31,14 @@
       "required": true
     }
   },
-  "timeout_seconds": 30
+  "timeout_seconds": 30,
+  "error_codes": [
+    "credential_missing",
+    "credential_invalid",
+    "upstream_error",
+    "upstream_timeout",
+    "parameter_invalid",
+    "unsupported_action",
+    "module_internal_error"
+  ]
 }

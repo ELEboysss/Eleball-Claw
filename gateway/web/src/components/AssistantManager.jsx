@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
-import { assistantApi, agentMarketApi } from '../api/client'
-import { Bot, Plus, Pencil, Trash2, Loader2, Sparkles } from 'lucide-react'
+import { assistantApi, agentMarketApi, teamApi, modelApi } from '../api/client'
+import { Bot, Plus, Pencil, Trash2, Loader2, Sparkles, Share2, Folder, Cpu } from 'lucide-react'
+import { PROVIDERS, groupEleAgentModelsByProvider } from '../utils/model'
 
 // 助手管理：助手 = 已激活秘技的命名组合，可在对话页按会话绑定，
 // 绑定后 Agent 工作流仅载入该助手包含的秘技工具。
@@ -9,10 +10,14 @@ export default function AssistantManager() {
   const [assistants, setAssistants] = useState([])
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
-  // 编辑器状态：null 关闭；{ id, name, description, agentIds } 打开（id 为 null 表示新建）
+  // 编辑器状态：null 关闭；{ id, name, description, agentIds, systemPrompt, shared, teamId } 打开（id 为 null 表示新建）
   const [editor, setEditor] = useState(null)
   const [activeAgents, setActiveAgents] = useState([])
   const [candidatesLoading, setCandidatesLoading] = useState(false)
+  // 对话分组列表：team_id 选择项（空=全局可见）
+  const [teams, setTeams] = useState([])
+  // Agent Team P5：Ele Agent 模型清单（eleagent 模式选择用）
+  const [eleagentModels, setEleagentModels] = useState([])
   const [saving, setSaving] = useState(false)
   const [editorError, setEditorError] = useState('')
 
@@ -27,6 +32,22 @@ export default function AssistantManager() {
 
   useEffect(() => {
     loadAssistants()
+  }, [])
+
+  // 拉取分组列表，用于 team_id 选择（空选项 = 全局可见）
+  useEffect(() => {
+    teamApi
+      .list()
+      .then((d) => setTeams(Array.isArray(d) ? d : d?.items || []))
+      .catch(() => setTeams([]))
+  }, [])
+
+  // Agent Team P5：拉取 Ele Agent 模型清单（eleagent 模式选择用）
+  useEffect(() => {
+    modelApi
+      .list()
+      .then((d) => setEleagentModels(Array.isArray(d) ? d : d?.items || []))
+      .catch(() => setEleagentModels([]))
   }, [])
 
   // 候选秘技：我的已购秘技中已激活的部分
@@ -44,7 +65,24 @@ export default function AssistantManager() {
 
   const openCreate = () => {
     setEditorError('')
-    setEditor({ id: null, name: '', description: '', agentIds: new Set() })
+    setEditor({
+      id: null,
+      name: '',
+      description: '',
+      agentIds: new Set(),
+      // Agent Team P3：新建助手默认对编排者可见（与 DB 默认 shared=true 对齐）
+      systemPrompt: '',
+      shared: true,
+      teamId: '',
+      // Agent Team P5：助手级 LLM 配置（默认跟随当前对话）
+      llmMode: 'follow',
+      llmProvider: 'OPENAI',
+      llmModel: '',
+      llmBaseUrl: '',
+      llmApiKey: '',
+      llmApiKeySet: false,
+      clearApiKey: false
+    })
     loadActiveAgents()
   }
 
@@ -54,7 +92,19 @@ export default function AssistantManager() {
       id: assistant.id,
       name: assistant.name || '',
       description: assistant.description || '',
-      agentIds: new Set((assistant.items || []).map((it) => it.agent_id))
+      agentIds: new Set((assistant.items || []).map((it) => it.agent_id)),
+      systemPrompt: assistant.system_prompt || '',
+      // shared 缺省（旧数据）视为 true，与 DB 默认一致
+      shared: assistant.shared !== false,
+      teamId: assistant.team_id || '',
+      // Agent Team P5：LLM 配置（llm_api_key 只读「是否已设置」，密钥本身不回读）
+      llmMode: assistant.llm_mode || 'follow',
+      llmProvider: assistant.llm_provider || 'OPENAI',
+      llmModel: assistant.llm_model || '',
+      llmBaseUrl: assistant.llm_base_url || '',
+      llmApiKey: '',
+      llmApiKeySet: !!assistant.llm_api_key_set,
+      clearApiKey: false
     })
     loadActiveAgents()
   }
@@ -82,17 +132,40 @@ export default function AssistantManager() {
     setEditorError('')
     try {
       let id = editor.id
+      // Agent Team P3：编排协作字段（system_prompt / shared / team_id）
+      const orchestrationFields = {
+        system_prompt: editor.systemPrompt.trim(),
+        shared: !!editor.shared,
+        team_id: editor.teamId || ''
+      }
+      // Agent Team P5：助手级 LLM 配置（llm_api_key 仅在输入非空或显式清除时发送，否则保持不变）
+      const llmFields = {
+        llm_mode: editor.llmMode || 'follow',
+        llm_provider: editor.llmProvider || '',
+        llm_model: editor.llmModel.trim(),
+        llm_base_url: editor.llmBaseUrl.trim()
+      }
+      if (editor.clearApiKey) {
+        llmFields.llm_api_key = ''
+      } else if (editor.llmApiKey.trim()) {
+        llmFields.llm_api_key = editor.llmApiKey.trim()
+      }
       if (id) {
+        // 编辑：一次 PATCH 同时更新基本信息与编排协作 + LLM 配置字段
         await assistantApi.update(id, {
           name: editor.name.trim(),
-          description: editor.description.trim()
+          description: editor.description.trim(),
+          ...orchestrationFields,
+          ...llmFields
         })
       } else {
+        // 新建：POST 仅接受 name/description，再用 PATCH 补 system_prompt/shared/team_id/llm_*
         const created = await assistantApi.create({
           name: editor.name.trim(),
           description: editor.description.trim()
         })
         id = created?.id
+        await assistantApi.update(id, { ...orchestrationFields, ...llmFields })
       }
       await assistantApi.setItems(id, [...editor.agentIds])
       setMessage(editor.id ? `助手「${editor.name.trim()}」已更新` : `助手「${editor.name.trim()}」创建成功`)
@@ -183,6 +256,22 @@ export default function AssistantManager() {
               <Sparkles className="w-3 h-3" />
               <span>{(assistant.items || []).length} 个秘技</span>
             </div>
+            {(assistant.shared || assistant.team_id) && (
+              <div className="flex flex-wrap gap-1.5 mb-3">
+                {assistant.shared && (
+                  <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-purple-50 text-purple-600">
+                    <Share2 className="w-3 h-3" />
+                    共享
+                  </span>
+                )}
+                {assistant.team_id && (
+                  <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-600">
+                    <Folder className="w-3 h-3" />
+                    {teams.find((t) => t.id === assistant.team_id)?.name || '已分组'}
+                  </span>
+                )}
+              </div>
+            )}
             {(assistant.items || []).length > 0 && (
               <div className="flex flex-wrap gap-1.5">
                 {assistant.items.map((it) => (
@@ -239,6 +328,135 @@ export default function AssistantManager() {
                   className="input w-full text-sm h-20 resize-none"
                   maxLength={200}
                 />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-eleball-text mb-1.5">
+                  系统提示词（可选）
+                </label>
+                <textarea
+                  value={editor.systemPrompt}
+                  onChange={(e) => setEditor((prev) => ({ ...prev, systemPrompt: e.target.value }))}
+                  placeholder="作为子 agent 被 CallAssistant 委派时的人格/指令；留空使用默认专家模板"
+                  className="input w-full text-sm h-20 resize-none"
+                  maxLength={2000}
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editor.shared}
+                    onChange={(e) => setEditor((prev) => ({ ...prev, shared: e.target.checked }))}
+                    className="w-4 h-4 accent-eleball-primary"
+                  />
+                  <span className="text-sm text-eleball-text">对编排者共享</span>
+                </label>
+                <span className="text-xs text-eleball-text-tertiary">
+                  开启后该助手进入能力目录，可被其他对话的编排者经 CallAssistant 委派
+                </span>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-eleball-text mb-1.5">所属分组（可选）</label>
+                <select
+                  value={editor.teamId}
+                  onChange={(e) => setEditor((prev) => ({ ...prev, teamId: e.target.value }))}
+                  className="input w-full text-sm"
+                >
+                  <option value="">全局可见（所有组的编排者可见）</option>
+                  {teams.map((team) => (
+                    <option key={team.id} value={team.id}>
+                      {team.name}（仅该组可见）
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-eleball-text mb-1.5 flex items-center gap-1.5">
+                  <Cpu className="w-3.5 h-3.5" />
+                  LLM 配置（可选）
+                </label>
+                <select
+                  value={editor.llmMode}
+                  onChange={(e) => setEditor((prev) => ({ ...prev, llmMode: e.target.value }))}
+                  className="input w-full text-sm"
+                >
+                  <option value="follow">跟随当前对话（用主对话模型）</option>
+                  <option value="eleagent">Ele Agent 模型（复用服务端凭据）</option>
+                  <option value="byok">自带模型（BYOK）</option>
+                </select>
+                {editor.llmMode === 'eleagent' && (
+                  <select
+                    value={editor.llmModel}
+                    onChange={(e) => setEditor((prev) => ({ ...prev, llmModel: e.target.value }))}
+                    className="input w-full text-sm mt-2"
+                  >
+                    <option value="">选择 Ele Agent 模型</option>
+                    {groupEleAgentModelsByProvider(eleagentModels).map((g) => (
+                      <optgroup key={g.provider} label={g.providerLabel || g.provider}>
+                        {g.models.map((m) => (
+                          <option key={`${m.provider}/${m.model_name}`} value={`${m.provider}/${m.model_name}`}>
+                            {m.model_name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                )}
+                {editor.llmMode === 'byok' && (
+                  <div className="space-y-2 mt-2">
+                    <select
+                      value={editor.llmProvider}
+                      onChange={(e) =>
+                        setEditor((prev) => ({
+                          ...prev,
+                          llmProvider: e.target.value,
+                          llmBaseUrl: PROVIDERS[e.target.value]?.defaultBaseUrl || ''
+                        }))
+                      }
+                      className="input w-full text-sm"
+                    >
+                      {Object.entries(PROVIDERS)
+                        .filter(([k]) => k !== 'ELE_AGENT')
+                        .map(([k, p]) => (
+                          <option key={k} value={k}>
+                            {p.label || k}
+                          </option>
+                        ))}
+                    </select>
+                    <input
+                      type="text"
+                      value={editor.llmModel}
+                      onChange={(e) => setEditor((prev) => ({ ...prev, llmModel: e.target.value }))}
+                      placeholder="模型名，如 gpt-4o-mini"
+                      className="input w-full text-sm"
+                    />
+                    <input
+                      type="text"
+                      value={editor.llmBaseUrl}
+                      onChange={(e) => setEditor((prev) => ({ ...prev, llmBaseUrl: e.target.value }))}
+                      placeholder="Base URL"
+                      className="input w-full text-sm"
+                    />
+                    <input
+                      type="password"
+                      value={editor.llmApiKey}
+                      onChange={(e) => setEditor((prev) => ({ ...prev, llmApiKey: e.target.value, clearApiKey: false }))}
+                      placeholder={editor.llmApiKeySet ? '已设置（留空保持不变）' : 'API Key'}
+                      className="input w-full text-sm"
+                    />
+                    {editor.llmApiKeySet && (
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={editor.clearApiKey}
+                          onChange={(e) => setEditor((prev) => ({ ...prev, clearApiKey: e.target.checked }))}
+                          className="w-4 h-4 accent-eleball-primary"
+                        />
+                        <span className="text-sm text-eleball-text-secondary">清除已设置的 API Key</span>
+                      </label>
+                    )}
+                  </div>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-eleball-text mb-1.5">

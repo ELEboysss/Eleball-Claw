@@ -15,6 +15,7 @@ import (
 
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
+	"github.com/eleball/gateway/pkg/llm"
 )
 
 // ToolFunc 工具函数签名
@@ -27,10 +28,33 @@ type ToolEnv struct {
 	ConversationID string
 	SessionID      string
 	Sandbox        *FileSandbox
+	// AR-06：claw 本地工作目录（per-session，仅 claw 装配）。非空时文件工具优先解析到 cwd。
+	Cwd            string
 	SessionRepo    *repository.AgentSessionRepo
 	SearchProvider string // 当前 conversation 选择的搜索源，如 baidu / bing
 	// Credentials 当前工具声明的凭证字段定义，供驱动校验/注入
 	Credentials map[string]model.CredentialDef
+	// Agent Team P3：编排深度。0=编排者主循环；>0=子 agent 执行环境。
+	// CallAssistant 在 Depth>0 时直接拒绝（结构性限深的防御性兜底）
+	Depth int
+	// Agent Team P3：本次 execute 的委派计数器（上限 5），由 Execute 装配；子 env 不共享
+	DelegateCalls *int
+	// Agent Team P3：子调用 token 用量累计钩子，挂到主循环 totalUsage（只经此钩子进账一次）
+	UsageAccumulator func(*llm.Usage)
+	// AR-03：执行中余额校验回调，循环每轮调用；返回非 nil error 表示余额不足，强制结束循环。
+	// 由 AgentService 装配（含节流，避免每轮查 DB）；子 agent env 不注入（计费由主循环统一管）。
+	BudgetGuard func() error
+	// AR-03：每步成本门控回调（max_cost_per_task）。传入循环累计用量，返回非 nil error 表示超限，强制结束。
+	// 由编排器装配（CallAssistant 子任务），用 billingService.EstimateCost 估算；主循环可不注入。
+	CostGuard func(usage *llm.Usage) error
+}
+
+// ResolveFilePath 解析文件工具路径（AR-06）：env.Cwd 非空时优先解析到 cwd，否则回退会话沙箱。
+func (env *ToolEnv) ResolveFilePath(path string) (string, error) {
+	if env.Cwd != "" {
+		return env.Sandbox.ResolveProjectPath(env.Cwd, path)
+	}
+	return env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
 }
 
 // SaveOutput 将工具产物登记为匿名资源
@@ -133,6 +157,51 @@ func (r *ToolRegistry) Get(name string) (*Tool, bool) {
 	return tool, ok
 }
 
+// Resolve 归一化后获取工具（AR-20）：精确命中失败时尝试别名映射
+// （剥 functions. 前缀、蛇形/小写 -> 注册名），兼容 LLM 输出的变形工具名。
+// 返回归一化后的真实工具名；未命中返回原名与 false。
+func (r *ToolRegistry) Resolve(name string) (*Tool, string, bool) {
+	if t, ok := r.tools[name]; ok {
+		return t, name, true
+	}
+	norm := normalizeToolName(name)
+	if norm != name {
+		if t, ok := r.tools[norm]; ok {
+			return t, norm, true
+		}
+	}
+	return nil, name, false
+}
+
+// toolNameAliases 工具名别名映射（蛇形/小写 -> 注册名），供 normalizeToolName 查找。
+// 新增工具时须同步本表。
+var toolNameAliases = map[string]string{
+	"write_file":       "WriteFile",
+	"read_file":        "ReadFile",
+	"str_replace_file": "StrReplaceFile",
+	"grep":             "Grep",
+	"shell":            "Shell",
+	"ocr":              "OCR",
+	"fetch_url":        "FetchURL",
+	"search_web":       "SearchWeb",
+}
+
+// normalizeToolName 归一化 LLM 输出的工具名（借鉴 jcode resolve_tool_name）：
+//   - 剥离 "functions." 前缀（部分 OpenAI 兼容路由退化输出 to=functions.NAME）
+//   - 别名表查找（蛇形/小写 -> 注册驼峰名，大小写不敏感）
+//
+// 未命中别名表时原样返回（交由 registry.Get 精确匹配或走未知工具分支）。
+func normalizeToolName(name string) string {
+	name = strings.TrimSpace(name)
+	for strings.HasPrefix(name, "functions.") {
+		name = strings.TrimPrefix(name, "functions.")
+	}
+	if mapped, ok := toolNameAliases[strings.ToLower(name)]; ok {
+		return mapped
+	}
+	return name
+}
+
 // List 列出所有工具
 func (r *ToolRegistry) List() []*Tool {
 	items := make([]*Tool, 0, len(r.tools))
@@ -173,8 +242,10 @@ func (r *ToolRegistry) Clone() *ToolRegistry {
 	return cloned
 }
 
-// registerDefaults 注册默认工具
-func (r *ToolRegistry) registerDefaults() {
+// RegisterBuiltinSearchWeb 注册内置 SearchWeb 工具（读 env BAIDU_API_KEY/BING_SEARCH_API_KEY）。
+// 仅云端调用：云端用内置搜索实现；claw 由外置 search-web 模块（千帆/Bing SKU）提供搜索，不注册此项，
+// 避免 LLM 感知到无凭证的内置工具而报「搜索服务未配置」。
+func (r *ToolRegistry) RegisterBuiltinSearchWeb() {
 	r.Register(&Tool{
 		Name:        "SearchWeb",
 		Description: "联网搜索，获取实时信息。国内云服务器推荐配置 baidu（每日 100 次免费额度）或 bing",
@@ -202,7 +273,10 @@ func (r *ToolRegistry) registerDefaults() {
 		},
 		Func: r.toolSearchWeb,
 	})
+}
 
+// registerDefaults 注册默认工具（不含 SearchWeb：云端显式注册，claw 用外置 search-web 模块）
+func (r *ToolRegistry) registerDefaults() {
 	r.Register(&Tool{
 		Name:        "FetchURL",
 		Description: "抓取指定网页的正文内容，用于深度阅读搜索结果页面",
@@ -251,7 +325,7 @@ func (r *ToolRegistry) registerDefaults() {
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "文件相对路径",
+					"description": "相对于当前工作目录的文件路径，可用绝对路径",
 				},
 			},
 			"required": []string{"path"},
@@ -279,7 +353,7 @@ func (r *ToolRegistry) registerDefaults() {
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "文件相对路径",
+					"description": "相对于当前工作目录的文件路径，可用绝对路径",
 				},
 				"content": map[string]interface{}{
 					"type":        "string",
@@ -311,7 +385,7 @@ func (r *ToolRegistry) registerDefaults() {
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "文件相对路径",
+					"description": "相对于当前工作目录的文件路径，可用绝对路径",
 				},
 				"old_string": map[string]interface{}{
 					"type":        "string",
@@ -347,7 +421,7 @@ func (r *ToolRegistry) registerDefaults() {
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "相对路径，文件或目录",
+					"description": "相对于当前工作目录的文件或目录路径，可用绝对路径",
 				},
 				"pattern": map[string]interface{}{
 					"type":        "string",
@@ -416,7 +490,7 @@ func (r *ToolRegistry) registerDefaults() {
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "图片相对路径",
+					"description": "相对于当前工作目录的图片路径，可用绝对路径",
 				},
 			},
 			"required": []string{"path"},
@@ -510,7 +584,7 @@ func extractTitle(html string) string {
 // toolReadFile 读文件工具
 func (r *ToolRegistry) toolReadFile(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
 	path, _ := input["path"].(string)
-	absPath, err := env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
+	absPath, err := env.ResolveFilePath(path)
 	if err != nil {
 		return nil, err
 	}
@@ -532,13 +606,20 @@ func (r *ToolRegistry) toolWriteFile(ctx context.Context, input map[string]inter
 	if path == "" {
 		return nil, errors.New("path 不能为空")
 	}
-	absPath, err := env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
+	absPath, err := env.ResolveFilePath(path)
 	if err != nil {
 		return nil, err
+	}
+	// AR-06 写审计：读旧内容（存在则）用于生成 diff
+	oldContent := ""
+	if oldData, rErr := env.Sandbox.ReadFile(absPath); rErr == nil {
+		oldContent = string(oldData)
 	}
 	if err := env.Sandbox.WriteFile(absPath, []byte(content)); err != nil {
 		return nil, err
 	}
+	// AR-06 写审计：追加 unified diff 到 session metadata.json（失败不阻断）
+	_ = env.Sandbox.AppendWriteAudit(env.UserID, env.SessionID, "WriteFile", path, oldContent, content)
 
 	fileName := filepath.Base(absPath)
 	mimeType := mime.TypeByExtension(filepath.Ext(absPath))
@@ -576,7 +657,7 @@ func (r *ToolRegistry) toolStrReplaceFile(ctx context.Context, input map[string]
 		return nil, errors.New("old_string 不能为空")
 	}
 
-	absPath, err := env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
+	absPath, err := env.ResolveFilePath(path)
 	if err != nil {
 		return nil, err
 	}
@@ -588,6 +669,8 @@ func (r *ToolRegistry) toolStrReplaceFile(ctx context.Context, input map[string]
 	if err := env.Sandbox.WriteFile(absPath, []byte(content)); err != nil {
 		return nil, err
 	}
+	// AR-06 写审计：追加 old->new unified diff 到 session metadata.json（失败不阻断）
+	_ = env.Sandbox.AppendWriteAudit(env.UserID, env.SessionID, "StrReplaceFile", path, string(data), content)
 
 	fileName := filepath.Base(absPath)
 	mimeType := mime.TypeByExtension(filepath.Ext(absPath))
@@ -597,11 +680,14 @@ func (r *ToolRegistry) toolStrReplaceFile(ctx context.Context, input map[string]
 	}
 	resourceID, err := env.SaveOutput(fileName, mimeType, absPath, fileSize)
 	if err != nil {
+		// 文件已改成功（modified:true）；SaveOutput 仅登记下载资源，属非关键 infra，
+		// 失败不应让模型误以为编辑失败 -> 降级为 warning 而非 error（防误导模型/判官）。
 		return map[string]interface{}{
-			"path":     path,
-			"abs_path": absPath,
-			"modified": true,
-			"error":    fmt.Sprintf("登记下载资源失败: %v", err),
+			"path":        path,
+			"abs_path":    absPath,
+			"modified":    true,
+			"resource_id": "",
+			"warning":     fmt.Sprintf("下载资源登记失败（不影响文件修改）: %v", err),
 		}, nil
 	}
 
@@ -628,14 +714,18 @@ func (r *ToolRegistry) toolGrep(ctx context.Context, input map[string]interface{
 		return nil, errors.New("pattern 不能为空")
 	}
 
-	absPath, err := env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
+	absPath, err := env.ResolveFilePath(path)
 	if err != nil {
 		return nil, err
 	}
 
-	// 安全检查：pattern 中不能包含 shell 元字符或空字节
-	if err := shellSafe(pattern); err != nil {
-		return nil, fmt.Errorf("pattern 包含非法字符: %w", err)
+	// 安全检查：toolGrep 是纯 Go RE2 正则搜索（不经过 shell，pattern 只传入
+	// regexp.Compile 与 searchPattern 的 *regexp.Regexp），因此允许正则元字符
+	// （| ( ) $ ^ . * 等，如 "claw|Claw|CLAW" 或 "OpenClaw.*工具列表|25种Tools"）。
+	// 仅拒绝空字节这类无意义的注入指示符；语法合法性由下方 regexp.Compile 校验，
+	// RE2 保证线性时间，无 ReDoS 风险。
+	if strings.ContainsRune(pattern, 0) {
+		return nil, errors.New("pattern 包含非法字符: 空字节")
 	}
 
 	recursive := false
@@ -689,7 +779,7 @@ func (r *ToolRegistry) toolShell(ctx context.Context, input map[string]interface
 		}
 	}
 
-	output, err := r.runner.Shell(ctx, command, args)
+	output, err := r.runner.Shell(ctx, command, args, env.Cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -703,7 +793,7 @@ func (r *ToolRegistry) toolShell(ctx context.Context, input map[string]interface
 // toolOCR OCR 工具
 func (r *ToolRegistry) toolOCR(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
 	path, _ := input["path"].(string)
-	absPath, err := env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
+	absPath, err := env.ResolveFilePath(path)
 	if err != nil {
 		return nil, err
 	}

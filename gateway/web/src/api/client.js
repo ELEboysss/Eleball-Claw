@@ -206,10 +206,50 @@ export const systemApi = {
   status: () => client.get('/claw-console/system/status')
 }
 
+// ====== 工作目录 API（本地 claw：AR-06，DirectoryPicker 消费）======
+export const cwdApi = {
+  // 列出目录条目（path 空默认用户主目录）-> { path, entries: [{name,is_dir,size,modified}] }
+  browse: (path = '') => client.get('/claw-console/cwd/browse', { params: { path } }),
+  // 校验路径为目录 -> { cwd, path }
+  validate: (path) => client.post('/claw-console/cwd/validate', { path })
+}
+
+// ====== 文件浏览器/预览 API（本地 claw：AR-11，FileExplorer/FileViewer 消费）======
+export const clawFilesApi = {
+  // 列出 cwd 下条目 -> { path, entries: [{name,is_dir,size,modified}] }
+  list: (cwd, path = '.') =>
+    client.get('/claw-console/files', { params: { cwd, path, type: 'list' } }),
+  // 下载文件内容（返回 Blob，带 JWT）-> Blob
+  fetch: (cwd, path) =>
+    client.get('/claw-console/files', { params: { cwd, path, type: 'download' }, responseType: 'blob' }),
+  // 查询 Git 状态 -> { is_repo, branch, ahead, behind, clean, entries: [{path,x,y,status}] }
+  gitStatus: (cwd) => client.get('/claw-console/git/status', { params: { cwd } }),
+  // AR-21：新建目录（body {cwd, path}）-> { path }
+  createDir: (cwd, path) => client.post('/claw-console/files/mkdir', { cwd, path }),
+  // AR-21：移动/重命名（body {cwd, src_path, dst_path}）-> { path }
+  move: (cwd, srcPath, dstPath) => client.post('/claw-console/files/move', { cwd, src_path: srcPath, dst_path: dstPath }),
+  // AR-21：删除文件或目录（body {cwd, path}）-> { path }
+  remove: (cwd, path) => client.delete('/claw-console/files', { data: { cwd, path } })
+}
+
+// ====== Worktree 切换 API（本地 claw：AR-17 O16，WorktreeSwitcher 消费）======
+export const worktreeApi = {
+  // 列出 cwd 所属项目根 + 全部 worktree
+  // -> { projectRoot, isGit, isTopLevel, worktrees: [{path,branch,isMain}] }
+  list: (cwd) => client.get('/claw-console/worktrees', { params: { cwd } }),
+  // 创建 worktree（body {cwd,branch}）-> { path, branch }
+  create: (cwd, branch) => client.post('/claw-console/worktrees', { cwd, branch }),
+  // 删除 worktree（body {cwd,path,force}）-> { dirty }；dirty=true 表示有未提交改动需 force 二次确认
+  remove: (cwd, path, force = false) =>
+    client.delete('/claw-console/worktrees', { data: { cwd, path, force } })
+}
+
+
 // ====== 对话历史 API（本地 claw：本地存储）======
 export const conversationApi = {
-  list: (page = 1, pageSize = 20) =>
-    client.get(`/conversations?page=${page}&page_size=${pageSize}`),
+  // teamId 非空时按组过滤；空串 = 全部对话
+  list: (page = 1, pageSize = 20, teamId = '') =>
+    client.get(`/conversations?page=${page}&page_size=${pageSize}${teamId ? `&team_id=${encodeURIComponent(teamId)}` : ''}`),
   create: (data) => client.post('/conversations', data),
   get: (id) => client.get(`/conversations/${id}`),
   update: (id, data) => client.patch(`/conversations/${id}`, data),
@@ -217,6 +257,21 @@ export const conversationApi = {
   listMessages: (id, page = 1, pageSize = 50) =>
     client.get(`/conversations/${id}/messages?page=${page}&page_size=${pageSize}`),
   saveMessage: (id, data) => client.post(`/conversations/${id}/messages`, data)
+}
+
+// ====== 对话分组 API（Agent Team；组严格按 user_id 隔离）======
+// 组内对话共享记忆，组内助手可被编排者经 CallAssistant 委派。
+export const teamApi = {
+  list: () => client.get('/teams'),                          // -> [{ id, name, description, conversation_count, ... }]
+  create: (data) => client.post('/teams', data),             // { name, description? }
+  get: (id) => client.get(`/teams/${id}`),                   // -> { ...team, conversations: [...] }
+  update: (id, data) => client.patch(`/teams/${id}`, data),  // { name?, description? }
+  remove: (id) => client.delete(`/teams/${id}`),
+  // 组共享记忆（scope = user + team）
+  listMemories: (id, page = 1, pageSize = 20) =>
+    client.get(`/teams/${id}/memories?page=${page}&page_size=${pageSize}`), // -> { items, total }
+  createMemory: (id, data) => client.post(`/teams/${id}/memories`, data),   // { content, tags? }
+  removeMemory: (teamId, memoryId) => client.delete(`/teams/${teamId}/memories/${memoryId}`)
 }
 
 // ====== Agent 工作流 API（本地 claw）======
@@ -229,6 +284,9 @@ export const agentApi = {
   deleteAllSessions: () => client.delete('/agent/sessions'),
   deleteSessionsByConversation: (conversationId) =>
     client.delete(`/agent/sessions?conversation_id=${conversationId}`),
+  // AR-12 会话分叉：从分叉点消息 entryId 复制父 session 对话历史到新 session
+  forkSession: (id, entryId) =>
+    client.post(`/agent/sessions/${id}/fork`, { entry_id: entryId }),
   getResource: (id) => `${API_BASE}/agent/resources/${id}`,
   execute: async (body, onEvent) => {
     const token = getItem('token')

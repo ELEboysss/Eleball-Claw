@@ -40,6 +40,7 @@ type Message struct {
 
 // ToolCall 模型生成的工具调用
 type ToolCall struct {
+	Index    int              `json:"index,omitempty"` // 流式增量标识（OpenAI 流式协议），非流式响应不返回
 	ID       string           `json:"id"`
 	Type     string           `json:"type"`
 	Function ToolCallFunction `json:"function"`
@@ -51,15 +52,54 @@ type ToolCallFunction struct {
 	Arguments string `json:"arguments"`
 }
 
+// MergeToolCalls 将流式增量 tool_calls 合并到累加器（按 Index 对齐槽位）。
+// OpenAI 流式协议：首个分片携带 index/id/type/function.name，后续分片仅携带 function.arguments 增量片段，
+// 需按 index 累加拼接。非流式场景 acc 可为 nil。
+func MergeToolCalls(acc []ToolCall, delta []ToolCall) []ToolCall {
+	for _, d := range delta {
+		idx := -1
+		for i := range acc {
+			if acc[i].Index == d.Index {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			acc = append(acc, d)
+			continue
+		}
+		if d.ID != "" {
+			acc[idx].ID = d.ID
+		}
+		if d.Type != "" {
+			acc[idx].Type = d.Type
+		}
+		if d.Function.Name != "" {
+			acc[idx].Function.Name = d.Function.Name
+		}
+		if d.Function.Arguments != "" {
+			acc[idx].Function.Arguments += d.Function.Arguments
+		}
+	}
+	return acc
+}
+
 // StreamOptions 流式选项
 type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
-// ThinkingOptions Kimi / Moonshot 思考模式选项（OpenAI 兼容扩展字段）
+// ThinkingOptions 思考/推理模式统一选项。各协议客户端按自身能力消费对应字段：
+//   - Type/Keep：Kimi / Moonshot OpenAI 兼容扩展（thinking.type=enabled/disabled、keep=all 保留 reasoning_content）；
+//   - Effort：OpenAI o 系列 reasoning_effort（low/medium/high），由 OpenAIClient 提升为顶层 reasoning_effort；
+//   - BudgetTokens：Anthropic thinking.budget_tokens / Gemini thinkingConfig.thinkingBudget（显式推理 token 预算）。
+//
+// 未设置的字段不参与序列化，避免影响不识别的厂商。
 type ThinkingOptions struct {
-	Type string `json:"type"`          // enabled / disabled
-	Keep string `json:"keep,omitempty"` // 多轮对话中保留 reasoning_content，如 "all"
+	Type         string `json:"type"`                   // enabled / disabled
+	Keep         string `json:"keep,omitempty"`         // 多轮对话中保留 reasoning_content，如 "all"
+	Effort       string `json:"effort,omitempty"`       // AR-19 P2-3：OpenAI o 系列 reasoning effort（low/medium/high）
+	BudgetTokens int    `json:"budget_tokens,omitempty"` // AR-19 P2-3：Anthropic/Gemini 推理 token 预算
 }
 
 // ChatRequest 对话请求

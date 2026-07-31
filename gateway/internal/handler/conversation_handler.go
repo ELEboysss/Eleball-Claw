@@ -42,13 +42,14 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": conv})
 }
 
-// ListConversations 查询对话列表
+// ListConversations 查询对话列表（支持 team_id 按组过滤）
 func (h *ConversationHandler) ListConversations(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	teamID := c.Query("team_id")
 
 	userID, _ := c.Get("user_id")
-	items, total, err := h.conversationService.List(c.Request.Context(), userID.(string), page, pageSize)
+	items, total, err := h.conversationService.List(c.Request.Context(), userID.(string), teamID, page, pageSize)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 5000, "message": err.Error()})
 		return

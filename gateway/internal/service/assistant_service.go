@@ -7,6 +7,7 @@ import (
 
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
+	"github.com/eleball/gateway/pkg/crypto"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -16,11 +17,34 @@ type AssistantService struct {
 	db        *gorm.DB
 	repo      *repository.AssistantRepo
 	agentRepo *repository.AgentRepo
+	teamSvc   *TeamService          // Agent Team P3：PATCH team_id 时校验组归属（可选装配）
+	encrypt   *crypto.KeyEncryption // Agent Team P5：BYOK api_key 加密（可选装配；未装配时拒绝写 api_key）
 }
 
 // NewAssistantService 创建服务
 func NewAssistantService(db *gorm.DB, repo *repository.AssistantRepo, agentRepo *repository.AgentRepo) *AssistantService {
 	return &AssistantService{db: db, repo: repo, agentRepo: agentRepo}
+}
+
+// SetTeamService 装配组服务（Agent Team P3；设置后 PATCH team_id 校验组归属当前用户）
+func (s *AssistantService) SetTeamService(svc *TeamService) {
+	s.teamSvc = svc
+}
+
+// SetKeyEncryption 装配密钥加密器（Agent Team P5；设置后可保存 BYOK api_key，AES-256-GCM 入库）
+func (s *AssistantService) SetKeyEncryption(ke *crypto.KeyEncryption) {
+	s.encrypt = ke
+}
+
+// DecryptAPIKey 解密助手的 BYOK api_key（明文仅驻内存；Agent Team P5 子 agent 解析 LLM 客户端用）
+func (s *AssistantService) DecryptAPIKey(a *model.Assistant) (string, error) {
+	if a == nil || a.LLMAPIKey == "" {
+		return "", nil
+	}
+	if s.encrypt == nil {
+		return "", errors.New("未配置 ENCRYPTION_MASTER_KEY，无法解密 BYOK Key")
+	}
+	return s.encrypt.Decrypt(a.LLMAPIKey, a.LLMAPIKeyNonce)
 }
 
 // AssistantAgentItem 助手条目展开视图（供前端展示秘技概要）
@@ -34,6 +58,13 @@ type AssistantAgentItem struct {
 type AssistantView struct {
 	*model.Assistant
 	Items []AssistantAgentItem `json:"items"`
+	// Agent Team P5：是否已设置 BYOK api_key（仅布尔；密钥本身从不回读）
+	LLMAPIKeySet bool `json:"llm_api_key_set"`
+}
+
+// view 构造助手视图（含条目展开 + llm_api_key_set；密钥本身不外泄）
+func (s *AssistantService) view(a *model.Assistant) *AssistantView {
+	return &AssistantView{Assistant: a, Items: s.expandItems(a.ID), LLMAPIKeySet: a.LLMAPIKey != ""}
 }
 
 // getOwned 查询助手并校验归属
@@ -77,7 +108,7 @@ func (s *AssistantService) List(userID string) ([]*AssistantView, error) {
 	}
 	views := make([]*AssistantView, 0, len(assistants))
 	for _, a := range assistants {
-		views = append(views, &AssistantView{Assistant: a, Items: s.expandItems(a.ID)})
+		views = append(views, s.view(a))
 	}
 	return views, nil
 }
@@ -92,13 +123,14 @@ func (s *AssistantService) Create(userID, name, description string) (*AssistantV
 		UserID:      userID,
 		Name:        name,
 		Description: description,
+		Shared:      true, // Agent Team P3：与 DB 默认值对齐，新建助手默认对编排者可见
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
 	if err := s.repo.Create(a); err != nil {
 		return nil, err
 	}
-	return &AssistantView{Assistant: a, Items: []AssistantAgentItem{}}, nil
+	return s.view(a), nil
 }
 
 // Get 查询助手详情（含条目展开）
@@ -107,29 +139,88 @@ func (s *AssistantService) Get(userID, id string) (*AssistantView, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &AssistantView{Assistant: a, Items: s.expandItems(a.ID)}, nil
+	return s.view(a), nil
 }
 
-// Update 更新助手名称/描述（nil 字段不更新）
-func (s *AssistantService) Update(userID, id string, name, description *string) (*AssistantView, error) {
+// AssistantUpdateInput 助手可更新字段（nil 字段不更新）
+// Agent Team P3：扩展 system_prompt / shared / team_id
+// Agent Team P5：扩展 llm_mode / llm_provider / llm_model / llm_base_url / llm_api_key
+type AssistantUpdateInput struct {
+	Name         *string
+	Description  *string
+	SystemPrompt *string
+	Shared       *bool
+	TeamID       *string // 空字符串=移出组（全局可见）；非空校验组归属当前用户
+	LLMMode      *string // follow|eleagent|byok
+	LLMProvider  *string // byok 服务商
+	LLMModel     *string // byok 模型名 或 eleagent 的 "subProvider/subModel"
+	LLMBaseURL   *string // byok 自定义端点
+	LLMAPIKey    *string // 非空=加密入库；空字符串=清除
+}
+
+// Update 更新助手（nil 字段不更新）；team_id 非空时校验组归属当前用户
+func (s *AssistantService) Update(userID, id string, in AssistantUpdateInput) (*AssistantView, error) {
 	a, err := s.getOwned(userID, id)
 	if err != nil {
 		return nil, err
 	}
-	if name != nil {
-		if *name == "" {
+	if in.Name != nil {
+		if *in.Name == "" {
 			return nil, errors.New("助手名称不能为空")
 		}
-		a.Name = *name
+		a.Name = *in.Name
 	}
-	if description != nil {
-		a.Description = *description
+	if in.Description != nil {
+		a.Description = *in.Description
+	}
+	// Agent Team P3：编排协作三字段
+	if in.SystemPrompt != nil {
+		a.SystemPrompt = *in.SystemPrompt
+	}
+	if in.Shared != nil {
+		a.Shared = *in.Shared
+	}
+	if in.TeamID != nil {
+		if *in.TeamID != "" && s.teamSvc != nil {
+			if err := s.teamSvc.CheckOwned(userID, *in.TeamID); err != nil {
+				return nil, err
+			}
+		}
+		a.TeamID = *in.TeamID
+	}
+	// Agent Team P5：助手级 LLM 配置
+	if in.LLMMode != nil {
+		a.LLMMode = *in.LLMMode
+	}
+	if in.LLMProvider != nil {
+		a.LLMProvider = *in.LLMProvider
+	}
+	if in.LLMModel != nil {
+		a.LLMModel = *in.LLMModel
+	}
+	if in.LLMBaseURL != nil {
+		a.LLMBaseURL = *in.LLMBaseURL
+	}
+	if in.LLMAPIKey != nil {
+		if *in.LLMAPIKey == "" {
+			// 空字符串=清除已存的 BYOK Key
+			a.LLMAPIKey, a.LLMAPIKeyNonce, a.LLMAPIKeyVersion = "", "", ""
+		} else {
+			if s.encrypt == nil {
+				return nil, errors.New("未配置 ENCRYPTION_MASTER_KEY，无法保存 BYOK Key")
+			}
+			ct, nonce, ver, err := s.encrypt.Encrypt(*in.LLMAPIKey)
+			if err != nil {
+				return nil, err
+			}
+			a.LLMAPIKey, a.LLMAPIKeyNonce, a.LLMAPIKeyVersion = ct, nonce, ver
+		}
 	}
 	a.UpdatedAt = time.Now()
 	if err := s.repo.Update(a); err != nil {
 		return nil, err
 	}
-	return &AssistantView{Assistant: a, Items: s.expandItems(a.ID)}, nil
+	return s.view(a), nil
 }
 
 // Delete 删除助手，并清除引用它的会话绑定
@@ -176,7 +267,7 @@ func (s *AssistantService) SetItems(userID, id string, agentIDs []string) (*Assi
 	if err := s.repo.Update(a); err != nil {
 		return nil, err
 	}
-	return &AssistantView{Assistant: a, Items: s.expandItems(a.ID)}, nil
+	return s.view(a), nil
 }
 
 // AgentIDsFor 返回助手包含的秘技 ID 集合（Agent 执行过滤用）。

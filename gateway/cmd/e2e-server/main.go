@@ -315,9 +315,10 @@ type AgentItem struct {
 	Status        string  `json:"status"`
 	CreatedAt     int64   `json:"created_at"`
 	// 运行时字段：当前登录用户是否已激活该秘技
-	IsActive         bool  `json:"is_active"`
-	DriverRegistered bool  `json:"driver_registered"`
-	ModuleOnline     *bool `json:"module_online,omitempty"`
+	IsActive           bool  `json:"is_active"`
+	DriverRegistered   bool  `json:"driver_registered"`
+	ModuleOnline       *bool `json:"module_online,omitempty"`
+	CredentialComplete bool  `json:"credential_complete"`
 }
 
 // Manifest 解析 ManifestJSON 为 ToolManifest
@@ -600,13 +601,13 @@ func init() {
 		{ID: "agent-004", Name: "会议纪要整理", Description: "将会议录音或速记整理为正式会议纪要", Category: "办公", PriceDanwan: 0, AvgRating: 4.5, PurchaseCount: 876, FavoriteCount: 180, Status: "approved", Level: 1, CreatedAt: now},
 		{ID: "agent-005", Name: "SQL 优化大师", Description: "分析 SQL 查询语句，指出性能瓶颈并给出优化方案", Category: "编程", PriceDanwan: 150, AvgRating: 4.9, PurchaseCount: 2103, FavoriteCount: 560, Status: "approved", Level: 4, CreatedAt: now},
 		{ID: "agent-006", Name: "睡前故事创作", Description: "根据指定主题或角色，创作温暖治愈的睡前故事", Category: "创意", PriceDanwan: 0, AvgRating: 4.6, PurchaseCount: 654, FavoriteCount: 120, Status: "approved", Level: 1, CreatedAt: now},
-		{ID: "agent-reach-web", Name: "全网洞察（基础版）", Description: "基于 Agent-Reach 的网页阅读与全网语义搜索，零配置即用", Category: "互联网", PriceDanwan: 0, AvgRating: 4.7, PurchaseCount: 320, FavoriteCount: 80, Status: "approved", Level: 2, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.agent_reach.web","name":"全网洞察","description":"基于 Agent-Reach 的网页阅读与全网语义搜索，零配置即用。","driver":"agent_reach","runtime_type":"remote","category":"互联网","level":2,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["web_read","search"],"description":"模块 action"},"params":{"type":"object","description":"Agent-Reach 参数","properties":{"query":{"type":"string","description":"URL 或搜索关键词"},"limit":{"type":"integer","description":"返回条数","default":5}}}},"required":["action"]},"actions":[{"name":"web_read","description":"读取任意网页"},{"name":"search","description":"全网语义搜索"}],"timeout_seconds":60}`},
-		{ID: "agent-reach-video", Name: "视频解析器", Description: "基于 Agent-Reach 的 YouTube/B站 字幕提取与搜索", Category: "互联网", PriceDanwan: 200, AvgRating: 4.8, PurchaseCount: 156, FavoriteCount: 45, Status: "approved", Level: 3, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.agent_reach.video","name":"视频解析器","description":"基于 Agent-Reach 的 YouTube/B站 字幕提取与搜索。","driver":"agent_reach","runtime_type":"remote","category":"互联网","level":3,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["youtube_subtitles","bilibili_search"],"description":"模块 action"},"params":{"type":"object","description":"Agent-Reach 参数","properties":{"query":{"type":"string","description":"视频 URL 或搜索关键词"},"limit":{"type":"integer","description":"返回条数","default":5}}}},"required":["action"]},"actions":[{"name":"youtube_subtitles","description":"提取 YouTube 字幕"},{"name":"bilibili_search","description":"B站搜索"}],"credentials":{"youtube_cookie":{"type":"cookie","label":"YouTube Cookie","description":"用于提取 YouTube 字幕","placeholder":"粘贴 YouTube Cookie","required":false},"bilibili_cookie":{"type":"cookie","label":"B站 Cookie","description":"用于 B站搜索","placeholder":"粘贴 B站 Cookie","required":false}},"timeout_seconds":120}`},
+		{ID: "agent-reach-web", Name: "全网洞察（基础版）", Description: "基于 Agent-Reach 的网页阅读与全网语义搜索，零配置即用", Category: "互联网", PriceDanwan: 0, AvgRating: 4.7, PurchaseCount: 320, FavoriteCount: 80, Status: "approved", Level: 2, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.agent_reach.web","name":"全网洞察","description":"基于 Agent-Reach 的网页阅读与全网语义搜索，零配置即用。","driver":"agent_reach","runtime_type":"remote","category":"互联网","level":2,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["web_read","search"],"description":"模块 action"},"params":{"type":"object","description":"Agent-Reach 参数","properties":{"query":{"type":"string","description":"URL 或搜索关键词"},"limit":{"type":"integer","description":"返回条数","default":5}}}},"required":["action"]},"actions":[{"name":"web_read","description":"读取任意网页"},{"name":"search","description":"全网语义搜索"}],"credentials":{"exa_api_key":{"type":"api_key","label":"Exa API Key","description":"全网语义搜索依赖 Exa.ai","placeholder":"exa-xxxxxxxx","required":true,"scope":"module"}},"timeout_seconds":60}`},
+		{ID: "agent-reach-video", Name: "视频解析器", Description: "基于 Agent-Reach 的 YouTube/B站 字幕提取与搜索", Category: "互联网", PriceDanwan: 200, AvgRating: 4.8, PurchaseCount: 156, FavoriteCount: 45, Status: "approved", Level: 3, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.agent_reach.video","name":"视频解析器","description":"基于 Agent-Reach 的 YouTube/B站 字幕提取与搜索。","driver":"agent_reach","runtime_type":"remote","category":"互联网","level":3,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["youtube_subtitles","bilibili_search"],"description":"模块 action"},"params":{"type":"object","description":"Agent-Reach 参数","properties":{"query":{"type":"string","description":"视频 URL 或搜索关键词"},"limit":{"type":"integer","description":"返回条数","default":5}}}},"required":["action"]},"actions":[{"name":"youtube_subtitles","description":"提取 YouTube 字幕"},{"name":"bilibili_search","description":"B站搜索"}],"credentials":{"youtube_cookie":{"type":"cookie","label":"YouTube Cookie","description":"用于提取 YouTube 字幕","placeholder":"粘贴 YouTube Cookie","required":false},"bilibili_cookie":{"type":"cookie","label":"B站 Cookie","description":"用于 B站搜索","placeholder":"粘贴 B站 Cookie","required":false,"scope":"module"}},"timeout_seconds":120}`},
 		{ID: "agent-reach-github", Name: "开发者雷达", Description: "基于 Agent-Reach 的 GitHub 仓库查看与代码搜索", Category: "开发", PriceDanwan: 80, AvgRating: 4.5, PurchaseCount: 210, FavoriteCount: 60, Status: "approved", Level: 2, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.agent_reach.github","name":"开发者雷达","description":"基于 Agent-Reach 的 GitHub 仓库查看与代码搜索。","driver":"agent_reach","runtime_type":"remote","category":"开发","level":2,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["github_repo","github_search"],"description":"模块 action"},"params":{"type":"object","description":"Agent-Reach 参数","properties":{"query":{"type":"string","description":"仓库名或搜索关键词"},"limit":{"type":"integer","description":"返回条数","default":5}}}},"required":["action"]},"actions":[{"name":"github_repo","description":"查看 GitHub 仓库"},{"name":"github_search","description":"搜索 GitHub 仓库"}],"credentials":{"github_token":{"type":"api_key","label":"GitHub Token","description":"可选，用于提高 GitHub API 速率限额或访问私有仓库","placeholder":"ghp_...","required":false}},"timeout_seconds":60}`},
-		{ID: "agent-reach-social", Name: "社媒雷达", Description: "基于 Agent-Reach 的社媒内容搜索与阅读，支持 Twitter、小红书、Reddit、B站", Category: "互联网", PriceDanwan: 150, AvgRating: 4.6, PurchaseCount: 98, FavoriteCount: 30, Status: "approved", Level: 3, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.agent_reach.social","name":"社媒雷达","description":"基于 Agent-Reach 的社媒内容搜索与阅读，支持 Twitter、小红书、Reddit、B站。","driver":"agent_reach","runtime_type":"remote","category":"互联网","level":3,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["social_search","social_read"],"description":"模块 action"},"params":{"type":"object","description":"Agent-Reach 参数","properties":{"social_platform":{"type":"string","enum":["twitter","xiaohongshu","reddit","bilibili"],"description":"社交平台"},"query":{"type":"string","description":"搜索关键词或帖子链接"},"limit":{"type":"integer","description":"返回条数","default":5}}}},"required":["action"]},"actions":[{"name":"social_search","description":"搜索社媒内容"},{"name":"social_read","description":"读取社媒帖子详情"}],"credentials":{"twitter_cookie":{"type":"cookie","label":"Twitter Cookie","description":"用于 Twitter 搜索/阅读的浏览器登录态 Cookie","placeholder":"粘贴 Twitter Cookie","required":false},"xiaohongshu_cookie":{"type":"cookie","label":"小红书 Cookie","description":"用于小红书搜索/阅读的浏览器登录态 Cookie","placeholder":"粘贴小红书 Cookie","required":false}},"timeout_seconds":120}`},
-		{ID: "firecrawl-scrape", Name: "Firecrawl 网页抓取", Description: "将任意网页转换为干净 Markdown，返回标题、URL、描述等元数据", Category: "互联网", PriceDanwan: 0, AvgRating: 4.7, PurchaseCount: 0, FavoriteCount: 0, Status: "approved", Level: 2, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.firecrawl.scrape","name":"Firecrawl 网页抓取","description":"将任意网页转换为干净 Markdown，返回标题、URL、描述等元数据。","driver":"firecrawl","runtime_type":"remote","category":"互联网","level":2,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["scrape"],"description":"抓取动作"},"params":{"type":"object","description":"Firecrawl scrape 参数，如 {url: \"https://example.com\"}"}},"required":["action"]},"actions":[{"name":"scrape","description":"抓取单个网页并返回 Markdown / 元数据"}],"timeout_seconds":120}`},
-		{ID: "firecrawl-crawl", Name: "Firecrawl 网站爬虫", Description: "对指定网站启动批量爬取任务，返回任务 ID", Category: "互联网", PriceDanwan: 100, AvgRating: 4.6, PurchaseCount: 0, FavoriteCount: 0, Status: "approved", Level: 3, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.firecrawl.crawl","name":"Firecrawl 批量爬取","description":"对指定网站启动批量爬取任务，返回任务 ID。","driver":"firecrawl","runtime_type":"remote","category":"互联网","level":3,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["crawl"],"description":"爬取动作"},"params":{"type":"object","description":"Firecrawl crawl 参数，如 {url: \"https://example.com\", limit: 10}"}},"required":["action"]},"actions":[{"name":"crawl","description":"批量爬取网站，返回任务 ID"}],"timeout_seconds":120}`},
-		{ID: "firecrawl-extract", Name: "Firecrawl 结构化提取", Description: "按 JSON Schema 从网页中提取结构化数据", Category: "互联网", PriceDanwan: 100, AvgRating: 4.8, PurchaseCount: 0, FavoriteCount: 0, Status: "approved", Level: 3, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.firecrawl.extract","name":"Firecrawl 结构化提取","description":"按 JSON Schema 从网页中提取结构化数据。","driver":"firecrawl","runtime_type":"remote","category":"互联网","level":3,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["extract"],"description":"提取动作"},"params":{"type":"object","description":"Firecrawl extract 参数，如 {urls: [...], schema: {...}}"}},"required":["action"]},"actions":[{"name":"extract","description":"按 JSON Schema 提取结构化数据"}],"timeout_seconds":120}`},
+		{ID: "agent-reach-social", Name: "社媒雷达", Description: "基于 Agent-Reach 的社媒内容搜索与阅读，支持 Twitter、小红书、Reddit、B站", Category: "互联网", PriceDanwan: 150, AvgRating: 4.6, PurchaseCount: 98, FavoriteCount: 30, Status: "approved", Level: 3, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.agent_reach.social","name":"社媒雷达","description":"基于 Agent-Reach 的社媒内容搜索与阅读，支持 Twitter、小红书、Reddit、B站。","driver":"agent_reach","runtime_type":"remote","category":"互联网","level":3,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["social_search","social_read"],"description":"模块 action"},"params":{"type":"object","description":"Agent-Reach 参数","properties":{"social_platform":{"type":"string","enum":["twitter","xiaohongshu","reddit","bilibili"],"description":"社交平台"},"query":{"type":"string","description":"搜索关键词或帖子链接"},"limit":{"type":"integer","description":"返回条数","default":5}}}},"required":["action"]},"actions":[{"name":"social_search","description":"搜索社媒内容"},{"name":"social_read","description":"读取社媒帖子详情"}],"credentials":{"twitter_cookie":{"type":"cookie","label":"Twitter Cookie","description":"用于 Twitter 搜索/阅读的浏览器登录态 Cookie","placeholder":"粘贴 Twitter Cookie","required":false},"xiaohongshu_cookie":{"type":"cookie","label":"小红书 Cookie","description":"用于小红书搜索/阅读的浏览器登录态 Cookie","placeholder":"粘贴小红书 Cookie","required":false},"bilibili_cookie":{"type":"cookie","label":"B站 Cookie","description":"用于 B站搜索/阅读的 SESSDATA 或完整 Cookie Header String。与「视频解析器」共享此凭证（模块级）。","placeholder":"粘贴 B站 Cookie","required":false,"scope":"module"}},"timeout_seconds":120}`},
+		{ID: "firecrawl-scrape", Name: "Firecrawl 网页抓取", Description: "将任意网页转换为干净 Markdown，返回标题、URL、描述等元数据", Category: "互联网", PriceDanwan: 0, AvgRating: 4.7, PurchaseCount: 0, FavoriteCount: 0, Status: "approved", Level: 2, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.firecrawl.scrape","name":"Firecrawl 网页抓取","description":"将任意网页转换为干净 Markdown，返回标题、URL、描述等元数据。","driver":"firecrawl","runtime_type":"remote","category":"互联网","level":2,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["scrape"],"description":"抓取动作"},"params":{"type":"object","description":"Firecrawl scrape 参数，如 {url: \"https://example.com\"}"}},"required":["action"]},"actions":[{"name":"scrape","description":"抓取单个网页并返回 Markdown / 元数据"}],"credentials":{"firecrawl_api_key":{"type":"api_key","label":"Firecrawl API Key","description":"用于调用 Firecrawl Cloud API","placeholder":"fc-...","required":false,"scope":"module"}},"timeout_seconds":120}`},
+		{ID: "firecrawl-crawl", Name: "Firecrawl 网站爬虫", Description: "对指定网站启动批量爬取任务，返回任务 ID", Category: "互联网", PriceDanwan: 100, AvgRating: 4.6, PurchaseCount: 0, FavoriteCount: 0, Status: "approved", Level: 3, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.firecrawl.crawl","name":"Firecrawl 批量爬取","description":"对指定网站启动批量爬取任务，返回任务 ID。","driver":"firecrawl","runtime_type":"remote","category":"互联网","level":3,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["crawl"],"description":"爬取动作"},"params":{"type":"object","description":"Firecrawl crawl 参数，如 {url: \"https://example.com\", limit: 10}"}},"required":["action"]},"actions":[{"name":"crawl","description":"批量爬取网站，返回任务 ID"}],"credentials":{"firecrawl_api_key":{"type":"api_key","label":"Firecrawl API Key","description":"用于调用 Firecrawl Cloud API","placeholder":"fc-...","required":false,"scope":"module"}},"timeout_seconds":120}`},
+		{ID: "firecrawl-extract", Name: "Firecrawl 结构化提取", Description: "按 JSON Schema 从网页中提取结构化数据", Category: "互联网", PriceDanwan: 100, AvgRating: 4.8, PurchaseCount: 0, FavoriteCount: 0, Status: "approved", Level: 3, CreatedAt: now, ManifestJSON: `{"id":"com.eleball.tools.firecrawl.extract","name":"Firecrawl 结构化提取","description":"按 JSON Schema 从网页中提取结构化数据。","driver":"firecrawl","runtime_type":"remote","category":"互联网","level":3,"permissions":["network"],"parameters":{"type":"object","properties":{"action":{"type":"string","enum":["extract"],"description":"提取动作"},"params":{"type":"object","description":"Firecrawl extract 参数，如 {urls: [...], schema: {...}}"}},"required":["action"]},"actions":[{"name":"extract","description":"按 JSON Schema 提取结构化数据"}],"credentials":{"firecrawl_api_key":{"type":"api_key","label":"Firecrawl API Key","description":"用于调用 Firecrawl Cloud API","placeholder":"fc-...","required":false,"scope":"module"}},"timeout_seconds":120}`},
 	}
 	for _, a := range mockAgents {
 		agents = append(agents, a)
@@ -2022,6 +2023,7 @@ func listAgentsHandler(w http.ResponseWriter, r *http.Request) {
 		cp := *a
 		cp.DriverRegistered = e2eDriverRegisteredFromManifest(a.ManifestJSON)
 		cp.ModuleOnline = e2eModuleOnlinePtrFromManifest(a.ManifestJSON)
+		cp.CredentialComplete = e2eCredentialComplete(uid, a)
 		if uid != "" && purchases[uid] != nil && purchases[uid][a.ID] {
 			cp.IsActive = true
 		}
@@ -2362,16 +2364,22 @@ func agentCredentialsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	manifest, _ := item.Manifest()
-	key := uid + ":" + agentID
 
 	switch r.Method {
 	case http.MethodGet:
-		mu.RLock()
 		values := make(map[string]string)
-		for k, v := range e2eCredentials[key] {
-			values[k] = v
+		if manifest != nil {
+			mu.RLock()
+			for k, def := range manifest.Credentials {
+				bucket := e2eCredentialBucket(uid, def, manifest, agentID)
+				if stored := e2eCredentials[bucket]; stored != nil {
+					if v := stored[k]; v != "" {
+						values[k] = v
+					}
+				}
+			}
+			mu.RUnlock()
 		}
-		mu.RUnlock()
 		respondSuccess(w, map[string]interface{}{
 			"agent_id":    agentID,
 			"credentials": manifest.Credentials,
@@ -2386,15 +2394,20 @@ func agentCredentialsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		mu.Lock()
-		if e2eCredentials[key] == nil {
-			e2eCredentials[key] = make(map[string]string)
-		}
 		for k, v := range req.Values {
+			var def model.CredentialDef
+			if manifest != nil {
+				def = manifest.Credentials[k]
+			}
+			bucket := e2eCredentialBucket(uid, def, manifest, agentID)
+			if e2eCredentials[bucket] == nil {
+				e2eCredentials[bucket] = make(map[string]string)
+			}
 			if v == "" {
-				delete(e2eCredentials[key], k)
+				delete(e2eCredentials[bucket], k)
 				continue
 			}
-			e2eCredentials[key][k] = v
+			e2eCredentials[bucket][k] = v
 		}
 		mu.Unlock()
 		respondSuccess(w, nil)
@@ -2700,6 +2713,7 @@ type E2EChatConversation struct {
 	EnableTools     bool              `json:"enable_tools"`
 	EnableWebSearch bool              `json:"enable_web_search"`
 	SearchProvider  string            `json:"search_provider"`
+	TeamID          string            `json:"team_id,omitempty"`
 	CreatedAt       int64             `json:"created_at"`
 	UpdatedAt       int64             `json:"updated_at"`
 	Messages        []*E2EChatMessage `json:"messages,omitempty"`
@@ -2732,8 +2746,9 @@ func e2eListConversationsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var items []*E2EChatConversation
+	teamID := r.URL.Query().Get("team_id")
 	for _, conv := range e2eConversations {
-		if conv.UserID == uid {
+		if conv.UserID == uid && (teamID == "" || conv.TeamID == teamID) {
 			items = append(items, conv)
 		}
 	}
@@ -2819,10 +2834,23 @@ func e2eUpdateConversationHandler(w http.ResponseWriter, r *http.Request, id str
 		SearchProvider  *string `json:"search_provider,omitempty"`
 		Model           *string `json:"model,omitempty"`
 		Provider        *string `json:"provider,omitempty"`
+		TeamID          *string `json:"team_id,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, 1001, "参数错误")
 		return
+	}
+	if req.TeamID != nil && *req.TeamID != "" {
+		// 归组：校验分组存在且归属当前用户（空字符串 = 移出分组）
+		team, ok := e2eTeams[*req.TeamID]
+		if !ok {
+			respondError(w, 3001, "组不存在")
+			return
+		}
+		if team.UserID != uid {
+			respondError(w, 3001, "无权访问该分组")
+			return
+		}
 	}
 	if req.Title != nil {
 		conv.Title = *req.Title
@@ -2841,6 +2869,9 @@ func e2eUpdateConversationHandler(w http.ResponseWriter, r *http.Request, id str
 	}
 	if req.Provider != nil {
 		conv.Provider = *req.Provider
+	}
+	if req.TeamID != nil {
+		conv.TeamID = *req.TeamID
 	}
 	conv.UpdatedAt = time.Now().Unix()
 	respondSuccess(w, nil)
@@ -2932,6 +2963,285 @@ func e2eGenerateTitle(content string) string {
 }
 
 // ============================================================================
+//  Teams（对话分组，E2E 内存实现）
+// ============================================================================
+
+// E2ETeam 对话分组（与云端 model.Team 字段对齐）
+type E2ETeam struct {
+	ID          string `json:"id"`
+	UserID      string `json:"user_id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   int64  `json:"updated_at"`
+}
+
+var e2eTeams = make(map[string]*E2ETeam)
+
+// 组共享记忆内存存储（Agent Team P2）：memoryID -> E2ETeamMemory
+var e2eTeamMemories = make(map[string]*E2ETeamMemory)
+
+// e2eGetOwnedTeam 查询分组并校验归属（不存在与非本人统一返回 nil）
+func e2eGetOwnedTeam(uid, id string) *E2ETeam {
+	t := e2eTeams[id]
+	if t == nil || t.UserID != uid {
+		return nil
+	}
+	return t
+}
+
+// e2eListTeamsHandler 分组列表（含 conversation_count 统计）
+func e2eListTeamsHandler(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r)
+	var items []map[string]interface{}
+	for _, team := range e2eTeams {
+		if team.UserID != uid {
+			continue
+		}
+		var convCount int64
+		for _, conv := range e2eConversations {
+			if conv.TeamID == team.ID {
+				convCount++
+			}
+		}
+		items = append(items, map[string]interface{}{
+			"id":                 team.ID,
+			"user_id":            team.UserID,
+			"name":               team.Name,
+			"description":        team.Description,
+			"created_at":         team.CreatedAt,
+			"updated_at":         team.UpdatedAt,
+			"conversation_count": convCount,
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i]["created_at"].(int64) > items[j]["created_at"].(int64)
+	})
+	if items == nil {
+		items = []map[string]interface{}{}
+	}
+	respondSuccess(w, items)
+}
+
+// e2eCreateTeamHandler 创建分组
+func e2eCreateTeamHandler(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r)
+	var req struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		respondError(w, 1001, "参数错误: name 必填")
+		return
+	}
+	now := time.Now().Unix()
+	team := &E2ETeam{
+		ID:          newUUID(),
+		UserID:      uid,
+		Name:        req.Name,
+		Description: req.Description,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	e2eTeams[team.ID] = team
+	respondSuccess(w, team)
+}
+
+// e2eGetTeamHandler 分组详情（含组内对话摘要列表）
+func e2eGetTeamHandler(w http.ResponseWriter, r *http.Request, id string) {
+	uid := userIDFrom(r)
+	team, ok := e2eTeams[id]
+	if !ok || team.UserID != uid {
+		respondError(w, 3001, "组不存在")
+		return
+	}
+	convs := []map[string]interface{}{}
+	for _, conv := range e2eConversations {
+		if conv.TeamID == id {
+			convs = append(convs, map[string]interface{}{
+				"id":         conv.ID,
+				"title":      conv.Title,
+				"model":      conv.Model,
+				"updated_at": conv.UpdatedAt,
+			})
+		}
+	}
+	sort.Slice(convs, func(i, j int) bool {
+		return convs[i]["updated_at"].(int64) > convs[j]["updated_at"].(int64)
+	})
+	respondSuccess(w, map[string]interface{}{
+		"id":            team.ID,
+		"user_id":       team.UserID,
+		"name":          team.Name,
+		"description":   team.Description,
+		"created_at":    team.CreatedAt,
+		"updated_at":    team.UpdatedAt,
+		"conversations": convs,
+	})
+}
+
+// e2eUpdateTeamHandler 更新分组名称/描述
+func e2eUpdateTeamHandler(w http.ResponseWriter, r *http.Request, id string) {
+	uid := userIDFrom(r)
+	team, ok := e2eTeams[id]
+	if !ok || team.UserID != uid {
+		respondError(w, 3001, "组不存在")
+		return
+	}
+	var req struct {
+		Name        *string `json:"name"`
+		Description *string `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, 1001, "参数错误")
+		return
+	}
+	if req.Name != nil {
+		if *req.Name == "" {
+			respondError(w, 3001, "组名称不能为空")
+			return
+		}
+		team.Name = *req.Name
+	}
+	if req.Description != nil {
+		team.Description = *req.Description
+	}
+	team.UpdatedAt = time.Now().Unix()
+	respondSuccess(w, team)
+}
+
+// e2eDeleteTeamHandler 删除分组：清 conversations.team_id，不删对话
+func e2eDeleteTeamHandler(w http.ResponseWriter, r *http.Request, id string) {
+	uid := userIDFrom(r)
+	team, ok := e2eTeams[id]
+	if !ok || team.UserID != uid {
+		respondError(w, 3001, "组不存在")
+		return
+	}
+	for _, conv := range e2eConversations {
+		if conv.TeamID == id {
+			conv.TeamID = ""
+		}
+	}
+	delete(e2eTeams, id)
+	// 级联删除组共享记忆（Agent Team P2）
+	for mid, m := range e2eTeamMemories {
+		if m.TeamID == id {
+			delete(e2eTeamMemories, mid)
+		}
+	}
+	respondSuccess(w, nil)
+}
+
+// ============================================================================
+//  组共享记忆（TeamMemory，Agent Team P2，E2E 内存实现，与云端 /v1/teams/:id/memories* 对齐）
+// ============================================================================
+
+// E2ETeamMemory 组共享记忆条目（scope = user + team）
+type E2ETeamMemory struct {
+	ID                   string `json:"id"`
+	TeamID               string `json:"team_id"`
+	UserID               string `json:"user_id"`
+	Content              string `json:"content"`
+	Tags                 string `json:"tags,omitempty"`
+	SourceConversationID string `json:"source_conversation_id,omitempty"`
+	CreatedAt            int64  `json:"created_at"`
+	UpdatedAt            int64  `json:"updated_at"`
+}
+
+// e2eListTeamMemoriesHandler 组记忆列表（分页 page/page_size，按 created_at 倒序）
+func e2eListTeamMemoriesHandler(w http.ResponseWriter, r *http.Request, teamID string) {
+	uid := userIDFrom(r)
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	mu.RLock()
+	defer mu.RUnlock()
+	if e2eGetOwnedTeam(uid, teamID) == nil {
+		respondError(w, 3001, "组不存在")
+		return
+	}
+	items := make([]*E2ETeamMemory, 0)
+	for _, m := range e2eTeamMemories {
+		if m.TeamID == teamID {
+			items = append(items, m)
+		}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt > items[j].CreatedAt })
+	total := len(items)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	respondSuccess(w, map[string]interface{}{
+		"items": items[start:end],
+		"total": total,
+	})
+}
+
+// e2eCreateTeamMemoryHandler 手动新增组记忆（content 必填，≤500 字）
+func e2eCreateTeamMemoryHandler(w http.ResponseWriter, r *http.Request, teamID string) {
+	uid := userIDFrom(r)
+	var req struct {
+		Content string `json:"content"`
+		Tags    string `json:"tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Content) == "" {
+		respondError(w, 1001, "参数错误: content 必填")
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if e2eGetOwnedTeam(uid, teamID) == nil {
+		respondError(w, 3001, "组不存在")
+		return
+	}
+	if len([]rune(strings.TrimSpace(req.Content))) > 500 {
+		respondError(w, 3001, "记忆内容不能超过 500 字")
+		return
+	}
+	now := time.Now().Unix()
+	m := &E2ETeamMemory{
+		ID:        fmt.Sprintf("tm-%s", newUUID()[:8]),
+		TeamID:    teamID,
+		UserID:    uid,
+		Content:   strings.TrimSpace(req.Content),
+		Tags:      strings.TrimSpace(req.Tags),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	e2eTeamMemories[m.ID] = m
+	respondSuccess(w, m)
+}
+
+// e2eDeleteTeamMemoryHandler 删除组记忆条目（校验组归属，且条目属于该组）
+func e2eDeleteTeamMemoryHandler(w http.ResponseWriter, r *http.Request, teamID, memoryID string) {
+	uid := userIDFrom(r)
+	mu.Lock()
+	defer mu.Unlock()
+	if e2eGetOwnedTeam(uid, teamID) == nil {
+		respondError(w, 3001, "组不存在")
+		return
+	}
+	m := e2eTeamMemories[memoryID]
+	if m == nil || m.TeamID != teamID {
+		respondError(w, 3001, "记忆不存在")
+		return
+	}
+	delete(e2eTeamMemories, memoryID)
+	respondSuccess(w, nil)
+}
+
+// ============================================================================
 //  Agent 工作流（E2E 内存实现）
 // ============================================================================
 
@@ -2972,6 +3282,9 @@ func e2eAgentExecuteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID := newUUID()
+	// Agent Team P3：云端 agent_sessions 已加 parent_session_id（CallAssistant 子 session provenance）；
+	// e2e 不持久化 agent_sessions（/v1/agent/sessions 返回空列表），CallAssistant 由真实 LLM 行为驱动，
+	// e2e 不模拟委派闭环，故此处无字段需镜像。
 
 	enableWebSearch := req.EnableWebSearch != nil && *req.EnableWebSearch
 	searchProvider := "baidu"
@@ -5064,6 +5377,38 @@ func e2eModuleOnlineFromManifest(manifestJSON string) bool {
 	return m != nil && m.Online
 }
 
+// e2eCredentialBucket 决定 e2e 凭证存储桶：scope=module 存 uid:module:<driver>（同 driver 共享），否则 uid:<agentID>。
+func e2eCredentialBucket(uid string, def model.CredentialDef, manifest *model.ToolManifest, agentID string) string {
+	if def.Scope == model.CredentialScopeModule && manifest != nil && manifest.Driver != "" {
+		return uid + ":module:" + string(manifest.Driver)
+	}
+	return uid + ":" + agentID
+}
+
+// e2eCredentialComplete 判断 SKU 声明的必填凭证是否已配齐（按 scope 分桶校验）
+func e2eCredentialComplete(uid string, a *AgentItem) bool {
+	if uid == "" {
+		return true
+	}
+	manifest, err := a.Manifest()
+	if err != nil || manifest == nil || len(manifest.Credentials) == 0 {
+		return true
+	}
+	for k, def := range manifest.Credentials {
+		if !def.Required {
+			continue
+		}
+		bucket := e2eCredentialBucket(uid, def, manifest, a.ID)
+		mu.RLock()
+		stored := e2eCredentials[bucket]
+		mu.RUnlock()
+		if stored == nil || stored[k] == "" {
+			return false
+		}
+	}
+	return true
+}
+
 // e2eDriverRegisteredFromManifest 判断 SKU 声明的驱动别名是否已注册
 func e2eDriverRegisteredFromManifest(manifestJSON string) bool {
 	if manifestJSON == "" {
@@ -6844,6 +7189,51 @@ func main() {
 		}
 	})))
 
+	// 对话分组（Agent Team）
+	mux.HandleFunc("/v1/teams", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			e2eListTeamsHandler(w, r)
+		case http.MethodPost:
+			e2eCreateTeamHandler(w, r)
+		default:
+			respondError(w, 1001, "方法不支持")
+		}
+	})))
+	mux.HandleFunc("/v1/teams/", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
+		rest := strings.TrimPrefix(r.URL.Path, "/v1/teams/")
+		// 组共享记忆子路由（Agent Team P2）：/v1/teams/:id/memories[/:memoryId]
+		if parts := strings.Split(rest, "/"); len(parts) >= 2 && parts[1] == "memories" {
+			teamID := parts[0]
+			switch {
+			case len(parts) == 2 && r.Method == http.MethodGet:
+				e2eListTeamMemoriesHandler(w, r, teamID)
+			case len(parts) == 2 && r.Method == http.MethodPost:
+				e2eCreateTeamMemoryHandler(w, r, teamID)
+			case len(parts) == 3 && r.Method == http.MethodDelete:
+				e2eDeleteTeamMemoryHandler(w, r, teamID, parts[2])
+			default:
+				respondError(w, 1001, "方法不支持")
+			}
+			return
+		}
+		id := rest
+		if id == "" || strings.Contains(id, "/") {
+			respondError(w, 4004, "路径不存在")
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			e2eGetTeamHandler(w, r, id)
+		case http.MethodPatch:
+			e2eUpdateTeamHandler(w, r, id)
+		case http.MethodDelete:
+			e2eDeleteTeamHandler(w, r, id)
+		default:
+			respondError(w, 1001, "方法不支持")
+		}
+	})))
+
 	// Agent 工作流
 	mux.HandleFunc("/v1/agent/execute", cors(jwtAuth(e2eAgentExecuteHandler)))
 	mux.HandleFunc("/v1/agent/search-providers", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
@@ -6867,7 +7257,21 @@ func main() {
 		}
 	})))
 	mux.HandleFunc("/v1/agent/sessions/", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
-		_ = strings.TrimPrefix(r.URL.Path, "/v1/agent/sessions/")
+		rest := strings.TrimPrefix(r.URL.Path, "/v1/agent/sessions/")
+		// rest 形如 "{id}" / "{id}/audit" / "{id}/fork"
+		parts := strings.SplitN(rest, "/", 2)
+		if len(parts) == 2 && parts[1] == "fork" && r.Method == http.MethodPost {
+			// AR-12：e2e 不持久化 agent_sessions，返回桩 Session 保证 fork 契约兼容
+			respondSuccess(w, map[string]interface{}{
+				"id":                     "e2e-fork-" + parts[0],
+				"conversation_id":        "e2e-fork-conv-" + parts[0],
+				"parent_entry_id":        "e2e-entry",
+				"forked_from_session_id": parts[0],
+				"title":                  "E2E Fork",
+				"status":                 "succeeded",
+			})
+			return
+		}
 		switch r.Method {
 		case http.MethodGet:
 			respondError(w, 4004, "Session 不存在")
