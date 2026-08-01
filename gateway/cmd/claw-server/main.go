@@ -353,6 +353,9 @@ func main() {
 	agentWorkflowService.SetMaxCostPerTask(cfg.Agent.MaxCostPerTask)
 	// claw 本地不限 Agent 模式（云端账户统一后跳过 VIP 门控，容忍无本地 user）
 	agentWorkflowService.SetUnrestricted(true)
+	// C1：装配权限决策引擎（always-allow 规则持久化到 {basePath}/permissions.json）
+	permissionSvc := service.NewPermissionService(filepath.Join(cfg.Agent.BasePath, "permissions.json"))
+	agentWorkflowService.SetPermissionService(permissionSvc)
 	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry(), moduleRegistry)
 	agentToolLoader.SetModuleService(moduleService)
 	agentWorkflowService.SetAgentToolLoader(agentToolLoader)

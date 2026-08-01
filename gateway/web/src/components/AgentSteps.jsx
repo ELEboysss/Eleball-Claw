@@ -12,7 +12,10 @@ import {
   Brain,
   ChevronDown,
   Download,
-  Wrench
+  Wrench,
+  Shield,
+  Check,
+  X
 } from 'lucide-react'
 import { agentApi } from '../api/client'
 
@@ -195,7 +198,87 @@ function ErrorStep({ message }) {
   )
 }
 
-function StepItem({ step }) {
+// ApprovalStep C1 工具审批卡：服务端阻塞等待用户决策。
+// pending 时显示参数 + 允许/总是允许/拒绝按钮；approved/denied 显示结果。
+function ApprovalStep({ step, onApprove }) {
+  const [expanded, setExpanded] = useState(true)
+  const status = step.status || 'pending'
+  const riskColor =
+    step.riskLevel === 'high'
+      ? 'border-red-300 bg-red-50'
+      : step.riskLevel === 'medium'
+      ? 'border-amber-300 bg-amber-50'
+      : 'border-eleball-outline-variant bg-eleball-surface'
+  const decide = (decision, alwaysAllow) => {
+    onApprove?.(step.sessionId, step.tool_call_id, decision, alwaysAllow)
+  }
+  return (
+    <div className={`rounded-lg border text-xs ${riskColor}`}>
+      <div className="px-2.5 py-2 flex items-center justify-between gap-2">
+        <span className="flex items-center gap-2 min-w-0">
+          <Shield className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" />
+          <span className="font-medium truncate">需要确认：{step.tool}</span>
+          {step.riskLevel === 'high' && (
+            <span className="text-[10px] text-red-600 px-1 py-0.5 bg-red-100 rounded">高风险</span>
+          )}
+          {step.riskLevel === 'medium' && (
+            <span className="text-[10px] text-amber-700 px-1 py-0.5 bg-amber-100 rounded">中风险</span>
+          )}
+        </span>
+        {status === 'pending' && (
+          <button type="button" onClick={() => setExpanded(v => !v)} className="text-eleball-text-tertiary">
+            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+          </button>
+        )}
+      </div>
+      {step.reason && <div className="px-2.5 pb-1 text-eleball-text-secondary">{step.reason}</div>}
+      {expanded && status === 'pending' && (
+        <div className="px-2.5 pb-2.5 space-y-2">
+          {step.argumentsRaw && (
+            <pre className="bg-white/60 rounded p-1.5 overflow-x-auto whitespace-pre-wrap break-all font-mono text-[11px] max-h-40">
+              {step.argumentsRaw}
+            </pre>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => decide('allow', false)}
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-green-600 text-white hover:bg-green-700"
+            >
+              <Check className="w-3.5 h-3.5" /> 允许
+            </button>
+            <button
+              type="button"
+              onClick={() => decide('allow', true)}
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-eleball-primary text-white hover:opacity-90"
+            >
+              <Check className="w-3.5 h-3.5" /> 总是允许
+            </button>
+            <button
+              type="button"
+              onClick={() => decide('deny', false)}
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-gray-200 text-gray-700 hover:bg-gray-300"
+            >
+              <X className="w-3.5 h-3.5" /> 拒绝
+            </button>
+          </div>
+        </div>
+      )}
+      {status === 'approved' && (
+        <div className="px-2.5 pb-2 flex items-center gap-1.5 text-green-700">
+          <CheckCircle className="w-3.5 h-3.5" /> 已允许
+        </div>
+      )}
+      {status === 'denied' && (
+        <div className="px-2.5 pb-2 flex items-center gap-1.5 text-red-600">
+          <XCircle className="w-3.5 h-3.5" /> 已拒绝
+        </div>
+      )}
+    </div>
+  )
+}
+
+function StepItem({ step, onApprove }) {
   switch (step.type) {
     case 'thinking':
       return <ThinkingStep content={step.content} />
@@ -204,6 +287,8 @@ function StepItem({ step }) {
     case 'tool_call':
     case 'tool_result':
       return <ToolStep step={step} />
+    case 'approval':
+      return <ApprovalStep step={step} onApprove={onApprove} />
     case 'answer':
       return <AnswerStep content={step.content} />
     case 'resource':
@@ -217,7 +302,7 @@ function StepItem({ step }) {
   }
 }
 
-function AgentSteps({ steps, loading }) {
+function AgentSteps({ steps, loading, onApprove }) {
   if (!steps || steps.length === 0) {
     if (!loading) return null
     return (
@@ -237,7 +322,7 @@ function AgentSteps({ steps, loading }) {
         return (
           <div key={`${step.type}-${idx}`} className={isSub ? 'ml-3 pl-3 border-l-2 border-eleball-primary/30' : ''}>
             {showLabel && <div className="text-[10px] text-eleball-primary/70 mb-0.5">↳ 委派子任务进度</div>}
-            <StepItem step={step} />
+            <StepItem step={step} onApprove={onApprove} />
           </div>
         )
       })}

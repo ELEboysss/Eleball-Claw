@@ -48,6 +48,10 @@ type AgentService struct {
 	// unrestricted=true 时跳过 VIP 门控（Agent 模式/文件工具/试用次数），并容忍本地 user 未命中。
 	// claw 本地不限 Agent 模式（云端账户统一后，本地无 users 行），置 true；云端 cmd/server 保持 false。
 	unrestricted bool
+	// C1：工具审批注册表（跨 execute 共享，循环注册+阻塞，/agent/approve 投递）。
+	approvals *approvalRegistry
+	// C1：权限决策引擎（规则解析 + always-allow 持久化）。nil 时审批闸跳过规则直接 ask/allow。
+	permissionSvc *PermissionService
 }
 
 // SetUnrestricted 设置是否跳过 VIP 门控（claw 本地不限 Agent 模式）。
@@ -91,9 +95,15 @@ func NewAgentService(
 		model:                model,
 		maxSteps:             maxSteps,
 		logger:               logger,
+		approvals:            newApprovalRegistry(),
 	}
 	svc.toolLoop.SetLogger(logger)
 	return svc
+}
+
+// SetPermissionService 装配权限决策引擎（C1）。claw 启用时注入；云端不注入（审批闸跳过）。
+func (s *AgentService) SetPermissionService(svc *PermissionService) {
+	s.permissionSvc = svc
 }
 
 // SetMaxRetries 设置 Agent 工具循环上游可重试错误的最大尝试次数（对应 llm.max_retries 配置）
@@ -138,6 +148,8 @@ type AgentExecuteRequest struct {
 	// AR-06：claw 本地工作目录（用户授权的项目目录）。仅 claw（unrestricted=true）启用；
 	// 云端多租户忽略此字段，不启用 cwd 解析。
 	Cwd string `json:"cwd"`
+	// PermissionMode C1 权限模式覆盖（default/acceptEdits/plan/auto）。空则用会话持久化的 conv.PermissionMode。
+	PermissionMode *string `json:"permission_mode,omitempty"`
 }
 
 // normalizeRequest 兼容前端可能使用的 content / message 字段
@@ -218,6 +230,11 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	searchProvider := conv.SearchProvider
 	if req.SearchProvider != nil && *req.SearchProvider != "" {
 		searchProvider = *req.SearchProvider
+	}
+	// C1：权限模式解析（会话默认 + 请求覆盖），注入 env 供工具循环审批闸消费
+	permissionMode := model.NormalizePermissionMode(conv.PermissionMode)
+	if req.PermissionMode != nil && *req.PermissionMode != "" {
+		permissionMode = model.NormalizePermissionMode(*req.PermissionMode)
 	}
 	// 同时持久化到 conversation（AR-23：req.Cwd 非空时一并写回会话，供后续 execute 回填）
 	if req.EnableTools != nil || req.EnableWebSearch != nil || req.SearchProvider != nil || req.Cwd != "" {
@@ -433,6 +450,12 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	// AR-03：执行中余额校验节流计数器（每 balanceCheckEvery 步查一次 DB，避免每轮查库）
 	balanceCheckStep := 0
 	const balanceCheckEvery = 5
+	// C1：claw 装配审批器（云端 nil，审批闸跳过）。审批器持有本次 SSE writer，
+	// 阻塞期间 /agent/approve 经共享 registry 投递决策。
+	var approver Approver
+	if s.unrestricted {
+		approver = &sseApprover{svc: s, writer: w}
+	}
 	env := &ToolEnv{
 		UserID:         userID,
 		ConversationID: conv.ID,
@@ -441,6 +464,10 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		Cwd:            resolvedCwd, // AR-06：claw 工作目录（空则文件工具回退会话沙箱）
 		SessionRepo:    s.sessionRepo,
 		SearchProvider: searchProvider,
+		// C1 权限审批
+		PermissionMode: permissionMode,
+		PermissionSvc:  s.permissionSvc,
+		Approver:       approver,
 		// Agent Team P3：委派计数器（每次 execute 独立，上限 5）+ 子调用用量累计钩子
 		// （子 Usage 只经此钩子进 totalUsage 一次，与 result.Usage 的 addUsage 不重叠）
 		DelegateCalls: new(int),
@@ -876,6 +903,35 @@ func (s *AgentService) writeEvent(w io.Writer, event string, data interface{}) {
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(b))
 	if flusher, ok := w.(interface{ Flush() }); ok {
 		flusher.Flush()
+	}
+}
+
+// DeliverApproval C1 投递工具审批决策（/agent/approve 调用，跨 HTTP 请求解锁阻塞的工具循环）。
+// 命中待审批请求则解锁，返回 true；未命中（已超时/已决策/不存在）返回 false（幂等）。
+func (s *AgentService) DeliverApproval(sessionID, toolCallID string, dec ApprovalDecision) bool {
+	key := sessionID + ":" + toolCallID
+	return s.approvals.deliver(key, dec)
+}
+
+// ListPermissionRules C1 返回用户已持久化的权限规则（供 /claw-console 展示与管理）。
+func (s *AgentService) ListPermissionRules() []model.PermissionRule {
+	if s.permissionSvc == nil {
+		return nil
+	}
+	return s.permissionSvc.ListRules()
+}
+
+// AddPermissionRule C1 新增一条权限规则（allow/deny/ask）。
+func (s *AgentService) AddPermissionRule(spec string, decision model.PermissionDecision) {
+	if s.permissionSvc != nil {
+		s.permissionSvc.AddAlwaysAllow(spec, decision)
+	}
+}
+
+// RemovePermissionRule C1 按 spec 删除一条权限规则。
+func (s *AgentService) RemovePermissionRule(spec string) {
+	if s.permissionSvc != nil {
+		s.permissionSvc.RemoveRule(spec)
 	}
 }
 

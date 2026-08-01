@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -60,6 +61,90 @@ func (h *AgentWorkflowHandler) Execute(c *gin.Context) {
 
 	// 调用 service 执行，使用 gin.ResponseWriter 作为 SSE writer
 	_ = h.agentService.Execute(ctx, req, c.Writer)
+}
+
+// Approve C1 工具审批决策（POST /v1/agent/approve）。
+// 跨 HTTP 请求解锁阻塞在审批闸的工具循环：决策经共享 registry 投递到等待中的 channel。
+func (h *AgentWorkflowHandler) Approve(c *gin.Context) {
+	userID, ok := h.getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 2001, "message": "未登录"})
+		return
+	}
+	var req struct {
+		SessionID   string `json:"session_id"`
+		ToolCallID  string `json:"tool_call_id"`
+		Decision    string `json:"decision"`     // allow / deny
+		AlwaysAllow string `json:"always_allow"`  // Tool(spec)，allow 时可选「总是允许」
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "参数错误: " + err.Error()})
+		return
+	}
+	if req.SessionID == "" || req.ToolCallID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "session_id 与 tool_call_id 必填"})
+		return
+	}
+	// 归一化决策值
+	decision := "deny"
+	if req.Decision == "allow" {
+		decision = "allow"
+	}
+	// 所有权校验：会话必须属于当前用户，防越权审批他人会话
+	if _, err := h.agentService.GetSession(c.Request.Context(), req.SessionID, userID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": 3001, "message": "会话不存在或无权访问"})
+		return
+	}
+	dec := service.ApprovalDecision{
+		Decision:    decision,
+		AlwaysAllow:  req.AlwaysAllow,
+	}
+	// 未命中（已超时/已决策）幂等返回成功，前端据此收起卡片
+	h.agentService.DeliverApproval(req.SessionID, req.ToolCallID, dec)
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success"})
+}
+
+// ListPermissionRules C1 列出权限规则（GET /v1/agent/permission-rules）。
+func (h *AgentWorkflowHandler) ListPermissionRules(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"code": 0, "message": "success",
+		"data": gin.H{"rules": h.agentService.ListPermissionRules()},
+	})
+}
+
+// AddPermissionRule C1 新增权限规则（POST /v1/agent/permission-rules）。
+func (h *AgentWorkflowHandler) AddPermissionRule(c *gin.Context) {
+	var req struct {
+		Spec     string `json:"spec"`
+		Decision string `json:"decision"` // allow / deny / ask
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "参数错误: " + err.Error()})
+		return
+	}
+	h.agentService.AddPermissionRule(req.Spec, normalizeDecision(req.Decision))
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success"})
+}
+
+// DeletePermissionRule C1 删除权限规则（DELETE /v1/agent/permission-rules?spec=）。
+func (h *AgentWorkflowHandler) DeletePermissionRule(c *gin.Context) {
+	spec := c.Query("spec")
+	h.agentService.RemovePermissionRule(spec)
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success"})
+}
+
+// normalizeDecision 归一化决策文本到 model.PermissionDecision。
+func normalizeDecision(s string) model.PermissionDecision {
+	switch s {
+	case "allow":
+		return model.PermissionDecisionAllow
+	case "deny":
+		return model.PermissionDecisionDeny
+	case "ask":
+		return model.PermissionDecisionAsk
+	default:
+		return model.PermissionDecisionAsk
+	}
 }
 
 // ListSessions 查询当前用户的 Agent Session 列表

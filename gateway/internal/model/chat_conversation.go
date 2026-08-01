@@ -11,6 +11,9 @@ type ChatConversation struct {
 	EnableTools     bool   `gorm:"default:false" json:"enable_tools"`
 	EnableWebSearch bool   `gorm:"default:false" json:"enable_web_search"`
 	SearchProvider  string `gorm:"size:32;default:'baidu'" json:"search_provider"`
+	// PermissionMode 会话级权限模式（C1）：default/acceptEdits/plan/auto，控制工具执行审批策略。
+	// 空/旧数据由 NormalizePermissionMode 回落 default。前端 Shift+Tab 切换并 PATCH 持久化。
+	PermissionMode string `gorm:"size:32;default:'default'" json:"permission_mode,omitempty"`
 	// AssistantID 会话绑定的助手 ID（空 = 不指定助手，Agent 执行注入全部已激活秘技）
 	AssistantID string `gorm:"size:64" json:"assistant_id,omitempty"`
 	// TeamID 会话所属的对话分组 ID（空 = 未分组，行为同现状）

@@ -34,7 +34,7 @@ export function useAgent() {
     abortControllerRef.current = null
   }, [])
 
-  const execute = useCallback(({ conversationId, message, attachments = [], history = [], model, provider, baseUrl, apiKey, enableTools, enableWebSearch, searchProvider, assistantId, cwd }) => {
+  const execute = useCallback(({ conversationId, message, attachments = [], history = [], model, provider, baseUrl, apiKey, enableTools, enableWebSearch, searchProvider, assistantId, cwd, permissionMode }) => {
     reset()
     setStatus('executing')
     abortRef.current = false
@@ -70,7 +70,9 @@ export function useAgent() {
           // AR-11：claw 本地工作目录（cwd），文件工具/Shell 据此解析；空时不传
           cwd: cwd || undefined,
           // 会话绑定的助手；空字符串时不传该字段，后端回退到会话值/全部已激活工具
-          assistant_id: assistantId || undefined
+          assistant_id: assistantId || undefined,
+          // C1 权限模式（default/acceptEdits/plan）；空时不传，后端回退会话持久化值
+          permission_mode: permissionMode || undefined
         },
         (event) => {
           if (abortRef.current) return
@@ -131,6 +133,40 @@ export function useAgent() {
                 }
                 return [...prev, { type: 'tool_result', step, tool, status, output, error: error_message, sessionId }]
               })
+              break
+            }
+            case 'approval_request': {
+              // C1：工具审批请求--服务端阻塞等待用户决策。渲染审批卡，用户点击后经 /agent/approve 投递
+              const ap = event.data
+              const approval = {
+                type: 'approval',
+                tool_call_id: ap.tool_call_id,
+                sessionId: ap.session_id || '',
+                tool: ap.tool,
+                arguments: ap.arguments,
+                argumentsRaw: ap.arguments_raw,
+                riskLevel: ap.risk_level,
+                reason: ap.reason,
+                status: 'pending'
+              }
+              finalSteps = [...finalSteps, approval]
+              setSteps(prev => [...prev, approval])
+              break
+            }
+            case 'approval_resolved': {
+              // C1：服务端已收到决策，工具将执行或跳过--更新卡片状态（approved/denied）
+              const { tool_call_id, decision } = event.data
+              const resolved = decision === 'allow' ? 'approved' : 'denied'
+              finalSteps = finalSteps.map(s =>
+                s.type === 'approval' && s.tool_call_id === tool_call_id
+                  ? { ...s, status: resolved }
+                  : s
+              )
+              setSteps(prev => prev.map(s =>
+                s.type === 'approval' && s.tool_call_id === tool_call_id
+                  ? { ...s, status: resolved }
+                  : s
+              ))
               break
             }
             case 'reasoning': {
@@ -312,10 +348,19 @@ export function useAgent() {
     }
   }, [])
 
+  // C1：提交工具审批决策（跨 HTTP 请求解锁阻塞的工具循环）。
+  // 决策投递后服务端下发 approval_resolved，卡片状态随之更新；失败时服务端按超时 deny。
+  const approveToolCall = useCallback((sessionId, toolCallId, decision, alwaysAllow) => {
+    agentApi.approveToolCall(sessionId, toolCallId, decision, alwaysAllow).catch(err => {
+      setError(err.message || '审批提交失败')
+    })
+  }, [])
+
   return {
     execute,
     abort,
     reset,
+    approveToolCall,
     status,
     toolSteps,
     currentStep,

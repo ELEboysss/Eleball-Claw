@@ -141,6 +141,12 @@ func NewClawRouter(
 			// Agent 工作流
 			if cfg.Agent.Enabled {
 				auth.POST("/agent/execute", agentWorkflowHandler.Execute)
+				// C1：工具审批决策（跨 HTTP 请求解锁阻塞的工具循环）
+				auth.POST("/agent/approve", agentWorkflowHandler.Approve)
+				// C1：权限规则管理（「总是允许/拒绝」规则展示与增删）
+				auth.GET("/agent/permission-rules", agentWorkflowHandler.ListPermissionRules)
+				auth.POST("/agent/permission-rules", agentWorkflowHandler.AddPermissionRule)
+				auth.DELETE("/agent/permission-rules", agentWorkflowHandler.DeletePermissionRule)
 				auth.GET("/agent/search-providers", agentWorkflowHandler.ListSearchProviders)
 				auth.GET("/agent/sessions", agentWorkflowHandler.ListSessions)
 				auth.DELETE("/agent/sessions", agentWorkflowHandler.DeleteSessions)

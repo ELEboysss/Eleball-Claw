@@ -288,6 +288,18 @@ export const agentApi = {
   forkSession: (id, entryId) =>
     client.post(`/agent/sessions/${id}/fork`, { entry_id: entryId }),
   getResource: (id) => `${API_BASE}/agent/resources/${id}`,
+  // C1 工具审批：跨 HTTP 请求解锁阻塞的工具循环（决策投递到等待中的 channel）
+  approveToolCall: (sessionId, toolCallId, decision, alwaysAllow) =>
+    client.post('/agent/approve', {
+      session_id: sessionId,
+      tool_call_id: toolCallId,
+      decision,
+      always_allow: alwaysAllow || undefined
+    }),
+  // C1 权限规则管理（「总是允许/拒绝」Tool(spec) 规则）
+  listPermissionRules: () => client.get('/agent/permission-rules'),
+  addPermissionRule: (spec, decision) => client.post('/agent/permission-rules', { spec, decision }),
+  deletePermissionRule: (spec) => client.delete('/agent/permission-rules', { params: { spec } }),
   execute: async (body, onEvent) => {
     const token = getItem('token')
     const response = await fetch(`${API_BASE}/agent/execute`, {

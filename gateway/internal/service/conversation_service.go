@@ -47,6 +47,8 @@ type CreateConversationReq struct {
 	EnableTools     bool   `json:"enable_tools"`
 	EnableWebSearch bool   `json:"enable_web_search"`
 	SearchProvider  string `json:"search_provider"`
+	// PermissionMode C1 权限模式（default/acceptEdits/plan/auto），空值回落 default。
+	PermissionMode string `json:"permission_mode"`
 }
 
 // createConversationWithID 使用指定 ID 创建对话，是 CreateConversation 与 GetOrCreate 的公共逻辑。
@@ -79,6 +81,7 @@ func (s *ConversationService) createConversationWithID(ctx context.Context, user
 		EnableTools:     req.EnableTools,
 		EnableWebSearch: req.EnableWebSearch,
 		SearchProvider:  searchProvider,
+		PermissionMode:  string(model.NormalizePermissionMode(req.PermissionMode)),
 		DiskPath:        filepath.Join(s.basePath, userID, "conversations", id),
 		CreatedAt:       time.Now().Unix(),
 		UpdatedAt:       time.Now().Unix(),
@@ -253,6 +256,8 @@ type UpdateConversationReq struct {
 	// 切换对话时按此恢复 currentProfileId；对话中切模型时同步到此。
 	Model     *string `json:"model,omitempty"`
 	Provider  *string `json:"provider,omitempty"`
+	// PermissionMode C1 权限模式（default/acceptEdits/plan/auto），Shift+Tab 切换时 PATCH 持久化。
+	PermissionMode *string `json:"permission_mode,omitempty"`
 	UpdatedAt *int64  `json:"updated_at,omitempty"`
 }
 
@@ -305,6 +310,9 @@ func (s *ConversationService) Update(ctx context.Context, id, userID string, req
 	}
 	if req.Provider != nil {
 		updates["provider"] = *req.Provider
+	}
+	if req.PermissionMode != nil {
+		updates["permission_mode"] = string(model.NormalizePermissionMode(*req.PermissionMode))
 	}
 	return s.repo.UpdateFields(id, updates)
 }

@@ -7236,6 +7236,26 @@ func main() {
 
 	// Agent 工作流
 	mux.HandleFunc("/v1/agent/execute", cors(jwtAuth(e2eAgentExecuteHandler)))
+	// C1：工具审批决策（e2e 不装配 Approver，审批闸跳过；端点保留以维持 API 契约一致，no-op 返回成功）
+	mux.HandleFunc("/v1/agent/approve", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			respondError(w, 1001, "方法不支持")
+			return
+		}
+		respondSuccess(w, map[string]interface{}{"ok": true})
+	})))
+	mux.HandleFunc("/v1/agent/permission-rules", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			respondSuccess(w, map[string]interface{}{"rules": []interface{}{}})
+		case http.MethodPost:
+			respondSuccess(w, map[string]interface{}{"ok": true})
+		case http.MethodDelete:
+			respondSuccess(w, map[string]interface{}{"ok": true})
+		default:
+			respondError(w, 1001, "方法不支持")
+		}
+	})))
 	mux.HandleFunc("/v1/agent/search-providers", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			respondError(w, 1001, "方法不支持")

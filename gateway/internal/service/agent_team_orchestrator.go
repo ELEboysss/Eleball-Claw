@@ -329,6 +329,11 @@ func (s *AgentService) executeCallAssistant(ctx context.Context, input map[strin
 		Cwd:              env.Cwd, // AR-06：子任务继承父工作目录
 		SessionRepo:      env.SessionRepo,
 		SearchProvider:   env.SearchProvider,
+		// C1：子 agent 继承父权限模式 + 审批器（子工具也走审批，经 rt.writer 流出主 SSE）。
+		// 审批 key 用 env.SessionID（子 session）+ tool_call_id，与主循环互不冲突。
+		PermissionMode: env.PermissionMode,
+		PermissionSvc:  env.PermissionSvc,
+		Approver:       env.Approver,
 		Depth:            env.Depth + 1,
 		UsageAccumulator: nil, // Agent Team P5：子用量即时扣费，不再经 accumulator（防双重计费）
 		CostGuard:        taskCostGuard,

@@ -27,7 +27,8 @@ import {
   FolderInput,
   GitFork,
   Folder,
-  PanelRight
+  PanelRight,
+  Shield
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { useChat } from '../context/ChatContext'
@@ -115,6 +116,8 @@ export default function Chat() {
   const [enableTools, setEnableTools] = useState(false)
   const [enableWebSearch, setEnableWebSearch] = useState(false)
   const [searchProvider, setSearchProvider] = useState('baidu')
+  // C1 权限模式（default/acceptEdits/plan）：控制工具执行审批策略，随会话持久化
+  const [permissionMode, setPermissionMode] = useState('default')
   const [availableSearchProviders, setAvailableSearchProviders] = useState([])
   // 会话绑定的助手（'' = 默认，全部已激活工具）与我的助手列表
   const [assistantId, setAssistantId] = useState('')
@@ -158,6 +161,7 @@ export default function Chat() {
     error: agentError,
     warning: agentWarning,
     steps: agentSteps,
+    approveToolCall: approveToolCall,
     abort: abortAgent
   } = useAgent()
 
@@ -404,6 +408,8 @@ export default function Chat() {
     if (!currentConversation) return
     setEnableTools(!!currentConversation.enableTools)
     setEnableWebSearch(!!currentConversation.enableWebSearch)
+    // C1：恢复会话持久化的权限模式（旧数据无该字段时回落 default）
+    setPermissionMode(currentConversation.permissionMode || 'default')
     const savedProvider = currentConversation.searchProvider || 'baidu'
     const exists = availableSearchProviders.some((p) => p.name === savedProvider)
     setSearchProvider(exists ? savedProvider : (availableSearchProviders[0]?.name || 'baidu'))
@@ -429,13 +435,14 @@ export default function Chat() {
       !!currentConversation.enableTools !== enableTools ||
       !!currentConversation.enableWebSearch !== enableWebSearch ||
       (currentConversation.searchProvider || 'baidu') !== searchProvider ||
-      (currentConversation.assistantId || '') !== assistantId
+      (currentConversation.assistantId || '') !== assistantId ||
+      (currentConversation.permissionMode || 'default') !== permissionMode
     if (!needsUpdate) return
 
     updateConversations((prev) =>
       prev.map((c) =>
         c.id === currentConversation.id
-          ? { ...c, enableTools, enableWebSearch, searchProvider, assistantId, updatedAt: Date.now() }
+          ? { ...c, enableTools, enableWebSearch, searchProvider, assistantId, permissionMode, updatedAt: Date.now() }
           : c
       )
     )
@@ -445,10 +452,11 @@ export default function Chat() {
         enable_web_search: enableWebSearch,
         search_provider: searchProvider,
         // 空字符串 = 清除会话绑定的助手
-        assistant_id: assistantId
+        assistant_id: assistantId,
+        permission_mode: permissionMode
       })
       .catch(() => {})
-  }, [enableTools, enableWebSearch, searchProvider, assistantId, currentConversation?.id, isLoggedIn])
+  }, [enableTools, enableWebSearch, searchProvider, assistantId, permissionMode, currentConversation?.id, isLoggedIn])
 
   // AR-11：cwd 变化或手动刷新时拉取 Git 状态，供 FileExplorer 色标
   useEffect(() => {
@@ -929,7 +937,8 @@ export default function Chat() {
           enableWebSearch,
           searchProvider,
           assistantId,
-          cwd
+          cwd,
+          permissionMode
         })
       } catch (err) {
         const errorMsg = err.message || 'Agent 执行失败'
@@ -1173,10 +1182,24 @@ export default function Chat() {
     }
   }, [input, attachments, isLoggedIn, currentProfile, currentConversation, conversations, token, user?.user_id, models, enableTools, executeAgent, persistMessage])
 
+  // C1：权限模式循环（default -> acceptEdits -> plan -> default），Shift+Tab 或点徽章触发
+  const cyclePermissionMode = useCallback(() => {
+    setPermissionMode(prev => {
+      const order = ['default', 'acceptEdits', 'plan']
+      const idx = order.indexOf(prev)
+      return order[(idx + 1) % order.length]
+    })
+  }, [])
+
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
+    }
+    // C1：Shift+Tab 循环切换权限模式
+    if (e.key === 'Tab' && e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault()
+      cyclePermissionMode()
     }
   }
 
@@ -1594,6 +1617,24 @@ export default function Chat() {
                   {enableTools && supportsAgent && (
                     <button
                       type="button"
+                      onClick={cyclePermissionMode}
+                      aria-label="切换权限模式（Shift+Tab）" title={`权限模式：${permissionMode === 'plan' ? '计划（只读）' : permissionMode === 'acceptEdits' ? '自动编辑' : '默认（逐个确认）'}，Shift+Tab 切换`}
+                      className={[
+                        'inline-flex items-center gap-1 px-2 py-1.5 rounded-full text-xs font-medium border transition-colors',
+                        permissionMode === 'plan'
+                          ? 'bg-amber-50 text-amber-600 border-amber-200 hover:bg-amber-100'
+                          : permissionMode === 'acceptEdits'
+                          ? 'bg-green-50 text-green-600 border-green-200 hover:bg-green-100'
+                          : 'bg-transparent text-eleball-text-secondary border-eleball-outline hover:bg-gray-50 hover:text-eleball-text'
+                      ].join(' ')}
+                    >
+                      <Shield className="w-3.5 h-3.5" />
+                      <span>{permissionMode === 'plan' ? '计划' : permissionMode === 'acceptEdits' ? '自动编辑' : '默认'}</span>
+                    </button>
+                  )}
+                  {enableTools && supportsAgent && (
+                    <button
+                      type="button"
                       onClick={() => setEnableWebSearch((v) => !v)}
                       aria-label="启用后 Agent 可调用 SearchWeb / FetchURL 联网工具" title="启用后 Agent 可调用 SearchWeb / FetchURL 联网工具"
                       className={[
@@ -1969,7 +2010,7 @@ function MessageBubble({ message, isLast, loading, onFork, forkingMessageId }) {
         {/* 新版 Agent 按时间线展示 thinking / tool / answer；旧消息无 steps 时回退到旧布局 */}
         {isAssistant && message.steps && message.steps.length > 0 ? (
           <div className="rounded-2xl px-4 py-2.5 text-sm leading-relaxed bg-eleball-surface-variant text-eleball-text rounded-bl-md">
-            <AgentSteps steps={message.steps} loading={loading && isLast} />
+            <AgentSteps steps={message.steps} loading={loading && isLast} onApprove={approveToolCall} />
           </div>
         ) : (
           <>

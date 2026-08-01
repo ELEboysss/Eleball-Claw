@@ -47,6 +47,11 @@ type ToolEnv struct {
 	// AR-03：每步成本门控回调（max_cost_per_task）。传入循环累计用量，返回非 nil error 表示超限，强制结束。
 	// 由编排器装配（CallAssistant 子任务），用 billingService.EstimateCost 估算；主循环可不注入。
 	CostGuard func(usage *llm.Usage) error
+	// C1 权限审批：模式 + 决策引擎 + 审批器。Approver 为 nil（云端）时审批闸直接放行。
+	// claw（unrestricted）由 Execute 装配；子 agent 编排器透传（子工具也走审批，经 rt.writer 流出）。
+	PermissionMode model.PermissionMode
+	PermissionSvc  *PermissionService
+	Approver       Approver
 }
 
 // ResolveFilePath 解析文件工具路径（AR-06）：env.Cwd 非空时优先解析到 cwd，否则回退会话沙箱。
@@ -90,6 +95,10 @@ type Tool struct {
 	Driver      string              // 驱动标识：builtin / agent_reach / remote_url 等
 	AgentID     string              // 对应 AgentItem/SKU ID，用于凭证注入
 	Credentials map[string]model.CredentialDef
+	// ReadOnly C1：工具是否只读（无副作用）。ReadFile/Grep/FetchURL/OCR=true；
+	// WriteFile/StrReplaceFile/Shell=false。审批闸据此判定：plan 模式仅放行只读，
+	// default/acceptEdits 放行只读而无需审批。动态加载的 module/remote 工具默认 false（保守）。
+	ReadOnly bool
 }
 
 // ToolRegistry 工具注册表
@@ -250,6 +259,7 @@ func (r *ToolRegistry) RegisterBuiltinSearchWeb() {
 		Name:        "SearchWeb",
 		Description: "联网搜索，获取实时信息。国内云服务器推荐配置 baidu（每日 100 次免费额度）或 bing",
 		ServerSide:  false,
+		ReadOnly:    true,
 		Driver:      string(model.ToolDriverBuiltin),
 		Manifest: &model.ToolManifest{
 			ID:          "com.eleball.tools.search_web",
@@ -281,6 +291,7 @@ func (r *ToolRegistry) registerDefaults() {
 		Name:        "FetchURL",
 		Description: "抓取指定网页的正文内容，用于深度阅读搜索结果页面",
 		ServerSide:  false,
+		ReadOnly:    true,
 		Driver:      string(model.ToolDriverBuiltin),
 		Manifest: &model.ToolManifest{
 			ID:          "com.eleball.tools.fetch_url",
@@ -309,6 +320,7 @@ func (r *ToolRegistry) registerDefaults() {
 		Name:        "ReadFile",
 		Description: "读取用户 conversation 目录或公共知识库中的文件内容",
 		ServerSide:  true,
+		ReadOnly:    true,
 		Driver:      string(model.ToolDriverBuiltin),
 		Manifest: &model.ToolManifest{
 			ID:          "com.eleball.tools.read_file",
@@ -337,6 +349,7 @@ func (r *ToolRegistry) registerDefaults() {
 		Name:        "WriteFile",
 		Description: "在用户 conversation 目录中写入或覆盖文件",
 		ServerSide:  true,
+		ReadOnly:    false,
 		Driver:      string(model.ToolDriverBuiltin),
 		Manifest: &model.ToolManifest{
 			ID:          "com.eleball.tools.write_file",
@@ -369,6 +382,7 @@ func (r *ToolRegistry) registerDefaults() {
 		Name:        "StrReplaceFile",
 		Description: "修改用户 conversation 目录中的文件内容",
 		ServerSide:  true,
+		ReadOnly:    false,
 		Driver:      string(model.ToolDriverBuiltin),
 		Manifest: &model.ToolManifest{
 			ID:          "com.eleball.tools.str_replace_file",
@@ -405,6 +419,7 @@ func (r *ToolRegistry) registerDefaults() {
 		Name:        "Grep",
 		Description: "在沙箱内搜索文件内容。仅允许访问当前用户的 conversation/session 目录和公共知识库目录",
 		ServerSide:  true,
+		ReadOnly:    true,
 		Driver:      string(model.ToolDriverBuiltin),
 		Manifest: &model.ToolManifest{
 			ID:          "com.eleball.tools.grep",
@@ -441,6 +456,7 @@ func (r *ToolRegistry) registerDefaults() {
 		Name:        "Shell",
 		Description: "在服务器执行受限 shell 命令。格式要求：command 只填主命令（单个词，不含空格），参数必须放入 args 数组，不要把整行命令塞进 command。仅允许白名单命令（ls/cat/pwd/echo/head/tail/wc/grep/find/sort/uniq/cut/python3/pip3/node/which/date 等只读命令）；不支持管道 |、重定向 >/<、多命令（&&/||/;）、内联执行（-c/-e）。示例：{\"command\":\"grep\",\"args\":[\"-rn\",\"关键词\",\".\"]}",
 		ServerSide:  true,
+		ReadOnly:    false,
 		Driver:      string(model.ToolDriverBuiltin),
 		Manifest: &model.ToolManifest{
 			ID:          "com.eleball.tools.shell",
@@ -474,6 +490,7 @@ func (r *ToolRegistry) registerDefaults() {
 		Name:        "OCR",
 		Description: "识别图片中的文字。Ubuntu 24.04 需安装 tesseract-ocr；Windows 需安装 tesseract 并加入 PATH",
 		ServerSide:  true,
+		ReadOnly:    true,
 		Driver:      string(model.ToolDriverBuiltin),
 		Manifest: &model.ToolManifest{
 			ID:          "com.eleball.tools.ocr",

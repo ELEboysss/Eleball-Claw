@@ -9,6 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/pkg/llm"
 )
 
@@ -375,17 +376,21 @@ func (l *ToolCallingLoop) RunWithRegistry(
 				if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
 					record.Error = fmt.Sprintf("参数解析失败: %v", err)
 				} else {
-					// AR-08：工具调用审计--计时
-					start := time.Now()
-					output, err := tool.Func(ctx, input, env)
-					record.LatencyMs = time.Since(start).Milliseconds()
-					if err != nil {
-						record.Error = err.Error()
-					} else {
-						record.Output = output
-						// AR-08：输出大小估算（JSON 序列化字节数，失败则 0）
-						if sz, mErr := json.Marshal(output); mErr == nil {
-							record.OutputSize = len(sz)
+					// C1：审批闸（env.Approver 非空时判定 allow/deny/ask）。deny/失败时跳过 tool.Func，
+					// record.Error 已填，下方 compactToolResult 将拒绝原因回灌 LLM 供其改道。
+					if requestToolApproval(ctx, env, tool, resolvedName, input, tc.ID, &record) {
+						// AR-08：工具调用审计--计时
+						start := time.Now()
+						output, err := tool.Func(ctx, input, env)
+						record.LatencyMs = time.Since(start).Milliseconds()
+						if err != nil {
+							record.Error = err.Error()
+						} else {
+							record.Output = output
+							// AR-08：输出大小估算（JSON 序列化字节数，失败则 0）
+							if sz, mErr := json.Marshal(output); mErr == nil {
+								record.OutputSize = len(sz)
+							}
 						}
 					}
 				}
@@ -537,4 +542,60 @@ func toolResultToString(output map[string]interface{}, errStr string) string {
 		return fmt.Sprintf("%v", output)
 	}
 	return string(b)
+}
+
+// requestToolApproval C1 审批闸：先查 PermissionService 决策（allow/deny/ask），
+// ask 时经 env.Approver 阻塞请求用户审批（发 SSE approval_request + 等待 /agent/approve 投递）。
+// 返回 true=放行执行，false=拒绝（record.Error 已填，调用方跳过 tool.Func）。
+// env 或 env.Approver 为 nil（云端）时直接放行，行为同现状。
+func requestToolApproval(ctx context.Context, env *ToolEnv, tool *Tool, toolName string, input map[string]interface{}, toolCallID string, record *ToolCallRecord) bool {
+	if env == nil || env.Approver == nil {
+		return true // 云端无审批器：放行
+	}
+	var decision model.PermissionDecision
+	if env.PermissionSvc != nil {
+		decision = env.PermissionSvc.Decide(env.PermissionMode, tool, input)
+	} else {
+		// 无决策引擎：只读放行，其余 ask
+		if tool.ReadOnly {
+			decision = model.PermissionDecisionAllow
+		} else {
+			decision = model.PermissionDecisionAsk
+		}
+	}
+	switch decision {
+	case model.PermissionDecisionAllow:
+		return true
+	case model.PermissionDecisionDeny:
+		record.Error = "权限拒绝：当前模式（" + string(env.PermissionMode) + "）不允许执行此工具"
+		return false
+	default: // ask
+		req := ApprovalRequest{
+			SessionID:     env.SessionID,
+			ToolCallID:    toolCallID,
+			Tool:          toolName,
+			Arguments:     input,
+			ArgumentsRaw:  record.Arguments,
+			RiskLevel:     riskLevelFor(tool, toolName),
+			Reason:        approvalReason(tool, toolName, env.PermissionMode),
+		}
+		dec, err := env.Approver.RequestApproval(ctx, req)
+		if err != nil {
+			record.Error = "审批未通过：" + err.Error()
+			return false
+		}
+		if dec.Decision != "allow" {
+			record.Error = "用户拒绝执行：" + dec.Reason
+			return false
+		}
+		// 用户选「总是允许」：构造 Tool(spec) 落库
+		if dec.AlwaysAllow == "" && env.PermissionSvc != nil {
+			if spec := alwaysAllowSpec(toolName, input); spec != "" {
+				env.PermissionSvc.AddAlwaysAllow(spec, model.PermissionDecisionAllow)
+			}
+		} else if dec.AlwaysAllow != "" && env.PermissionSvc != nil {
+			env.PermissionSvc.AddAlwaysAllow(dec.AlwaysAllow, model.PermissionDecisionAllow)
+		}
+		return true
+	}
 }
