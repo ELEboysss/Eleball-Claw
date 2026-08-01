@@ -108,6 +108,7 @@ func TestEleAgent_GetCredentials_Success(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/v1/eleagent/credentials?subProvider=openai&subModel=gpt-4o", nil)
+	req.Host = "localhost:8080"
 	req.Header.Set("Authorization", "Bearer "+token)
 	r.ServeHTTP(w, req)
 
