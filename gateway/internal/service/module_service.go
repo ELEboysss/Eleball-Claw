@@ -318,6 +318,9 @@ func (s *ModuleService) RegisterDriver(req *model.DriverRegisterRequest) error {
 	if req.TransportType == string(model.ModuleTransportTypeRemoteURL) && req.Endpoint == "" {
 		return errors.New("remote_url 型驱动必须指定 endpoint")
 	}
+	if req.TransportType == string(model.ModuleTransportTypeMCP) && (req.MCPServerConfig == nil || req.MCPServerConfig.URL == "") {
+		return errors.New("mcp 型驱动必须指定 mcp_server_config.url")
+	}
 
 	// 非空 auth_token 需保证全局唯一（空字符串允许重复，用于官方内置驱动）
 	if req.AuthToken != "" {
@@ -329,16 +332,17 @@ func (s *ModuleService) RegisterDriver(req *model.DriverRegisterRequest) error {
 
 	now := time.Now()
 	record := &model.DriverRecord{
-		ID:            req.ID,
-		Name:          req.Name,
-		Description:   req.Description,
-		TransportType: req.TransportType,
-		ModuleID:      req.ModuleID,
-		Endpoint:      req.Endpoint,
-		AuthToken:     req.AuthToken,
-		SchemaJSON:    req.SchemaJSON,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:              req.ID,
+		Name:            req.Name,
+		Description:     req.Description,
+		TransportType:   req.TransportType,
+		ModuleID:        req.ModuleID,
+		Endpoint:        req.Endpoint,
+		MCPServerConfig: req.MCPServerConfig,
+		AuthToken:       req.AuthToken,
+		SchemaJSON:      req.SchemaJSON,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 	return s.driverRepo.CreateOrUpdate(record)
 }

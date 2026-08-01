@@ -577,12 +577,13 @@ type E2EModule struct {
 
 // E2EDriver E2E 环境下的动态驱动映射
 type E2EDriver struct {
-	ID          string `json:"driver_id"`
-	Name        string `json:"name"`
-	TransportType string `json:"transport_type"`
-	ModuleID    string `json:"module_id,omitempty"`
-	Endpoint    string `json:"endpoint,omitempty"`
-	AuthToken   string `json:"auth_token,omitempty"`
+	ID              string          `json:"driver_id"`
+	Name            string          `json:"name"`
+	TransportType   string          `json:"transport_type"`
+	ModuleID        string          `json:"module_id,omitempty"`
+	Endpoint        string          `json:"endpoint,omitempty"`
+	MCPServerConfig json.RawMessage `json:"mcp_server_config,omitempty"`
+	AuthToken       string          `json:"auth_token,omitempty"`
 }
 
 var (
@@ -5286,12 +5287,13 @@ func adminListDriversHandler(w http.ResponseWriter, r *http.Request) {
 
 func adminRegisterDriverHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ID          string `json:"driver_id"`
-		Name        string `json:"name"`
-		TransportType string `json:"transport_type"`
-		ModuleID    string `json:"module_id"`
-		Endpoint    string `json:"endpoint"`
-		AuthToken   string `json:"auth_token"`
+		ID              string          `json:"driver_id"`
+		Name            string          `json:"name"`
+		TransportType   string          `json:"transport_type"`
+		ModuleID        string          `json:"module_id"`
+		Endpoint        string          `json:"endpoint"`
+		MCPServerConfig json.RawMessage `json:"mcp_server_config"`
+		AuthToken       string          `json:"auth_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, 1001, "参数错误")
@@ -5308,12 +5310,13 @@ func adminRegisterDriverHandler(w http.ResponseWriter, r *http.Request) {
 	modulesMu.Lock()
 	defer modulesMu.Unlock()
 	e2eDrivers[req.ID] = &E2EDriver{
-		ID:          req.ID,
-		Name:        req.Name,
-		TransportType: req.TransportType,
-		ModuleID:    req.ModuleID,
-		Endpoint:    req.Endpoint,
-		AuthToken:   req.AuthToken,
+		ID:              req.ID,
+		Name:            req.Name,
+		TransportType:   req.TransportType,
+		ModuleID:        req.ModuleID,
+		Endpoint:        req.Endpoint,
+		MCPServerConfig: req.MCPServerConfig,
+		AuthToken:       req.AuthToken,
 	}
 	respondSuccess(w, nil)
 }
@@ -5334,7 +5337,7 @@ func e2eIsExecutableDriver(driver string) bool {
 	modulesMu.RLock()
 	defer modulesMu.RUnlock()
 	d := e2eDrivers[driver]
-	return d != nil && d.TransportType == "module"
+	return d != nil && (d.TransportType == "module" || d.TransportType == "mcp")
 }
 
 // e2eModuleOnlineFromManifest 解析 SKU manifest，若依赖 module 驱动则返回对应模块是否在线。
@@ -5361,6 +5364,10 @@ func e2eModuleOnlineFromManifest(manifestJSON string) bool {
 	d := e2eDrivers[mf.Driver]
 	if d == nil {
 		return false
+	}
+	// remote_url / mcp 为 HTTP 直接调用，无模块健康依赖，视为在线
+	if d.TransportType == "remote_url" || d.TransportType == "mcp" {
+		return true
 	}
 	if d.TransportType != "module" {
 		return true
@@ -5449,7 +5456,14 @@ func e2eModuleOnlinePtrFromManifest(manifestJSON string) *bool {
 	defer modulesMu.RUnlock()
 
 	d := e2eDrivers[mf.Driver]
-	if d == nil || d.TransportType != "module" {
+	if d == nil {
+		return nil
+	}
+	// remote_url / mcp 无模块依赖，不返回在线状态指针
+	if d.TransportType == "remote_url" || d.TransportType == "mcp" {
+		return nil
+	}
+	if d.TransportType != "module" {
 		return nil
 	}
 	moduleID := d.ModuleID
@@ -5616,6 +5630,7 @@ func buildAgentDependencyStatus(agent *AgentItem) map[string]interface{} {
 				status["module_online"] = m.Online
 			}
 		}
+		// mcp 驱动为 HTTP 直接调用，无模块依赖，无需补充 module 字段
 	}
 	return status
 }

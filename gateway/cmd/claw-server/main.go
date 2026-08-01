@@ -306,6 +306,7 @@ func main() {
 	agentCredentialRepo := repository.NewAgentCredentialRepo(db)
 	agentCredentialService := service.NewAgentCredentialService(agentCredentialRepo, agentRepo)
 	agentRegistry.DriverRegistry().Register(service.NewModuleDriver(moduleRegistry, agentCredentialService))
+	agentRegistry.DriverRegistry().Register(service.NewMCPDriver(agentCredentialService))
 	agentSchemaBuilder := service.NewToolSchemaBuilder(agentRegistry)
 	agentTrigger := service.NewAgentTrigger()
 

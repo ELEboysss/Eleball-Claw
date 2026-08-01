@@ -18,6 +18,8 @@ const (
 	// ToolDriverModule 通用集市模块驱动
 	// 通常通过 driver 别名（已在 drivers 表注册）调用独立模块；也兼容 metadata.module 显式指定模块。
 	ToolDriverModule ToolDriverType = "module"
+	// ToolDriverMCP Streamable HTTP JSON-RPC MCP 工具驱动（一期仅 tools/call）
+	ToolDriverMCP ToolDriverType = "mcp"
 	// ToolDriverDocker Docker 容器工具驱动（预留）
 	ToolDriverDocker ToolDriverType = "docker"
 	// ToolDriverPython Python 脚本工具驱动（预留）

@@ -211,6 +211,19 @@ func (l *AgentToolLoader) buildToolFunc(manifest *model.ToolManifest, agentID st
 			}
 		}
 
+		// 对于 MCP 驱动，将服务端点配置注入 input，供 mcpDriver 读取。
+		// 同时兼容 manifest.metadata.mcp_endpoint 的遗留写法。
+		if manifest.Driver == model.ToolDriverMCP || (dynRec != nil && dynRec.TransportType == string(model.ModuleTransportTypeMCP)) {
+			if dynRec != nil && dynRec.MCPServerConfig != nil {
+				if b, err := json.Marshal(dynRec.MCPServerConfig); err == nil {
+					input["__mcp_server__"] = string(b)
+				}
+			}
+			if endpoint := manifest.Metadata["mcp_endpoint"]; endpoint != "" {
+				input["__mcp_endpoint__"] = endpoint
+			}
+		}
+
 		return driver.Execute(ctx, action, input, env)
 	}
 }
@@ -299,6 +312,9 @@ func (l *AgentToolLoader) resolveDriver(driverName string) (ToolDriver, *model.D
 		return d, rec, ok
 	case string(model.ModuleTransportTypeRemoteURL):
 		d, ok := l.driverRegistry.Get(string(model.ToolDriverRemoteURL))
+		return d, rec, ok
+	case string(model.ModuleTransportTypeMCP):
+		d, ok := l.driverRegistry.Get(string(model.ToolDriverMCP))
 		return d, rec, ok
 	}
 	return nil, nil, false

@@ -50,6 +50,8 @@ const (
 	ModuleTransportTypeModule ModuleTransportType = "module"
 	// ModuleTransportTypeRemoteURL 直接调用远程 HTTP endpoint
 	ModuleTransportTypeRemoteURL ModuleTransportType = "remote_url"
+	// ModuleTransportTypeMCP 通过 Streamable HTTP JSON-RPC 调用 MCP 服务（tools/call）
+	ModuleTransportTypeMCP ModuleTransportType = "mcp"
 )
 
 // ModuleRecord 集市模块持久化记录
@@ -108,7 +110,7 @@ type ModuleRegisterRequest struct {
 	Name          string   `json:"name" binding:"required"`
 	Description   string   `json:"description"`
 	URL           string   `json:"url" binding:"required,url"`
-	TransportType string   `json:"transport_type" binding:"required,oneof=module remote_url"`
+	TransportType string   `json:"transport_type" binding:"required,oneof=module remote_url mcp"`
 	Capabilities  []string `json:"capabilities"`
 	Version       string   `json:"version"`
 	AuthToken     string   `json:"auth_token"` // 预共享注册令牌
