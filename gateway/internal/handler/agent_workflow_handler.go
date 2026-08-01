@@ -104,6 +104,52 @@ func (h *AgentWorkflowHandler) Approve(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success"})
 }
 
+// PlanReview C3 plan 审批决策（POST /v1/agent/plan-review）。
+// 复用 C1 的共享 registry 投递：ExitPlanMode 工具阻塞在 plan_review，此处投递 accepted/rejected/refined。
+// refined 时 feedback 作为细化反馈回灌 LLM 供其修订 plan。
+func (h *AgentWorkflowHandler) PlanReview(c *gin.Context) {
+	userID, ok := h.getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 2001, "message": "未登录"})
+		return
+	}
+	var req struct {
+		SessionID  string `json:"session_id"`
+		ToolCallID string `json:"tool_call_id"`
+		Decision   string `json:"decision"`  // accepted / rejected / refined
+		Feedback   string `json:"feedback"`   // refined 时的细化反馈
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "参数错误: " + err.Error()})
+		return
+	}
+	if req.SessionID == "" || req.ToolCallID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "session_id 与 tool_call_id 必填"})
+		return
+	}
+	decision := normalizePlanDecision(req.Decision)
+	// 所有权校验：会话必须属于当前用户
+	if _, err := h.agentService.GetSession(c.Request.Context(), req.SessionID, userID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": 3001, "message": "会话不存在或无权访问"})
+		return
+	}
+	dec := service.ApprovalDecision{
+		Decision: decision,
+		Reason:   req.Feedback, // refined 时为细化反馈；accepted/rejected 时为空
+	}
+	h.agentService.DeliverApproval(req.SessionID, req.ToolCallID, dec)
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success"})
+}
+
+// normalizePlanDecision 归一化 plan 审批决策值，非法值回落 rejected。
+func normalizePlanDecision(d string) string {
+	switch d {
+	case "accepted", "rejected", "refined":
+		return d
+	}
+	return "rejected"
+}
+
 // ListPermissionRules C1 列出权限规则（GET /v1/agent/permission-rules）。
 func (h *AgentWorkflowHandler) ListPermissionRules(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{

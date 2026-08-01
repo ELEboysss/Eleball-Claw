@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/eleball/gateway/internal/model"
 )
 
 // mockRunner 跨平台运行器桩
@@ -313,7 +315,7 @@ func TestToolSchemaBuilder_BuildWithOptions(t *testing.T) {
 	builder := NewToolSchemaBuilder(registry)
 
 	// 启用联网：应包含 SearchWeb / FetchURL
-	withWeb := builder.BuildWithOptions(true, true)
+	withWeb := builder.BuildWithOptions(true, true, model.PermissionModeDefault)
 	names := make([]string, 0, len(withWeb))
 	for _, tool := range withWeb {
 		fn := tool["function"].(map[string]interface{})
@@ -324,7 +326,7 @@ func TestToolSchemaBuilder_BuildWithOptions(t *testing.T) {
 	}
 
 	// 关闭联网：应过滤 SearchWeb / FetchURL
-	withoutWeb := builder.BuildWithOptions(true, false)
+	withoutWeb := builder.BuildWithOptions(true, false, model.PermissionModeDefault)
 	for _, tool := range withoutWeb {
 		fn := tool["function"].(map[string]interface{})
 		name := fn["name"].(string)
@@ -347,8 +349,8 @@ func TestToolRegistry_ListAvailable_RespectsVIP(t *testing.T) {
 	registry := NewToolRegistry()
 	registry.RegisterBuiltinSearchWeb()
 	all := registry.List()
-	if len(all) != 8 {
-		t.Fatalf("默认工具数量应为 8，实际 %d", len(all))
+	if len(all) != 9 {
+		t.Fatalf("默认工具数量应为 9，实际 %d", len(all))
 	}
 	free := registry.ListAvailable(false)
 	if len(free) != 2 {
@@ -362,8 +364,8 @@ func TestToolRegistry_ListAvailable_RespectsVIP(t *testing.T) {
 		t.Fatalf("非 VIP 用户应看到 SearchWeb 和 FetchURL，实际 %v", freeNames)
 	}
 	vip := registry.ListAvailable(true)
-	if len(vip) != 8 {
-		t.Fatalf("VIP 用户应看到 8 个工具，实际 %d", len(vip))
+	if len(vip) != 9 {
+		t.Fatalf("VIP 用户应看到 9 个工具，实际 %d", len(vip))
 	}
 }
 

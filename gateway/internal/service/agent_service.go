@@ -52,6 +52,8 @@ type AgentService struct {
 	approvals *approvalRegistry
 	// C1：权限决策引擎（规则解析 + always-allow 持久化）。nil 时审批闸跳过规则直接 ask/allow。
 	permissionSvc *PermissionService
+	// C3：plan 文件目录（claw 装配 basePath/plans）。空则 ExitPlanMode 不落 plan 文件，仅传内容。
+	plansDir string
 }
 
 // SetUnrestricted 设置是否跳过 VIP 门控（claw 本地不限 Agent 模式）。
@@ -104,6 +106,11 @@ func NewAgentService(
 // SetPermissionService 装配权限决策引擎（C1）。claw 启用时注入；云端不注入（审批闸跳过）。
 func (s *AgentService) SetPermissionService(svc *PermissionService) {
 	s.permissionSvc = svc
+}
+
+// SetPlansDir C3：设置 plan 文件目录（claw 装配 basePath/plans）。空则 ExitPlanMode 不落盘。
+func (s *AgentService) SetPlansDir(dir string) {
+	s.plansDir = dir
 }
 
 // SetMaxRetries 设置 Agent 工具循环上游可重试错误的最大尝试次数（对应 llm.max_retries 配置）
@@ -441,7 +448,7 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	for _, t := range dynamicTools {
 		registry.Register(t)
 	}
-	availableTools := s.schemaBuilder.BuildWithOptionsAndDynamic(hasFileTools, enableWebSearch, dynamicTools)
+	availableTools := s.schemaBuilder.BuildWithOptionsAndDynamic(hasFileTools, enableWebSearch, dynamicTools, permissionMode)
 
 	// 10. 构建初始消息（Agent Team P2：组内对话注入组共享记忆区块；P3：能力目录区块）
 	// C7：按模型视觉能力构建附件 content parts（非视觉模型图片走 OCR 降级）
@@ -449,7 +456,7 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	if agentModelName == "" {
 		agentModelName = s.model
 	}
-	messages := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID, resolvedCwd, true, s.supportsVision(req.Provider, agentModelName))
+	messages := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID, resolvedCwd, true, s.supportsVision(req.Provider, agentModelName), permissionMode)
 
 	// 11. Function Calling 循环
 	// AR-03：执行中余额校验节流计数器（每 balanceCheckEvery 步查一次 DB，避免每轮查库）
@@ -473,6 +480,8 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		PermissionMode: permissionMode,
 		PermissionSvc:  s.permissionSvc,
 		Approver:       approver,
+		// C3 plan 模式：plan 文件目录（claw 装配；云端空，ExitPlanMode 仅传内容）
+		PlansDir: s.plansDir,
 		// Agent Team P3：委派计数器（每次 execute 独立，上限 5）+ 子调用用量累计钩子
 		// （子 Usage 只经此钩子进 totalUsage 一次，与 result.Usage 的 addUsage 不重叠）
 		DelegateCalls: new(int),
@@ -730,7 +739,7 @@ func (s *AgentService) ensureSessionQuota(ctx context.Context, userID string) er
 // Agent Team P2：teamID 非空且 teamMemorySvc 已装配时，检索组共享记忆并把
 // 「组共享记忆」区块拼入 system 消息内容尾部（不新增消息，避免弱模型角色混乱）；
 // userID/teamID 传空则跳过注入（如工具关闭的普通对话路径）。
-func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID, resolvedCwd string, toolsEnabled bool, supportsVision bool) []llm.Message {
+func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID, resolvedCwd string, toolsEnabled bool, supportsVision bool, permissionMode model.PermissionMode) []llm.Message {
 	messages := make([]llm.Message, 0, len(req.History)+2)
 	systemContent := "你是一个有用的 AI 助手。\n" +
 		"规则：\n" +
@@ -758,6 +767,11 @@ func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecut
 	if resolvedCwd != "" {
 		systemContent += "\n\n当前工作目录：" + resolvedCwd +
 			"\n文件工具（ReadFile/WriteFile/StrReplaceFile/Grep/OCR）的 path 参数请使用相对于此目录的路径，也可使用绝对路径。"
+	}
+	// C3 plan 模式：指示只读研究 + 调 ExitPlanMode 提交 plan，禁止直接改文件（写工具已被权限闸拦截，
+	// 此处再次明示避免模型反复尝试写操作浪费轮次）。
+	if permissionMode == model.PermissionModePlan {
+		systemContent += "\n\n【当前为 plan（计划）模式】你只能使用只读工具（ReadFile/Grep/FetchURL/OCR/Shell 只读命令等）进行调研，禁止直接修改文件或执行写操作。完成调研后，必须调用 ExitPlanMode 工具提交结构化计划（含步骤、涉及文件/命令、风险、验收标准）供用户审批。用户接受后会话切到 acceptEdits 模式再执行；用户要求细化时按反馈修订后重新提交。"
 	}
 	messages = append(messages, llm.Message{
 		Role:    "system",
@@ -894,7 +908,7 @@ func (s *AgentService) chatStream(ctx context.Context, req AgentExecuteRequest, 
 	modelName = normalizeAgentModelName(req.Provider, modelName)
 
 	// 工具关闭的普通对话路径不注入组共享记忆（userID/teamID 传空跳过；保持与历史行为一致）
-	messages := s.buildInitialMessages(ctx, req, req.Attachments, "", "", "", false, s.supportsVision(req.Provider, modelName))
+	messages := s.buildInitialMessages(ctx, req, req.Attachments, "", "", "", false, s.supportsVision(req.Provider, modelName), model.PermissionModeDefault)
 	stream, err := llmClient.ChatStream(ctx, llm.ChatRequest{
 		Model:    modelName,
 		Messages: messages,

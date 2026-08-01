@@ -7244,6 +7244,14 @@ func main() {
 		}
 		respondSuccess(w, map[string]interface{}{"ok": true})
 	})))
+	// C3：plan 审批决策（e2e no-op，端点保留以维持 API 契约一致）
+	mux.HandleFunc("/v1/agent/plan-review", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			respondError(w, 1001, "方法不支持")
+			return
+		}
+		respondSuccess(w, map[string]interface{}{"ok": true})
+	})))
 	mux.HandleFunc("/v1/agent/permission-rules", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:

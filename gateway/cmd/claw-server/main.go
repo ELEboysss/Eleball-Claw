@@ -356,6 +356,8 @@ func main() {
 	// C1：装配权限决策引擎（always-allow 规则持久化到 {basePath}/permissions.json）
 	permissionSvc := service.NewPermissionService(filepath.Join(cfg.Agent.BasePath, "permissions.json"))
 	agentWorkflowService.SetPermissionService(permissionSvc)
+	// C3：装配 plan 文件目录（ExitPlanMode 落盘 {basePath}/plans/{slug}.md）
+	agentWorkflowService.SetPlansDir(filepath.Join(cfg.Agent.BasePath, "plans"))
 	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry(), moduleRegistry)
 	agentToolLoader.SetModuleService(moduleService)
 	agentWorkflowService.SetAgentToolLoader(agentToolLoader)

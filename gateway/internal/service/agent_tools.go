@@ -52,6 +52,10 @@ type ToolEnv struct {
 	PermissionMode model.PermissionMode
 	PermissionSvc  *PermissionService
 	Approver       Approver
+	// C3 plan 模式：当前工具调用 ID（循环每轮注入，供 ExitPlanMode 工具作为审批 key）
+	CurrentToolCallID string
+	// C3 plan 模式：plan 文件目录（claw 装配 basePath/plans），空则不落 plan 文件
+	PlansDir string
 }
 
 // ResolveFilePath 解析文件工具路径（AR-06）：env.Cwd 非空时优先解析到 cwd，否则回退会话沙箱。
@@ -517,6 +521,32 @@ func (r *ToolRegistry) registerDefaults() {
 
 	// VideoGenerate 已移除：当前实现仅为 ffmpeg 占位视频，非真正 AI 视频生成，
 	// 避免误导用户。后续接入 Seedance / CogVideo / 可灵等真实文生视频 API 后再恢复。
+
+	// C3 plan 模式：ExitPlanMode 提交研究计划供用户审批。ReadOnly=true（仅写 .claw/plans/ 受管目录，
+	// 不改用户工作区），故 plan 模式下可调用；ServerSide=true 与其他内置 agent 工具一致（claw 无 VIP 门控）；
+	// schema 构建时仅 plan 模式暴露给 LLM。
+	r.Register(&Tool{
+		Name:        "ExitPlanMode",
+		Description: "提交研究/实施计划供用户审批。仅在 plan（计划）模式下调用：完成只读研究后，把计划写成结构化 markdown 经此工具提交，调用后会暂停等待用户接受/拒绝/细化。接受后会话切到 acceptEdits 模式开始执行。",
+		ServerSide:  true,
+		ReadOnly:    true,
+		Driver:      string(model.ToolDriverBuiltin),
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"goal": map[string]interface{}{
+					"type":        "string",
+					"description": "本次计划要达成的用户目标（一句话）",
+				},
+				"plan": map[string]interface{}{
+					"type":        "string",
+					"description": "计划正文（markdown）：含实施步骤、涉及文件/命令、风险与验收标准",
+				},
+			},
+			"required": []string{"goal", "plan"},
+		},
+		Func: r.toolExitPlanMode,
+	})
 }
 
 // toolSearchWeb 搜索工具
@@ -852,4 +882,93 @@ func (r *ToolRegistry) OCRDataURI(ctx context.Context, dataURI string) (string, 
 		return "", err
 	}
 	return text, nil
+}
+
+// toolExitPlanMode C3：提交 plan 供用户审批。写 plan 文件到 .claw/plans/ + 发 plan_review 阻塞等决策。
+// 决策通过 POST /agent/plan-review 投递（复用 approvalRegistry）；结果回灌 LLM 指导后续行为。
+func (r *ToolRegistry) toolExitPlanMode(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
+	if env == nil || env.Approver == nil {
+		return nil, errors.New("plan 审批当前不可用（需 claw 本地环境）")
+	}
+	goal, _ := input["goal"].(string)
+	plan, _ := input["plan"].(string)
+	if strings.TrimSpace(plan) == "" {
+		return nil, errors.New("plan 不能为空")
+	}
+	planPath := ""
+	if env.PlansDir != "" {
+		slug := planSlug(goal)
+		planPath = filepath.Join(env.PlansDir, slug+".md")
+		if err := os.MkdirAll(env.PlansDir, 0o755); err == nil {
+			_ = os.WriteFile(planPath, []byte(formatPlanFile(goal, plan)), 0o644)
+		} else {
+			planPath = "" // 目录创建失败则仅传内容，不引用路径
+		}
+	}
+	dec, err := env.Approver.RequestPlanReview(ctx, PlanReviewRequest{
+		SessionID:   env.SessionID,
+		ToolCallID:  env.CurrentToolCallID,
+		PlanPath:    planPath,
+		PlanContent: plan,
+		Goal:        goal,
+	})
+	if err != nil {
+		return map[string]interface{}{"status": "error", "message": err.Error()}, nil
+	}
+	msg := "plan 已被用户拒绝"
+	switch dec.Decision {
+	case "accepted":
+		msg = "plan 已被用户接受，会话已切到 acceptEdits 模式，请按计划执行"
+	case "refined":
+		fb := dec.Reason
+		if fb == "" {
+			fb = "（未给出反馈）"
+		}
+		msg = "用户要求细化 plan，反馈：" + fb
+	case "rejected":
+		if dec.Reason != "" {
+			msg += "（" + dec.Reason + "）"
+		}
+	}
+	return map[string]interface{}{"status": dec.Decision, "message": msg, "plan_path": planPath}, nil
+}
+
+// planSlug 从目标生成 plan 文件名 slug（小写字母数字 + 短时间后缀防冲突）。
+func planSlug(goal string) string {
+	s := strings.ToLower(goal)
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+		case r == ' ' || r == '_' || r == '/':
+			b.WriteRune('-')
+		}
+	}
+	slug := b.String()
+	for strings.Contains(slug, "--") {
+		slug = strings.ReplaceAll(slug, "--", "-")
+	}
+	slug = strings.Trim(slug, "-")
+	if slug == "" {
+		slug = "plan"
+	}
+	if len(slug) > 32 {
+		slug = slug[:32]
+	}
+	return slug + "-" + randSuffix(6)
+}
+
+// formatPlanFile 生成 plan 文件 markdown 内容。
+func formatPlanFile(goal, plan string) string {
+	return fmt.Sprintf("# 计划：%s\n\n> 由 claw plan 模式生成\n\n%s\n", goal, plan)
+}
+
+// randSuffix 生成 n 位十六进制时间后缀（防 plan 文件名冲突）。
+func randSuffix(n int) string {
+	s := fmt.Sprintf("%x", time.Now().UnixNano())
+	if len(s) > n {
+		return s[len(s)-n:]
+	}
+	return s
 }

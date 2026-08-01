@@ -300,6 +300,14 @@ export const agentApi = {
   listPermissionRules: () => client.get('/agent/permission-rules'),
   addPermissionRule: (spec, decision) => client.post('/agent/permission-rules', { spec, decision }),
   deletePermissionRule: (spec) => client.delete('/agent/permission-rules', { params: { spec } }),
+  // C3 plan 审批决策（ExitPlanMode 阻塞，接受/拒绝/细化 + 反馈）
+  submitPlanReview: (sessionId, toolCallId, decision, feedback) =>
+    client.post('/agent/plan-review', {
+      session_id: sessionId,
+      tool_call_id: toolCallId,
+      decision,
+      feedback: feedback || undefined
+    }),
   execute: async (body, onEvent) => {
     const token = getItem('token')
     const response = await fetch(`${API_BASE}/agent/execute`, {

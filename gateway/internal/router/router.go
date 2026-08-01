@@ -154,6 +154,8 @@ func NewRouter(
 				auth.POST("/agent/execute", agentWorkflowHandler.Execute)
 				// C1：工具审批决策（云端不装配 Approver，审批闸跳过；端点保留以维持 API 契约一致）
 				auth.POST("/agent/approve", agentWorkflowHandler.Approve)
+				// C3：plan 审批决策（端点保留以维持 API 契约一致）
+				auth.POST("/agent/plan-review", agentWorkflowHandler.PlanReview)
 				auth.GET("/agent/permission-rules", agentWorkflowHandler.ListPermissionRules)
 				auth.POST("/agent/permission-rules", agentWorkflowHandler.AddPermissionRule)
 				auth.DELETE("/agent/permission-rules", agentWorkflowHandler.DeletePermissionRule)

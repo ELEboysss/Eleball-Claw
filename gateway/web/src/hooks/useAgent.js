@@ -169,6 +169,38 @@ export function useAgent() {
               ))
               break
             }
+            case 'plan_review': {
+              // C3：plan 审批请求--ExitPlanMode 阻塞等用户接受/拒绝/细化
+              const pr = event.data
+              const review = {
+                type: 'plan_review',
+                tool_call_id: pr.tool_call_id,
+                sessionId: pr.session_id || '',
+                goal: pr.goal || '',
+                planContent: pr.plan_content || '',
+                planPath: pr.plan_path || '',
+                status: 'pending'
+              }
+              finalSteps = [...finalSteps, review]
+              setSteps(prev => [...prev, review])
+              break
+            }
+            case 'plan_resolved': {
+              // C3：plan 决策返回--更新卡片状态（accepted/rejected/refined）
+              const { tool_call_id, decision } = event.data
+              const resolved = ['accepted', 'rejected', 'refined'].includes(decision) ? decision : 'rejected'
+              finalSteps = finalSteps.map(s =>
+                s.type === 'plan_review' && s.tool_call_id === tool_call_id
+                  ? { ...s, status: resolved }
+                  : s
+              )
+              setSteps(prev => prev.map(s =>
+                s.type === 'plan_review' && s.tool_call_id === tool_call_id
+                  ? { ...s, status: resolved }
+                  : s
+              ))
+              break
+            }
             case 'reasoning': {
               const sessionId = event.data.session_id || ''
               const delta = event.data.delta || ''
@@ -356,11 +388,20 @@ export function useAgent() {
     })
   }, [])
 
+  // C3：提交 plan 审批决策（接受/拒绝/细化 + 反馈）。
+  // 接受后会话由前端切 acceptEdits（后端工具循环据决策恢复执行）。
+  const submitPlanReview = useCallback((sessionId, toolCallId, decision, feedback) => {
+    agentApi.submitPlanReview(sessionId, toolCallId, decision, feedback).catch(err => {
+      setError(err.message || 'plan 审批提交失败')
+    })
+  }, [])
+
   return {
     execute,
     abort,
     reset,
     approveToolCall,
+    submitPlanReview,
     status,
     toolSteps,
     currentStep,

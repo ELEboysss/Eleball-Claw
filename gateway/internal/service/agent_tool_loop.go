@@ -378,6 +378,8 @@ func (l *ToolCallingLoop) RunWithRegistry(
 				} else {
 					// C1：审批闸（env.Approver 非空时判定 allow/deny/ask）。deny/失败时跳过 tool.Func，
 					// record.Error 已填，下方 compactToolResult 将拒绝原因回灌 LLM 供其改道。
+					// C3：注入当前 toolCallID，供 ExitPlanMode 等需在工具内部发起交互审批的工具用作 key。
+					env.CurrentToolCallID = tc.ID
 					if requestToolApproval(ctx, env, tool, resolvedName, input, tc.ID, &record) {
 						// AR-08：工具调用审计--计时
 						start := time.Now()

@@ -38,6 +38,19 @@ type Approver interface {
 	// RequestApproval 发送 approval_request SSE 事件并阻塞等待用户决策。
 	// ctx 取消（用户 stop / 断连）或超时返回错误与 deny 决策。
 	RequestApproval(ctx context.Context, req ApprovalRequest) (ApprovalDecision, error)
+	// RequestPlanReview C3：发送 plan_review SSE 事件并阻塞等待用户对 plan 的决策。
+	// 复用 approvalRegistry（key 同为 sessionID:toolCallID）；决策 Decision 为 accepted/rejected/refined，
+	// refined 时 Reason 携带用户细化反馈。
+	RequestPlanReview(ctx context.Context, req PlanReviewRequest) (ApprovalDecision, error)
+}
+
+// PlanReviewRequest plan 审批请求负载（SSE plan_review 事件 data）。
+type PlanReviewRequest struct {
+	SessionID    string `json:"session_id"`
+	ToolCallID   string `json:"tool_call_id"`
+	PlanPath     string `json:"plan_path,omitempty"`  // 落盘的 plan 文件路径（空则仅传内容）
+	PlanContent  string `json:"plan_content"`         // plan 正文（markdown）
+	Goal         string `json:"goal,omitempty"`       // 用户原始目标
 }
 
 // approvalRegistry 待审批请求注册表（AgentService 持有，跨 execute 共享）。
@@ -115,6 +128,31 @@ func (a *sseApprover) RequestApproval(ctx context.Context, req ApprovalRequest) 
 		return ApprovalDecision{Decision: "deny", Reason: "执行已取消"}, ctx.Err()
 	case <-timeout.C:
 		return ApprovalDecision{Decision: "deny", Reason: "审批超时"}, fmt.Errorf("审批超时（%s）", approvalTimeout)
+	}
+}
+
+// RequestPlanReview C3：发送 plan_review 事件并阻塞等待用户决策。
+// 复用 approvalRegistry（key = sessionID:toolCallID）；决策通过 POST /agent/plan-review 投递。
+func (a *sseApprover) RequestPlanReview(ctx context.Context, req PlanReviewRequest) (ApprovalDecision, error) {
+	key := req.SessionID + ":" + req.ToolCallID
+	ch := a.svc.approvals.register(key)
+	defer a.svc.approvals.cancel(key)
+
+	a.svc.writeEvent(a.writer, "plan_review", req)
+
+	timeout := time.NewTimer(approvalTimeout)
+	defer timeout.Stop()
+	select {
+	case dec := <-ch:
+		a.svc.writeEvent(a.writer, "plan_resolved", map[string]string{
+			"tool_call_id": req.ToolCallID,
+			"decision":     dec.Decision,
+		})
+		return dec, nil
+	case <-ctx.Done():
+		return ApprovalDecision{Decision: "rejected", Reason: "执行已取消"}, ctx.Err()
+	case <-timeout.C:
+		return ApprovalDecision{Decision: "rejected", Reason: "plan 审批超时"}, fmt.Errorf("plan 审批超时（%s）", approvalTimeout)
 	}
 }
 

@@ -334,6 +334,8 @@ func (s *AgentService) executeCallAssistant(ctx context.Context, input map[strin
 		PermissionMode: env.PermissionMode,
 		PermissionSvc:  env.PermissionSvc,
 		Approver:       env.Approver,
+		// C3 plan 模式：透传 plan 文件目录（子 agent 在 plan 模式下也可调 ExitPlanMode）
+		PlansDir: env.PlansDir,
 		Depth:            env.Depth + 1,
 		UsageAccumulator: nil, // Agent Team P5：子用量即时扣费，不再经 accumulator（防双重计费）
 		CostGuard:        taskCostGuard,

@@ -3,6 +3,8 @@ package service
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/eleball/gateway/internal/model"
 )
 
 // ToolSchemaBuilder 根据用户权限构建可用工具 schema
@@ -17,17 +19,18 @@ func NewToolSchemaBuilder(registry *ToolRegistry) *ToolSchemaBuilder {
 
 // Build 返回 OpenAI 兼容的 tools 列表（默认启用联网工具，保持向后兼容）
 func (b *ToolSchemaBuilder) Build(isVIP bool) []map[string]interface{} {
-	return b.BuildWithOptions(isVIP, true)
+	return b.BuildWithOptions(isVIP, true, model.PermissionModeDefault)
 }
 
 // BuildWithOptions 根据用户权限和联网开关构建可用工具 schema
 // enableWebSearch=false 时过滤 SearchWeb / FetchURL，避免 Agent 调用需要服务器资源的搜索/抓取服务
-func (b *ToolSchemaBuilder) BuildWithOptions(isVIP bool, enableWebSearch bool) []map[string]interface{} {
-	return b.BuildWithOptionsAndDynamic(isVIP, enableWebSearch, nil)
+func (b *ToolSchemaBuilder) BuildWithOptions(isVIP bool, enableWebSearch bool, permissionMode model.PermissionMode) []map[string]interface{} {
+	return b.BuildWithOptionsAndDynamic(isVIP, enableWebSearch, nil, permissionMode)
 }
 
-// BuildWithOptionsAndDynamic 在 BuildWithOptions 基础上合并用户购买的动态工具
-func (b *ToolSchemaBuilder) BuildWithOptionsAndDynamic(isVIP bool, enableWebSearch bool, dynamicTools []*Tool) []map[string]interface{} {
+// BuildWithOptionsAndDynamic 在 BuildWithOptions 基础上合并用户购买的动态工具。
+// C3：ExitPlanMode 仅在 plan 模式暴露给 LLM（其余模式隐藏，避免误调）。
+func (b *ToolSchemaBuilder) BuildWithOptionsAndDynamic(isVIP bool, enableWebSearch bool, dynamicTools []*Tool, permissionMode model.PermissionMode) []map[string]interface{} {
 	tools := b.registry.ListAvailable(isVIP)
 	allTools := make([]*Tool, 0, len(tools)+len(dynamicTools))
 	allTools = append(allTools, tools...)
@@ -38,9 +41,14 @@ func (b *ToolSchemaBuilder) BuildWithOptionsAndDynamic(isVIP bool, enableWebSear
 		allTools = append(allTools, t)
 	}
 
+	planMode := permissionMode == model.PermissionModePlan
 	result := make([]map[string]interface{}, 0, len(allTools))
 	for _, tool := range allTools {
 		if !enableWebSearch && (tool.Name == "SearchWeb" || tool.Name == "FetchURL") {
+			continue
+		}
+		// ExitPlanMode 仅 plan 模式暴露
+		if tool.Name == "ExitPlanMode" && !planMode {
 			continue
 		}
 		result = append(result, map[string]interface{}{
