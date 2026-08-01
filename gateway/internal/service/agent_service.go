@@ -60,6 +60,8 @@ type AgentService struct {
 	compactor *ContextCompactor
 	// C6：steer / follow-up 内存队列管理器，execute 期间跨 HTTP 请求共享。
 	steerQueues *SteerQueueManager
+	// C8：项目记忆文件加载服务（CLAUDE.md/AGENTS.md 自动注入）。nil 时不加载。
+	contextFileSvc *ContextFileService
 }
 
 // SetUnrestricted 设置是否跳过 VIP 门控（claw 本地不限 Agent 模式）。
@@ -131,6 +133,11 @@ func (s *AgentService) SetCompactor(c *ContextCompactor) {
 	if s.toolLoop != nil {
 		s.toolLoop.SetCompactor(c)
 	}
+}
+
+// SetContextFileService C8：装配项目记忆文件加载服务。nil 时不自动注入项目记忆。
+func (s *AgentService) SetContextFileService(svc *ContextFileService) {
+	s.contextFileSvc = svc
 }
 
 // PushSteer C6：向指定 session 注入一条 steer 消息。
@@ -896,6 +903,15 @@ func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecut
 		memories := s.teamMemorySvc.SearchForInjection(ctx, userID, teamID, req.Message, 8)
 		if block := s.teamMemorySvc.FormatInjectionBlock(memories, TeamMemoryInjectMaxChars); block != "" {
 			systemContent += "\n\n" + block
+		}
+	}
+	// C8：项目记忆文件（CLAUDE.md / AGENTS.md）自动注入 system prompt。
+	// 仅 claw（resolvedCwd 非空）启用；云端通过 project_id 走独立实现。
+	if resolvedCwd != "" && s.contextFileSvc != nil {
+		if files, err := s.contextFileSvc.LoadContextFiles(resolvedCwd); err == nil && len(files) > 0 {
+			if block := s.contextFileSvc.FormatInjectionBlock(files); block != "" {
+				systemContent += "\n\n" + block
+			}
 		}
 	}
 	// AR-06：claw 工作目录注入 system prompt（resolvedCwd 非空即 claw 启用且有有效 cwd）。

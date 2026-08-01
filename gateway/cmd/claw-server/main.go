@@ -395,6 +395,9 @@ func main() {
 	agentWorkflowService.SetAssistantService(assistantService)
 	// 组共享记忆服务（Agent Team P2）：执行前检索注入 + 执行后异步提取
 	agentWorkflowService.SetTeamMemoryService(teamMemoryService)
+		// C8：项目记忆文件加载服务（CLAUDE.md / AGENTS.md 自动注入 system prompt）
+		contextFileService := service.NewContextFileService(cfg.Agent.ContextFiles)
+		agentWorkflowService.SetContextFileService(contextFileService)
 	// 云端账户/VIP 缓存（claw 仅从云端取 VIP 一项用于门控）
 	cloudAccountService := service.NewCloudAccountService(cfg.Server.EleagentBaseURL)
 
@@ -423,6 +426,8 @@ func main() {
 	agentWorkflowHandler := handler.NewAgentWorkflowHandler(agentWorkflowService)
 	// C5：注入 slash 命令服务
 	agentWorkflowHandler.SetSlashCommandService(slashCommandService)
+		// C8：注入项目记忆文件加载服务
+		agentWorkflowHandler.SetContextFileService(contextFileService)
 	// claw：search-providers 优先转发 search-web 模块的 list_sources（搜索源配置在模块侧）
 	agentWorkflowHandler.SetModuleRegistry(moduleRegistry)
 	agentHandler := handler.NewAgentHandler(agentService)

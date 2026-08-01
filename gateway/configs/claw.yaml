@@ -61,6 +61,12 @@ agent:
     threshold_tokens: 60000
     keep_recent_tokens: 20000
     fallback_model: ""
+  # C8：项目记忆文件（CLAUDE.md / AGENTS.md）自动注入配置
+  context_files:
+    enabled: true
+    max_total_chars: 12000
+    max_file_chars: 8000
+    rules_enabled: false
   # BYOK 兜底：未配置用户自有 Key 时使用（本地开发）
   api_key: ""
   base_url: ""

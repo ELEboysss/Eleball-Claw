@@ -154,6 +154,8 @@ func NewClawRouter(
 				// C5：slash 命令列表与 @ 文件 fuzzy 补全（输入栏命令中心）
 				auth.GET("/agent/slash-commands", agentWorkflowHandler.SlashCommands)
 				auth.GET("/agent/files/fuzzy", agentWorkflowHandler.FilesFuzzy)
+				// C8：项目记忆文件列表（/memory slash 命令展示）
+				auth.GET("/agent/memory", agentWorkflowHandler.Memory)
 				auth.GET("/agent/search-providers", agentWorkflowHandler.ListSearchProviders)
 				auth.GET("/agent/sessions", agentWorkflowHandler.ListSessions)
 				auth.DELETE("/agent/sessions", agentWorkflowHandler.DeleteSessions)

@@ -19,6 +19,8 @@ type AgentWorkflowHandler struct {
 	moduleRegistry *service.ModuleRegistry
 	// C5：slash 命令服务（输入栏命令中心）
 	slashService *service.SlashCommandService
+	// C8：项目记忆文件加载服务（/agent/memory）
+	contextFileService *service.ContextFileService
 }
 
 // NewAgentWorkflowHandler 创建处理器
@@ -35,6 +37,11 @@ func (h *AgentWorkflowHandler) SetModuleRegistry(r *service.ModuleRegistry) {
 // SetSlashCommandService 注入 slash 命令服务（C5）
 func (h *AgentWorkflowHandler) SetSlashCommandService(s *service.SlashCommandService) {
 	h.slashService = s
+}
+
+// SetContextFileService 注入项目记忆文件加载服务（C8）
+func (h *AgentWorkflowHandler) SetContextFileService(s *service.ContextFileService) {
+	h.contextFileService = s
 }
 
 // getUserID 从 gin context 获取当前用户 ID
@@ -520,4 +527,27 @@ func (h *AgentWorkflowHandler) FilesFuzzy(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": resp})
+}
+
+// Memory C8：查询当前工作目录下已加载的项目记忆文件（CLAUDE.md / AGENTS.md）。
+func (h *AgentWorkflowHandler) Memory(c *gin.Context) {
+	if _, ok := h.getUserID(c); !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 2001, "message": "未登录"})
+		return
+	}
+	if h.contextFileService == nil {
+		c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": gin.H{"files": []interface{}{}}})
+		return
+	}
+	cwd := c.Query("cwd")
+	if cwd == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "cwd 参数不能为空"})
+		return
+	}
+	files, err := h.contextFileService.ListLoadedFiles(cwd)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 5000, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": gin.H{"files": files}})
 }

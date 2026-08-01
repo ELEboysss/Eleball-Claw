@@ -124,6 +124,22 @@ type AgentConfig struct {
 	EmbeddingModel string `mapstructure:"embedding_model"`
 	// Compaction C4：对话级上下文压缩配置。
 	Compaction CompactionConfig `mapstructure:"compaction"`
+	// ContextFiles C8：项目记忆文件（CLAUDE.md/AGENTS.md）自动注入配置。
+	ContextFiles ContextFilesConfig `mapstructure:"context_files"`
+}
+
+// ContextFilesConfig C8：项目记忆文件加载配置。
+type ContextFilesConfig struct {
+	// Enabled 是否启用项目记忆自动注入；false 时 /memory 仍可列出，但不写入 system prompt。
+	Enabled bool `mapstructure:"enabled"`
+	// MaxTotalChars 所有项目记忆文件注入 system prompt 的总字符预算（按 rune 计）。
+	// 0 表示使用默认值 12000（≈6000 tokens）。
+	MaxTotalChars int `mapstructure:"max_total_chars"`
+	// MaxFileChars 单个记忆文件读取上限（按 rune 计），防止恶意大文件撑爆上下文。
+	// 0 表示使用默认值 8000。
+	MaxFileChars int `mapstructure:"max_file_chars"`
+	// RulesEnabled 是否启用 .claw/rules/*.md 条件规则匹配（一期可关闭，仅加载根目录上下文文件）。
+	RulesEnabled bool `mapstructure:"rules_enabled"`
 }
 
 // CompactionConfig 对话级上下文压缩配置（C4）。

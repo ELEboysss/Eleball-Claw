@@ -157,7 +157,7 @@ func (s *SlashCommandService) builtinCommands() []SlashCommand {
 		},
 		{
 			Name:            "/memory",
-			Description:     "查看已加载的项目记忆文件（C8 占位）",
+			Description:     "查看当前工作目录下已加载的项目记忆文件（CLAUDE.md / AGENTS.md）",
 			Category:        SlashCategoryBuiltin,
 			RequiresHandler: true,
 			Handler:         "memory",

@@ -86,12 +86,17 @@ func (fs *FileSandbox) ResolveProjectPath(cwd, relPath string) (string, error) {
 		return "", errors.New("路径包含非法字符")
 	}
 	cwdClean := filepath.Clean(cwd)
-	absPath := filepath.Clean(filepath.Join(cwdClean, relPath))
-	// EvalSymlinks 解析软链；文件不存在时返回错误，用 Clean 后路径继续前缀校验（写场景文件尚未创建）
+	// 解析 cwd 软链/Windows 短名，得到真实工作目录边界；后续路径都在该边界下解析。
+	cwdResolved, err := filepath.EvalSymlinks(cwdClean)
+	if err != nil {
+		cwdResolved = cwdClean
+	}
+	absPath := filepath.Clean(filepath.Join(cwdResolved, relPath))
+	// EvalSymlinks 解析目标软链；文件不存在时返回错误，用 Clean 后路径继续前缀校验（写场景文件尚未创建）
 	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
 		absPath = filepath.Clean(resolved)
 	}
-	if !underDir(absPath, cwdClean) {
+	if !underDir(absPath, cwdResolved) {
 		return "", errors.New("访问路径超出工作目录范围")
 	}
 	return absPath, nil
@@ -344,7 +349,12 @@ func (fs *FileSandbox) RemoveAllInCwd(cwd, relPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if abs == filepath.Clean(cwd) {
+	cwdClean := filepath.Clean(cwd)
+	cwdResolved, err := filepath.EvalSymlinks(cwdClean)
+	if err != nil {
+		cwdResolved = cwdClean
+	}
+	if abs == cwdResolved {
 		return "", errors.New("禁止删除工作目录根")
 	}
 	if err := os.RemoveAll(abs); err != nil {

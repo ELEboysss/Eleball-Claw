@@ -80,10 +80,14 @@ func TestFileSandbox_ResolveProjectPath(t *testing.T) {
 	_, err = fs.ResolveProjectPath(cwd, "../secret.txt")
 	assert.Error(t, err)
 
-	// 空路径返回 cwd 自身
+	// 空路径返回 cwd 自身（解析软链/短名后的真实路径）
 	p2, err := fs.ResolveProjectPath(cwd, "")
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Clean(cwd), p2)
+	resolvedCwd, _ := filepath.EvalSymlinks(filepath.Clean(cwd))
+	if resolvedCwd == "" {
+		resolvedCwd = filepath.Clean(cwd)
+	}
+	assert.Equal(t, resolvedCwd, p2)
 
 	// 软链逃逸防护：cwd 内建软链指向外部，解析后应被拒
 	target := filepath.Join(t.TempDir(), "outside.txt")
