@@ -166,6 +166,8 @@ export default function Chat() {
     error: agentError,
     warning: agentWarning,
     steps: agentSteps,
+    isCompacting,
+    compactResult,
     approveToolCall: approveToolCall,
     submitPlanReview,
     abort: abortAgent
@@ -1567,6 +1569,21 @@ export default function Chat() {
           </div>
         )}
 
+        {/* C4：自动压缩 banner（执行中/完成后展示节省 tokens） */}
+        {(isCompacting || compactResult) && agentStatus !== 'idle' && (
+          <div className="flex-shrink-0 bg-blue-50/80 border-b border-blue-100 px-4 py-1.5 flex items-center gap-2 text-[11px] text-blue-700">
+            <Loader2 className={`w-3 h-3 ${isCompacting ? 'animate-spin' : ''}`} />
+            {isCompacting ? (
+              <span>正在压缩上下文…</span>
+            ) : compactResult ? (
+              <span>
+                上下文已压缩：{compactResult.beforeTokens} → {compactResult.afterTokens}
+                {compactResult.beforeTokens > compactResult.afterTokens ? `（节省 ${compactResult.beforeTokens - compactResult.afterTokens} tokens）` : ''}
+              </span>
+            ) : null}
+          </div>
+        )}
+
         {/* AR-12：会话分叉分支导航（父对话/子分叉跳转）；无分叉关系时组件返回 null */}
         <div className="flex-shrink-0 bg-eleball-surface border-b border-eleball-outline-variant px-4 py-1 flex items-center gap-2">
           <BranchNavigator
@@ -1579,16 +1596,20 @@ export default function Chat() {
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto min-h-0 px-4 py-4 space-y-4">
-          {(currentConversation?.messages || []).map((message, idx) => (
-            <MessageBubble
-              key={idx}
-              message={message}
-              isLast={idx === currentConversation.messages.length - 1}
-              loading={loading}
-              onFork={handleFork}
-              forkingMessageId={forkingMessageId}
-            />
-          ))}
+          {(currentConversation?.messages || []).map((message, idx) =>
+            message.role === 'compaction' ? (
+              <CompactionBubble key={idx} message={message} />
+            ) : (
+              <MessageBubble
+                key={idx}
+                message={message}
+                isLast={idx === currentConversation.messages.length - 1}
+                loading={loading}
+                onFork={handleFork}
+                forkingMessageId={forkingMessageId}
+              />
+            )
+          )}
 
           {error && (
             <div className="flex items-center gap-2 text-sm text-eleball-error bg-red-50 rounded-xl px-3 py-2">
@@ -2055,6 +2076,42 @@ function ToolSummaryBlock({ summary }) {
   )
 }
 
+function CompactionBubble({ message }) {
+  const [expanded, setExpanded] = useState(false)
+  const meta = useMemo(() => {
+    if (!message.toolResults) return null
+    try {
+      return JSON.parse(message.toolResults)
+    } catch {
+      return null
+    }
+  }, [message.toolResults])
+  const saved = meta ? meta.before_tokens - meta.after_tokens : null
+
+  return (
+    <div className="flex flex-col items-center gap-2">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="inline-flex items-center gap-1.5 text-xs text-eleball-text-secondary bg-eleball-surface-variant hover:bg-eleball-surface border border-eleball-outline-variant rounded-full px-3 py-1.5 transition-colors"
+      >
+        {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+        <span>
+          上下文已压缩
+          {saved !== null && saved > 0 ? `（节省 ${saved} tokens）` : ''}
+        </span>
+      </button>
+      {expanded && (
+        <div className="w-full max-w-2xl rounded-xl border border-eleball-outline-variant bg-eleball-surface p-3 text-xs text-eleball-text-secondary">
+          <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={markdownComponents}>
+            {message.content || ''}
+          </ReactMarkdown>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function MessageBubble({ message, isLast, loading, onFork, forkingMessageId }) {
   const isUser = message.role === 'user'
   const isAssistant = message.role === 'assistant'
@@ -2431,11 +2488,35 @@ function looksLikeUrlOrDomain(text) {
 }
 
 // 构造发送给模型接口的历史消息：过滤掉 content 为空的助手消息，
-// 避免切换模型后上游因 "assistant message must not be empty" 返回 400
+// 并根据最近的 compaction 条目截断更早消息（C4）。同时携带消息 ID 供后端压缩定位。
 function buildHistoryMessages(messages) {
+  // 找到最近的 compaction 条目，获取 first_kept_entry_id
+  let firstKeptId = null
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m.role === 'compaction' && m.toolResults) {
+      try {
+        const meta = JSON.parse(m.toolResults)
+        if (meta.first_kept_entry_id) {
+          firstKeptId = meta.first_kept_entry_id
+          break
+        }
+      } catch {}
+    }
+  }
+  let started = firstKeptId === null
   return messages
-    .filter((m) => !(m.role === 'assistant' && !m.content))
-    .map((m) => ({ role: m.role, content: m.content }))
+    .filter((m) => {
+      if (!started) {
+        if (m.id === firstKeptId || m.clientMessageId === firstKeptId) {
+          started = true
+        } else {
+          return false
+        }
+      }
+      return !(m.role === 'assistant' && !m.content)
+    })
+    .map((m) => ({ id: m.id || '', role: m.role, content: m.content }))
 }
 
 function suggestedFilename(language, code) {

@@ -80,8 +80,8 @@ func tokenEstimateCoefficient(model string) float64 {
 	}
 }
 
-// messageContentToString 将消息 content（string 或 []ContentPart）统一转为文本。
-func messageContentToString(content interface{}) string {
+// MessageContentToString 将消息 content（string 或 []ContentPart）统一转为文本。
+func MessageContentToString(content interface{}) string {
 	if content == nil {
 		return ""
 	}
@@ -112,6 +112,11 @@ func messageContentToString(content interface{}) string {
 		return fmt.Sprintf("%v", content)
 	}
 	return string(b)
+}
+
+// messageContentToString 将消息 content（string 或 []ContentPart）统一转为文本（兼容旧调用）。
+func messageContentToString(content interface{}) string {
+	return MessageContentToString(content)
 }
 
 // isCJK 判断 rune 是否属于 CJK 统一表意文字区段。

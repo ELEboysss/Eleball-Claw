@@ -200,6 +200,19 @@ function ErrorStep({ message }) {
   )
 }
 
+// C4：压缩提示步骤，展示上下文压缩前后 token 与节省量
+function CompactStep({ result }) {
+  if (!result) return null
+  const saved = result.beforeTokens - result.afterTokens
+  const savedText = saved > 0 ? `，节省 ${saved} tokens` : ''
+  return (
+    <div className="flex items-start gap-1.5 text-xs text-blue-700 bg-blue-50 rounded-lg px-2.5 py-2">
+      <Loader2 className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 animate-spin" />
+      <span>正在压缩上下文…（{result.beforeTokens} → {result.afterTokens}{savedText}）</span>
+    </div>
+  )
+}
+
 // ApprovalStep C1 工具审批卡：服务端阻塞等待用户决策。
 // pending 时显示参数 + 允许/总是允许/拒绝按钮；approved/denied 显示结果。
 function ApprovalStep({ step, onApprove }) {
@@ -399,6 +412,8 @@ function StepItem({ step, onApprove, onPlanReview }) {
       return <WarningStep message={step.message} />
     case 'error':
       return <ErrorStep message={step.message} />
+    case 'compact':
+      return <CompactStep result={step.result} />
     default:
       return null
   }

@@ -313,6 +313,32 @@ func (h *AgentWorkflowHandler) DeleteSessions(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success"})
 }
 
+// Compact C4：手动触发对话级上下文压缩。
+// 请求可指定 conversation_id 与 focus；模型缺省时使用会话绑定的模型/默认模型。
+func (h *AgentWorkflowHandler) Compact(c *gin.Context) {
+	userID, ok := h.getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 2001, "message": "未登录"})
+		return
+	}
+	var req service.AgentCompactRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "参数错误: " + err.Error()})
+		return
+	}
+	if req.ConversationID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "conversation_id 不能为空"})
+		return
+	}
+	ctx := context.WithValue(c.Request.Context(), "user_id", userID)
+	res, err := h.agentService.Compact(ctx, req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 5000, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": res})
+}
+
 // ListSearchProviders 返回当前已配置的可用搜索源列表
 // 前端据此动态渲染搜索源下拉框，未配置 key 的源不展示。
 //

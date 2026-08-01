@@ -68,11 +68,18 @@ type ToolCallingLoop struct {
 	tokenBudget int
 	// logger 调试日志（内联工具调用解析路径诊断）；nil 时静默
 	logger *zap.Logger
+	// compactor C4：对话级上下文压缩器；nil 时不启用自动压缩。
+	compactor *ContextCompactor
 }
 
 // SetLogger 设置调试日志（用于诊断内联工具调用解析路径）。临时排查用，可后续移除。
 func (l *ToolCallingLoop) SetLogger(logger *zap.Logger) {
 	l.logger = logger
+}
+
+// SetCompactor C4：设置对话级上下文压缩器。
+func (l *ToolCallingLoop) SetCompactor(c *ContextCompactor) {
+	l.compactor = c
 }
 
 // NewToolCallingLoop 创建循环控制器
@@ -119,6 +126,12 @@ type AssistantOutput struct {
 	IsFinal          bool
 }
 
+// CompactEvent C4：工具循环内压缩事件，透传到 SSE。
+type CompactEvent struct {
+	Type string                 `json:"type"`
+	Data map[string]interface{} `json:"data"`
+}
+
 // Run 执行 Function Calling 循环（使用创建时绑定的 Registry）
 // onToolCall 在每步工具执行后被调用；onAssistantOutput 在每次模型非流式输出后被调用，
 // 用于将思考过程与中间说明文字实时透传到前端。
@@ -132,10 +145,11 @@ func (l *ToolCallingLoop) Run(
 	onToolCall func(record ToolCallRecord) error,
 	onAssistantOutput func(output AssistantOutput),
 ) (*RunResult, error) {
-	return l.RunWithRegistry(ctx, l.registry, client, model, tools, messages, env, onToolCall, onAssistantOutput)
+	return l.RunWithRegistry(ctx, l.registry, client, model, tools, messages, nil, env, onToolCall, onAssistantOutput, nil)
 }
 
 // RunWithRegistry 执行 Function Calling 循环，使用传入的 Registry（支持动态工具）
+// messageIDs 与 messages 平行，C4 压缩时定位 first_kept_entry_id；onCompactEvent 在压缩开始/结束时触发。
 func (l *ToolCallingLoop) RunWithRegistry(
 	ctx context.Context,
 	registry *ToolRegistry,
@@ -143,11 +157,18 @@ func (l *ToolCallingLoop) RunWithRegistry(
 	model string,
 	tools []map[string]interface{},
 	messages []llm.Message,
+	messageIDs []string,
 	env *ToolEnv,
 	onToolCall func(record ToolCallRecord) error,
 	onAssistantOutput func(output AssistantOutput),
+	onCompactEvent func(event CompactEvent),
 ) (*RunResult, error) {
 	result := &RunResult{Messages: messages, Records: []ToolCallRecord{}}
+
+	// C4：维护与 result.Messages 平行的数据库 ID 数组，用于压缩后定位 first_kept_entry_id。
+	// 循环内新增消息（assistant tool_calls / tool results / 重试反馈）无持久化 ID，用空串占位。
+	msgIDs := make([]string, len(messageIDs))
+	copy(msgIDs, messageIDs)
 
 	// maxSteps 限制的是“实际工具调用次数”而非 LLM 往返轮数，
 	// 避免模型在 tool_choice=required 下出现“只说不做”或重复调用时把预算耗光。
@@ -171,6 +192,38 @@ func (l *ToolCallingLoop) RunWithRegistry(
 			result.Cancelled = true
 			break
 		}
+
+		// C4：自动上下文压缩。在每次调用 LLM 前检查 token 阈值；
+		// 压缩失败不中断循环，回退硬截断后继续使用。
+		if l.compactor != nil && l.compactor.cfg.Enabled && len(result.Messages) > 0 && len(msgIDs) == len(result.Messages) {
+			if onCompactEvent != nil {
+				onCompactEvent(CompactEvent{Type: "compact_start", Data: map[string]interface{}{"reason": "threshold"}})
+			}
+			res, newMessages, newMsgIDs, cErr := l.compactor.CompactDuringLoop(
+				ctx, client, model, env.ConversationID, env.UserID, env.SessionID, result.Messages, msgIDs, "",
+			)
+			if cErr == nil && res != nil {
+				result.Messages = newMessages
+				msgIDs = newMsgIDs
+				if onCompactEvent != nil {
+					onCompactEvent(CompactEvent{Type: "compact_end", Data: map[string]interface{}{
+						"before_tokens": res.BeforeTokens,
+						"after_tokens":  res.AfterTokens,
+						"reason":        res.Reason,
+					}})
+				}
+			} else if cErr != nil && onCompactEvent != nil {
+				// 压缩失败：下发 compact_error 或 compact_end（无节省）让前端收起 banner
+				onCompactEvent(CompactEvent{Type: "compact_end", Data: map[string]interface{}{
+					"reason": "error",
+					"error":  cErr.Error(),
+				}})
+			} else if onCompactEvent != nil {
+				// 未触发阈值
+				onCompactEvent(CompactEvent{Type: "compact_end", Data: map[string]interface{}{"reason": "skipped"}})
+			}
+		}
+
 		req := llm.ChatRequest{
 			Model:    model,
 			Messages: result.Messages,
@@ -257,6 +310,7 @@ func (l *ToolCallingLoop) RunWithRegistry(
 							llm.Message{Role: "assistant", Content: resp.Delta},
 							llm.Message{Role: "user", Content: bracketMalformedPrompt},
 						)
+						msgIDs = append(msgIDs, "", "")
 						continue
 					}
 					resp.Delta = resp.Delta + "\n\n（系统提示：检测到工具调用使用了不支持的文本标签格式，已超过重试上限，请改用结构化工具调用。）"
@@ -273,6 +327,7 @@ func (l *ToolCallingLoop) RunWithRegistry(
 							llm.Message{Role: "assistant", Content: resp.Delta},
 							llm.Message{Role: "user", Content: bareJSONPrompt},
 						)
+						msgIDs = append(msgIDs, "", "")
 						continue
 					}
 					resp.Delta = resp.Delta + "\n\n（系统提示：检测到工具调用使用了裸 JSON 格式，已超过重试上限，请改用结构化工具调用或内联标记格式。）"
@@ -301,6 +356,7 @@ func (l *ToolCallingLoop) RunWithRegistry(
 			Content:   resp.Delta,
 			ToolCalls: resp.ToolCalls,
 		})
+		msgIDs = append(msgIDs, "")
 
 		// 先检测本轮 tool_calls 是否构成连续同工具同参数循环
 		loopDetected := false
@@ -352,6 +408,7 @@ func (l *ToolCallingLoop) RunWithRegistry(
 					ToolCallID: tc.ID,
 					Content:    list,
 				})
+				msgIDs = append(msgIDs, "")
 				toolCallCount++
 				continue
 			}
@@ -417,6 +474,7 @@ func (l *ToolCallingLoop) RunWithRegistry(
 				ToolCallID: tc.ID,
 				Content:    compactToolResult(record.Output, record.Error),
 			})
+			msgIDs = append(msgIDs, "")
 			toolCallCount++
 
 		}

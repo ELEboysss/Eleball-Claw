@@ -7236,6 +7236,14 @@ func main() {
 
 	// Agent 工作流
 	mux.HandleFunc("/v1/agent/execute", cors(jwtAuth(e2eAgentExecuteHandler)))
+	// C4：e2e 压缩端点 no-op（保持 API 契约一致）
+	mux.HandleFunc("/v1/agent/compact", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			respondError(w, 1001, "方法不支持")
+			return
+		}
+		respondSuccess(w, map[string]interface{}{"ok": true})
+	})))
 	// C1：工具审批决策（e2e 不装配 Approver，审批闸跳过；端点保留以维持 API 契约一致，no-op 返回成功）
 	mux.HandleFunc("/v1/agent/approve", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

@@ -12,6 +12,9 @@ export function useAgent() {
   const [toolSummary, setToolSummary] = useState('')
   const [error, setError] = useState('')
   const [warning, setWarning] = useState('')
+  // C4：自动压缩状态与结果（供 Chat 页 banner 展示）
+  const [isCompacting, setIsCompacting] = useState(false)
+  const [compactResult, setCompactResult] = useState(null)
   // 按真实时间顺序维护的 Agent 执行步骤，用于线性展示 thinking / tool / answer
   const [steps, setSteps] = useState([])
   const abortRef = useRef(false)
@@ -29,6 +32,8 @@ export function useAgent() {
     setToolSummary('')
     setError('')
     setWarning('')
+    setIsCompacting(false)
+    setCompactResult(null)
     setSteps([])
     abortRef.current = false
     abortControllerRef.current = null
@@ -335,6 +340,43 @@ export function useAgent() {
               setSteps(prev => [...prev, { type: 'cancelled' }])
               break
             }
+            case 'compact_start': {
+              // C4：服务端开始自动压缩上下文
+              setIsCompacting(true)
+              const startStep = { type: 'compact', status: 'running', result: null }
+              finalSteps = [...finalSteps, startStep]
+              setSteps(prev => [...prev, startStep])
+              break
+            }
+            case 'compact_end': {
+              // C4：压缩结束（reason=skipped 时无 data；有 before_tokens/after_tokens 时展示节省）
+              setIsCompacting(false)
+              const data = event.data || {}
+              let result = null
+              if (data.before_tokens !== undefined && data.after_tokens !== undefined) {
+                result = {
+                  beforeTokens: data.before_tokens,
+                  afterTokens: data.after_tokens,
+                  reason: data.reason || 'auto',
+                  error: data.error || ''
+                }
+                setCompactResult(result)
+              } else if (data.reason === 'skipped' || data.reason === 'error') {
+                setCompactResult(null)
+              }
+              const matchKey = (s) => s.type === 'compact' && s.status === 'running'
+              const endStep = { type: 'compact', status: 'done', result }
+              const cIdx = finalSteps.findIndex(matchKey)
+              if (cIdx >= 0) {
+                finalSteps = finalSteps.map((s, idx) => idx === cIdx ? endStep : s)
+              }
+              setSteps(prev => {
+                const idx = prev.findIndex(matchKey)
+                if (idx >= 0) return prev.map((s, i) => i === idx ? endStep : s)
+                return prev
+              })
+              break
+            }
             case 'done':
               setStatus('done')
               if (finalError) {
@@ -412,6 +454,8 @@ export function useAgent() {
     toolSummary,
     error,
     warning,
+    isCompacting,
+    compactResult,
     steps
   }
 }

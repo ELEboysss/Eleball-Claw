@@ -406,6 +406,9 @@ func main() {
 	visualGenerationService := service.NewVisualGenerationService(visualTaskRepo, visualConversationService, billingService, eleAgentModelService, settingService, chatService, visualUploadService, logger)
 	agentWorkflowService := service.NewAgentService(conversationService, agentSessionRepo, userRepo, vipService, billingService, eleAgentModelService, agentSandbox, agentRegistry, agentSchemaBuilder, agentTrigger, agentClientResolver, cfg.Agent.Model, cfg.Agent.MaxSteps, logger)
 	agentWorkflowService.SetMaxRetries(cfg.LLM.MaxRetries)
+	// C4：对话级上下文压缩器（自动压缩阈值由配置控制，手动 /agent/compact 始终可用）
+	agentCompactor := service.NewContextCompactor(chatConversationRepo, cfg.Agent.Compaction, logger)
+	agentWorkflowService.SetCompactor(agentCompactor)
 	// 动态工具加载器：将用户购买的集市 SKU 注入 Agent 工作流
 	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry(), moduleRegistry)
 	agentToolLoader.SetModuleService(moduleService)

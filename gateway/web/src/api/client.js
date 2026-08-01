@@ -308,6 +308,16 @@ export const agentApi = {
       decision,
       feedback: feedback || undefined
     }),
+  // C4：手动触发对话级上下文压缩
+  compact: (conversationId, focus, model, provider, baseUrl, apiKey) =>
+    client.post('/agent/compact', {
+      conversation_id: conversationId,
+      focus: focus || undefined,
+      model: model || undefined,
+      provider: provider || undefined,
+      base_url: baseUrl || undefined,
+      api_key: apiKey || undefined
+    }),
   execute: async (body, onEvent) => {
     const token = getItem('token')
     const response = await fetch(`${API_BASE}/agent/execute`, {

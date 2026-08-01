@@ -354,7 +354,7 @@ func (s *AgentService) executeCallAssistant(ctx context.Context, input map[strin
 
 	subCtx, cancel := context.WithTimeout(ctx, callAssistantTimeout)
 	defer cancel()
-	result, runErr := s.toolLoop.RunWithRegistry(subCtx, subRegistry, subClient, subModel, buildSubToolSchemas(subTools), messages, childEnv,
+	result, runErr := s.toolLoop.RunWithRegistry(subCtx, subRegistry, subClient, subModel, buildSubToolSchemas(subTools), messages, nil, childEnv,
 		// Agent Team P5：子任务进度流式下发，事件带 session_id/parent_session_id/sub 标记，前端据此嵌套分组
 		func(record ToolCallRecord) error {
 			if rt.writer != nil {
@@ -386,6 +386,7 @@ func (s *AgentService) executeCallAssistant(ctx context.Context, input map[strin
 				s.writeEvent(rt.writer, "intermediate_answer", map[string]interface{}{"delta": output.Delta, "session_id": childSession.ID, "sub": true})
 			}
 		},
+		nil,
 	)
 
 	// 子 session 状态收尾（失败仅记日志，不影响错误返回语义）

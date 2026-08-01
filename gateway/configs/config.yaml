@@ -57,6 +57,12 @@ agent:
   model: "gpt-4o-mini"
   # 允许模型进行较复杂的工具链编排；循环调用同工具同参数会被单独检测并终止
   max_steps: 500
+  # C4：对话级上下文压缩配置
+  compaction:
+    enabled: true
+    threshold_tokens: 60000
+    keep_recent_tokens: 20000
+    fallback_model: ""
   # 环境变量 AGENT_API_KEY / AGENT_BASE_URL 可覆盖
   api_key: ""
   base_url: ""

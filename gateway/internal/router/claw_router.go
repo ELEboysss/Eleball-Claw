@@ -141,6 +141,8 @@ func NewClawRouter(
 			// Agent 工作流
 			if cfg.Agent.Enabled {
 				auth.POST("/agent/execute", agentWorkflowHandler.Execute)
+				// C4：手动触发对话级上下文压缩
+				auth.POST("/agent/compact", agentWorkflowHandler.Compact)
 				// C1：工具审批决策（跨 HTTP 请求解锁阻塞的工具循环）
 				auth.POST("/agent/approve", agentWorkflowHandler.Approve)
 				// C3：plan 审批决策（ExitPlanMode 阻塞，接受/拒绝/细化）

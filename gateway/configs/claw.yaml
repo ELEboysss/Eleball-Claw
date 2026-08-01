@@ -55,6 +55,12 @@ agent:
   # AR-03：单次 Agent 执行的 token 预算上限（累计 prompt+completion），超限强制进入最终回答。
   # 0 表示不限制。默认 60000，防止单次失控执行耗尽用户弹丸。
   max_tokens_per_execute: 60000
+  # C4：对话级上下文压缩配置
+  compaction:
+    enabled: true
+    threshold_tokens: 60000
+    keep_recent_tokens: 20000
+    fallback_model: ""
   # BYOK 兜底：未配置用户自有 Key 时使用（本地开发）
   api_key: ""
   base_url: ""

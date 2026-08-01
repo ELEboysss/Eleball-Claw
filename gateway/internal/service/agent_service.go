@@ -56,6 +56,8 @@ type AgentService struct {
 	hookSvc *HookService
 	// C3：plan 文件目录（claw 装配 basePath/plans）。空则 ExitPlanMode 不落 plan 文件，仅传内容。
 	plansDir string
+	// C4：对话级上下文压缩器。nil 时 ToolCallingLoop 不启用自动压缩。
+	compactor *ContextCompactor
 }
 
 // SetUnrestricted 设置是否跳过 VIP 门控（claw 本地不限 Agent 模式）。
@@ -120,6 +122,14 @@ func (s *AgentService) SetHookService(svc *HookService) {
 	s.hookSvc = svc
 }
 
+// SetCompactor C4：装配对话级上下文压缩器。nil 时 ToolCallingLoop 不启用自动压缩。
+func (s *AgentService) SetCompactor(c *ContextCompactor) {
+	s.compactor = c
+	if s.toolLoop != nil {
+		s.toolLoop.SetCompactor(c)
+	}
+}
+
 // SetMaxRetries 设置 Agent 工具循环上游可重试错误的最大尝试次数（对应 llm.max_retries 配置）
 func (s *AgentService) SetMaxRetries(n int) {
 	if s.toolLoop != nil {
@@ -142,21 +152,28 @@ func (s *AgentService) SetMaxCostPerTask(c int64) {
 	}
 }
 
+// AgentHistoryMessage 带数据库 ID 的历史消息，用于 C4 上下文压缩时定位要删除的前缀消息。
+// ID 为空时表示非持久化消息（如本地草稿或旧客户端未上报 ID）。
+type AgentHistoryMessage struct {
+	llm.Message
+	ID string `json:"id,omitempty"`
+}
+
 // AgentExecuteRequest Agent 执行请求
 type AgentExecuteRequest struct {
-	SessionID       string            `json:"session_id"`
-	ConversationID  string            `json:"conversation_id"`
-	Message         string            `json:"message"`
-	Content         string            `json:"content"`
-	Attachments     []AgentAttachment `json:"attachments"`
-	History         []llm.Message     `json:"history"`
-	Model           string            `json:"model"`
-	Provider        string            `json:"provider"`
-	BaseURL         string            `json:"base_url"`
-	APIKey          string            `json:"api_key"`
-	EnableTools     *bool             `json:"enable_tools,omitempty"`
-	EnableWebSearch *bool             `json:"enable_web_search,omitempty"`
-	SearchProvider  *string           `json:"search_provider,omitempty"`
+	SessionID       string               `json:"session_id"`
+	ConversationID  string               `json:"conversation_id"`
+	Message         string               `json:"message"`
+	Content         string               `json:"content"`
+	Attachments     []AgentAttachment    `json:"attachments"`
+	History         []AgentHistoryMessage `json:"history"`
+	Model           string               `json:"model"`
+	Provider        string               `json:"provider"`
+	BaseURL         string               `json:"base_url"`
+	APIKey          string               `json:"api_key"`
+	EnableTools     *bool                `json:"enable_tools,omitempty"`
+	EnableWebSearch *bool                `json:"enable_web_search,omitempty"`
+	SearchProvider  *string              `json:"search_provider,omitempty"`
 	// AssistantID 本次执行应用的助手（非空优先于会话绑定的 assistant_id）
 	AssistantID string `json:"assistant_id"`
 	// AR-06：claw 本地工作目录（用户授权的项目目录）。仅 claw（unrestricted=true）启用；
@@ -165,8 +182,6 @@ type AgentExecuteRequest struct {
 	// PermissionMode C1 权限模式覆盖（default/acceptEdits/plan/auto）。空则用会话持久化的 conv.PermissionMode。
 	PermissionMode *string `json:"permission_mode,omitempty"`
 }
-
-// normalizeRequest 兼容前端可能使用的 content / message 字段
 func (req *AgentExecuteRequest) normalize() {
 	if req.Message == "" && req.Content != "" {
 		req.Message = req.Content
@@ -186,6 +201,61 @@ func (s *AgentService) SetAssistantService(svc *AssistantService) {
 // SetTeamMemoryService 设置组共享记忆服务（Agent Team P2，可选；设置后组内对话执行前注入记忆、执行后异步提取）
 func (s *AgentService) SetTeamMemoryService(svc *TeamMemoryService) {
 	s.teamMemorySvc = svc
+}
+
+// AgentCompactRequest C4：手动压缩请求。
+// 未传 model/provider 时，使用会话持久化的模型配置；仍为空则回落到服务默认模型。
+type AgentCompactRequest struct {
+	ConversationID string `json:"conversation_id"`
+	Focus          string `json:"focus"`
+	Model          string `json:"model"`
+	Provider       string `json:"provider"`
+	BaseURL        string `json:"base_url"`
+	APIKey         string `json:"api_key"`
+}
+
+// Compact C4：手动触发对话级上下文压缩。
+// 校验会话归属后，使用当前会话模型或请求指定模型调用 LLM 生成摘要，并持久化为 role=compaction 消息。
+func (s *AgentService) Compact(ctx context.Context, req AgentCompactRequest) (*CompactionResult, error) {
+	userID, ok := ctx.Value("user_id").(string)
+	if !ok || userID == "" {
+		return nil, fmt.Errorf("未登录")
+	}
+	if s.compactor == nil {
+		return nil, fmt.Errorf("压缩器未初始化")
+	}
+	conv, err := s.conversationSvc.GetOrCreate(ctx, userID, req.ConversationID)
+	if err != nil {
+		return nil, err
+	}
+	if conv.UserID != userID {
+		return nil, fmt.Errorf("无权访问该对话")
+	}
+
+	modelName := req.Model
+	if modelName == "" {
+		modelName = conv.Model
+	}
+	if modelName == "" {
+		modelName = s.model
+	}
+	provider := req.Provider
+	if provider == "" {
+		provider = conv.Provider
+	}
+
+	llmClient, err := s.resolveClient(ctx, AgentExecuteRequest{
+		Provider: provider,
+		Model:    modelName,
+		BaseURL:  req.BaseURL,
+		APIKey:   req.APIKey,
+	}, modelName)
+	if err != nil {
+		return nil, fmt.Errorf("解析 LLM 客户端失败: %w", err)
+	}
+
+	modelName = normalizeAgentModelName(provider, modelName)
+	return s.compactor.CompactConversation(ctx, llmClient, modelName, conv.ID, userID, req.Focus)
 }
 
 // Execute 执行 Agent 工作流
@@ -463,7 +533,7 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	if agentModelName == "" {
 		agentModelName = s.model
 	}
-	messages := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID, resolvedCwd, true, s.supportsVision(req.Provider, agentModelName), permissionMode)
+	messages, msgIDs := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID, resolvedCwd, true, s.supportsVision(req.Provider, agentModelName), permissionMode)
 
 	// 11. Function Calling 循环
 	// AR-03：执行中余额校验节流计数器（每 balanceCheckEvery 步查一次 DB，避免每轮查库）
@@ -539,7 +609,7 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	callRT.billingProvider = billingProvider
 	callRT.billingModel = billingModel
 
-	result, err := s.toolLoop.RunWithRegistry(ctx, registry, llmClient, modelName, availableTools, messages, env,
+	result, err := s.toolLoop.RunWithRegistry(ctx, registry, llmClient, modelName, availableTools, messages, msgIDs, env,
 		func(record ToolCallRecord) error {
 			s.writeEvent(w, "tool_call", map[string]interface{}{
 				"step":      record.Step,
@@ -575,6 +645,10 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 			if !output.IsFinal && output.Delta != "" {
 				s.writeEvent(w, "intermediate_answer", map[string]string{"delta": output.Delta})
 			}
+		},
+		func(event CompactEvent) {
+			// C4：自动压缩生命周期事件（compact_start / compact_end）
+			s.writeEvent(w, event.Type, event.Data)
 		},
 	)
 	if err != nil {
@@ -751,12 +825,14 @@ func (s *AgentService) ensureSessionQuota(ctx context.Context, userID string) er
 	return nil
 }
 
-// buildInitialMessages 构建初始消息列表。
+// buildInitialMessages 构建初始消息列表，同时返回与消息数组平行的数据库 ID 列表。
 // Agent Team P2：teamID 非空且 teamMemorySvc 已装配时，检索组共享记忆并把
 // 「组共享记忆」区块拼入 system 消息内容尾部（不新增消息，避免弱模型角色混乱）；
 // userID/teamID 传空则跳过注入（如工具关闭的普通对话路径）。
-func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID, resolvedCwd string, toolsEnabled bool, supportsVision bool, permissionMode model.PermissionMode) []llm.Message {
+// C4：历史消息中的 role="compaction" 转换为 system 消息，前缀提示模型这是摘要。
+func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID, resolvedCwd string, toolsEnabled bool, supportsVision bool, permissionMode model.PermissionMode) ([]llm.Message, []string) {
 	messages := make([]llm.Message, 0, len(req.History)+2)
+	msgIDs := make([]string, 0, len(req.History)+2)
 	systemContent := "你是一个有用的 AI 助手。\n" +
 		"规则：\n" +
 		"1. 当用户问题涉及实时信息、搜索网络、读取文件、处理图片/OCR 或生成视频时，你必须调用对应工具获取结果，禁止只回复“我要查询/请稍等”而不调用工具。\n" +
@@ -793,8 +869,11 @@ func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecut
 		Role:    "system",
 		Content: systemContent,
 	})
+	msgIDs = append(msgIDs, "")
 	if len(req.History) > 0 {
-		messages = append(messages, req.History...)
+		historyMsgs, historyIDs := historyToLLMMessages(req.History)
+		messages = append(messages, historyMsgs...)
+		msgIDs = append(msgIDs, historyIDs...)
 	}
 
 	content := req.Message
@@ -806,14 +885,37 @@ func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecut
 				parts = append(parts, map[string]interface{}{"type": "text", "text": content})
 			}
 			messages = append(messages, llm.Message{Role: "user", Content: parts})
-			return messages
+			msgIDs = append(msgIDs, "")
+			return messages, msgIDs
 		}
 	}
 	messages = append(messages, llm.Message{
 		Role:    "user",
 		Content: content,
 	})
-	return messages
+	msgIDs = append(msgIDs, "")
+	return messages, msgIDs
+}
+
+// historyToLLMMessages 将前端传入的带 ID 历史消息转换为 llm.Message，返回消息列表与平行的 ID 列表。
+// C4：role="compaction" 的摘要条目转换为 system 提示，避免 LLM 收到非法角色。
+func historyToLLMMessages(history []AgentHistoryMessage) ([]llm.Message, []string) {
+	out := make([]llm.Message, 0, len(history))
+	ids := make([]string, 0, len(history))
+	for _, h := range history {
+		msg := h.Message
+		if msg.Role == "compaction" {
+			msg.Role = "system"
+			content := llm.MessageContentToString(msg.Content)
+			if !strings.Contains(content, "以下为对话历史摘要") {
+				content = "[以下为对话历史摘要，替代了更早的详细消息]\n\n" + content
+			}
+			msg.Content = content
+		}
+		out = append(out, msg)
+		ids = append(ids, h.ID)
+	}
+	return out, ids
 }
 
 // supportsVision 判断当前 provider/model 是否支持图片理解。
@@ -924,7 +1026,7 @@ func (s *AgentService) chatStream(ctx context.Context, req AgentExecuteRequest, 
 	modelName = normalizeAgentModelName(req.Provider, modelName)
 
 	// 工具关闭的普通对话路径不注入组共享记忆（userID/teamID 传空跳过；保持与历史行为一致）
-	messages := s.buildInitialMessages(ctx, req, req.Attachments, "", "", "", false, s.supportsVision(req.Provider, modelName), model.PermissionModeDefault)
+	messages, _ := s.buildInitialMessages(ctx, req, req.Attachments, "", "", "", false, s.supportsVision(req.Provider, modelName), model.PermissionModeDefault)
 	stream, err := llmClient.ChatStream(ctx, llm.ChatRequest{
 		Model:    modelName,
 		Messages: messages,

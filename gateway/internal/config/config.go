@@ -122,6 +122,20 @@ type AgentConfig struct {
 	// EmbeddingModel AR-09：记忆检索 embedding 模型名（EleAgent 模型中心 OpenAI 兼容 /embeddings，
 	// 复用 Agent.APIKey/BaseURL 鉴权）。留空则禁用向量检索，降级 LIKE（claw 本地无 embedding 服务时留空）。
 	EmbeddingModel string `mapstructure:"embedding_model"`
+	// Compaction C4：对话级上下文压缩配置。
+	Compaction CompactionConfig `mapstructure:"compaction"`
+}
+
+// CompactionConfig 对话级上下文压缩配置（C4）。
+type CompactionConfig struct {
+	// Enabled 是否启用自动压缩；手动 /agent/compact 始终可用。
+	Enabled bool `mapstructure:"enabled"`
+	// ThresholdTokens 自动压缩触发阈值；上下文估算 token 超过此值时触发。
+	ThresholdTokens int `mapstructure:"threshold_tokens"`
+	// KeepRecentTokens 保留最近消息的 token 预算（软目标）。
+	KeepRecentTokens int `mapstructure:"keep_recent_tokens"`
+	// FallbackModel 摘要失败时使用的降级模型；空则使用当前 Agent 模型。
+	FallbackModel string `mapstructure:"fallback_model"`
 }
 
 // AgentReachConfig 集市模块客户端配置
@@ -229,6 +243,12 @@ func Load(path string) (*AppConfig, error) {
 	viper.SetDefault("modules.image_tag", "develop")
 	viper.SetDefault("modules.pull_policy", "pull_first")
 
+	// C4：对话级上下文压缩默认值。默认开启，阈值 60k，保留最近 20k，降级模型留空。
+	viper.SetDefault("agent.compaction.enabled", true)
+	viper.SetDefault("agent.compaction.threshold_tokens", 60000)
+	viper.SetDefault("agent.compaction.keep_recent_tokens", 20000)
+	viper.SetDefault("agent.compaction.fallback_model", "")
+
 	// 允许通过环境变量覆盖关键配置，便于 Docker/脚本部署
 	// jwt.secret 绑定 JWT_SECRET：claw 与云端共享 JWT 密钥，部署时注入云端 JWT_SECRET，
 	// 即可让 claw-server 直验云端签发的 JWT（统一账户，无需 introspection）。
@@ -247,6 +267,11 @@ func Load(path string) (*AppConfig, error) {
 	_ = viper.BindEnv("agent.model", "AGENT_MODEL")
 	_ = viper.BindEnv("agent.api_key", "AGENT_API_KEY")
 	_ = viper.BindEnv("agent.base_url", "AGENT_BASE_URL")
+	// C4：上下文压缩配置环境变量绑定
+	_ = viper.BindEnv("agent.compaction.enabled", "AGENT_COMPACTION_ENABLED")
+	_ = viper.BindEnv("agent.compaction.threshold_tokens", "AGENT_COMPACTION_THRESHOLD_TOKENS")
+	_ = viper.BindEnv("agent.compaction.keep_recent_tokens", "AGENT_COMPACTION_KEEP_RECENT_TOKENS")
+	_ = viper.BindEnv("agent.compaction.fallback_model", "AGENT_COMPACTION_FALLBACK_MODEL")
 	_ = viper.BindEnv("agent_reach.module_url", "AGENT_REACH_MODULE_URL")
 	_ = viper.BindEnv("agent_reach.health_check_interval", "AGENT_REACH_HEALTH_CHECK_INTERVAL")
 	_ = viper.BindEnv("agent_reach.probe_interval", "AGENT_REACH_PROBE_INTERVAL")
