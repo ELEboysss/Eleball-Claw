@@ -160,11 +160,14 @@ func NewClawRouter(
 				auth.GET("/agent/sessions", agentWorkflowHandler.ListSessions)
 				auth.DELETE("/agent/sessions", agentWorkflowHandler.DeleteSessions)
 				auth.GET("/agent/sessions/:id", agentWorkflowHandler.GetSession)
+				auth.GET("/agent/sessions/:id/state", agentWorkflowHandler.GetSessionState)
 				auth.GET("/agent/sessions/:id/audit", agentWorkflowHandler.GetSessionAudit)
 				auth.POST("/agent/sessions/:id/steer", agentWorkflowHandler.Steer)
 				auth.POST("/agent/sessions/:id/followup", agentWorkflowHandler.Followup)
 				auth.POST("/agent/sessions/:id/fork", agentWorkflowHandler.ForkSession)
 				auth.DELETE("/agent/sessions/:id", agentWorkflowHandler.DeleteSession)
+				// C10：运行中 Session 集合实时 SSE 推送
+				auth.GET("/agent/running/events", agentWorkflowHandler.RunningSessionsEvents)
 			}
 
 			// 秘技集市（本地 + 云端拉取合并展示，P2 实现登录态拉云端）

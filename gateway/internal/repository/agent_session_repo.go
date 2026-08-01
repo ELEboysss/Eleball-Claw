@@ -95,6 +95,15 @@ func (r *AgentSessionRepo) ListByConversation(userID, conversationID string) ([]
 	return items, err
 }
 
+// ListRunningByUser 查询指定用户所有运行中（status='running'）的 Session。
+func (r *AgentSessionRepo) ListRunningByUser(userID string) ([]model.AgentSession, error) {
+	var items []model.AgentSession
+	err := r.db.Where("user_id = ? AND status = ?", userID, "running").
+		Order("created_at DESC").
+		Find(&items).Error
+	return items, err
+}
+
 // DeleteByIDs 批量删除 Session
 func (r *AgentSessionRepo) DeleteByIDs(ids []string) error {
 	if len(ids) == 0 {

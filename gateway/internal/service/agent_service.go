@@ -62,6 +62,8 @@ type AgentService struct {
 	steerQueues *SteerQueueManager
 	// C8：项目记忆文件加载服务（CLAUDE.md/AGENTS.md 自动注入）。nil 时不加载。
 	contextFileSvc *ContextFileService
+	// C10：运行中 Session 跟踪器，供前端实时感知会话运行状态。
+	runningSessions *RunningSessionTracker
 }
 
 // SetUnrestricted 设置是否跳过 VIP 门控（claw 本地不限 Agent 模式）。
@@ -107,6 +109,7 @@ func NewAgentService(
 		logger:               logger,
 		approvals:            newApprovalRegistry(),
 		steerQueues:          NewSteerQueueManager(),
+		runningSessions:      newRunningSessionTracker(),
 	}
 	svc.toolLoop.SetLogger(logger)
 	return svc
@@ -153,6 +156,21 @@ func (s *AgentService) PushFollowup(sessionID string, text string) {
 // GetSteerQueue C6：获取指定 session 的 steer/follow-up 内存队列（供 handler 校验存在性）。
 func (s *AgentService) GetSteerQueue(sessionID string) *SessionSteerQueue {
 	return s.steerQueues.Get(sessionID)
+}
+
+// GetRunningSessionIDs C10：返回当前用户所有运行中 Session ID。
+func (s *AgentService) GetRunningSessionIDs(userID string) []string {
+	return s.runningSessions.GetRunningIDs(userID)
+}
+
+// SubscribeRunningSessions C10：订阅当前用户运行中 Session 集合的变化通知。
+func (s *AgentService) SubscribeRunningSessions(userID string) chan struct{} {
+	return s.runningSessions.Subscribe(userID)
+}
+
+// UnsubscribeRunningSessions C10：取消运行中 Session 集合的变化订阅。
+func (s *AgentService) UnsubscribeRunningSessions(userID string, ch chan struct{}) {
+	s.runningSessions.Unsubscribe(userID, ch)
 }
 
 // SetMaxRetries 设置 Agent 工具循环上游可重试错误的最大尝试次数（对应 llm.max_retries 配置）
@@ -844,6 +862,8 @@ func (s *AgentService) createSessionWithParent(ctx context.Context, userID, conv
 	if err := s.sessionRepo.Create(session); err != nil {
 		return nil, err
 	}
+	// C10：新 Session 创建后立即标记为运行中，供前端实时轮询/SSE 感知。
+	s.runningSessions.MarkRunning(userID, session.ID)
 	return session, nil
 }
 
@@ -1451,6 +1471,8 @@ func (s *AgentService) updateSessionStatus(sessionID, status, toolChainJSON stri
 	session.UpdatedAt = now
 	if status == "succeeded" || status == "failed" {
 		session.CompletedAt = &now
+		// C10：运行中 Session 结束时从跟踪器移除，触发 SSE 广播。
+		s.runningSessions.MarkDone(session.UserID, sessionID)
 	}
 	return s.sessionRepo.Update(session)
 }

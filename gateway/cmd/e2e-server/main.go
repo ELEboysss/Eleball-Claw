@@ -435,6 +435,13 @@ var (
 	// 视觉创作会话内存存储
 	visualConversations      = make(map[string]*E2EVisualConversation) // convID -> conversation
 	visualConversationsByUser = make(map[string][]string)              // userID -> []convID
+
+	// C10：运行中 Session 跟踪（userID -> set(sessionID)）
+	e2eRunningSessionsMu sync.RWMutex
+	e2eRunningSessions   = make(map[string]map[string]struct{})
+	// C10：运行中 Session 变化订阅（userID -> set(channel)）
+	e2eRunningSubsMu sync.RWMutex
+	e2eRunningSubs   = make(map[string]map[interface{}]struct{})
 )
 
 // E2EVisualTask E2E 视觉生成任务内存模型
@@ -3283,6 +3290,10 @@ func e2eAgentExecuteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID := newUUID()
+	uid := userIDFrom(r)
+	// C10：Agent Session 启动时标记为运行中
+	e2eMarkRunning(uid, sessionID)
+	defer e2eMarkDone(uid, sessionID)
 	// Agent Team P3：云端 agent_sessions 已加 parent_session_id（CallAssistant 子 session provenance）；
 	// e2e 不持久化 agent_sessions（/v1/agent/sessions 返回空列表），CallAssistant 由真实 LLM 行为驱动，
 	// e2e 不模拟委派闭环，故此处无字段需镜像。
@@ -3309,7 +3320,6 @@ func e2eAgentExecuteHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	// 模拟已购买的 Agent-Reach 动态工具调用
-	uid := userIDFrom(r)
 	mu.RLock()
 	var dynamicTools []struct {
 		AgentID string
@@ -3381,6 +3391,178 @@ func e2eAgentExecuteHandler(w http.ResponseWriter, r *http.Request) {
 	writeEvent("reasoning", map[string]string{"delta": "这是 E2E 模拟思考过程"})
 	writeEvent("final_answer", map[string]string{"delta": "这是 Agent 工作流回答：" + req.Message})
 	writeEvent("done", map[string]interface{}{"session_id": sessionID})
+}
+
+// ============================================================================
+//  C10：运行中 Session 跟踪辅助函数
+// ============================================================================
+
+func e2eMarkRunning(userID, sessionID string) {
+	if userID == "" || sessionID == "" {
+		return
+	}
+	e2eRunningSessionsMu.Lock()
+	defer e2eRunningSessionsMu.Unlock()
+	if e2eRunningSessions[userID] == nil {
+		e2eRunningSessions[userID] = make(map[string]struct{})
+	}
+	e2eRunningSessions[userID][sessionID] = struct{}{}
+	e2eBroadcastRunningLocked(userID)
+}
+
+func e2eMarkDone(userID, sessionID string) {
+	if userID == "" || sessionID == "" {
+		return
+	}
+	e2eRunningSessionsMu.Lock()
+	defer e2eRunningSessionsMu.Unlock()
+	if e2eRunningSessions[userID] != nil {
+		delete(e2eRunningSessions[userID], sessionID)
+		if len(e2eRunningSessions[userID]) == 0 {
+			delete(e2eRunningSessions, userID)
+		}
+	}
+	e2eBroadcastRunningLocked(userID)
+}
+
+func e2eGetRunningIDs(userID string) []string {
+	e2eRunningSessionsMu.RLock()
+	defer e2eRunningSessionsMu.RUnlock()
+	set := e2eRunningSessions[userID]
+	if len(set) == 0 {
+		return []string{}
+	}
+	ids := make([]string, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func e2eSubscribeRunning(userID string) <-chan struct{} {
+	if userID == "" {
+		return nil
+	}
+	ch := make(chan struct{})
+	e2eRunningSubsMu.Lock()
+	defer e2eRunningSubsMu.Unlock()
+	if e2eRunningSubs[userID] == nil {
+		e2eRunningSubs[userID] = make(map[interface{}]struct{})
+	}
+	e2eRunningSubs[userID][ch] = struct{}{}
+	return ch
+}
+
+func e2eUnsubscribeRunning(userID string, ch <-chan struct{}) {
+	if userID == "" || ch == nil {
+		return
+	}
+	e2eRunningSubsMu.Lock()
+	defer e2eRunningSubsMu.Unlock()
+	if e2eRunningSubs[userID] != nil {
+		delete(e2eRunningSubs[userID], ch)
+		if len(e2eRunningSubs[userID]) == 0 {
+			delete(e2eRunningSubs, userID)
+		}
+	}
+}
+
+func e2eBroadcastRunningLocked(userID string) {
+	e2eRunningSubsMu.Lock()
+	defer e2eRunningSubsMu.Unlock()
+	subs := e2eRunningSubs[userID]
+	if len(subs) == 0 {
+		return
+	}
+	for key := range subs {
+		if ch, ok := key.(chan struct{}); ok {
+			close(ch)
+		}
+	}
+	delete(e2eRunningSubs, userID)
+}
+
+// e2eRunningSessionsEventsHandler C10：SSE 推送当前用户运行中 Session 集合。
+func e2eRunningSessionsEventsHandler(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return
+	}
+
+	writeEvent := func(event string, data interface{}) bool {
+		b, _ := json.Marshal(data)
+		_, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(b))
+		if err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	writeHeartbeat := func() bool {
+		_, err := fmt.Fprint(w, ":\n\n")
+		if err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	sendSnapshot := func() {
+		writeEvent("running", map[string]interface{}{
+			"type":                "running",
+			"running_session_ids": e2eGetRunningIDs(uid),
+		})
+	}
+
+	sub := e2eSubscribeRunning(uid)
+	if sub == nil {
+		sendSnapshot()
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				if !writeHeartbeat() {
+					return
+				}
+			}
+		}
+	}
+
+	sendSnapshot()
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	defer e2eUnsubscribeRunning(uid, sub)
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-sub:
+			// 先订阅新的 channel 再释放旧的，避免丢失中间状态变更
+			newSub := e2eSubscribeRunning(uid)
+			e2eUnsubscribeRunning(uid, sub)
+			sub = newSub
+			if sub == nil {
+				return
+			}
+			sendSnapshot()
+		case <-ticker.C:
+			if !writeHeartbeat() {
+				return
+			}
+		}
+	}
 }
 
 // ============================================================================
@@ -7309,17 +7491,39 @@ func main() {
 	})))
 	mux.HandleFunc("/v1/agent/sessions/", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, "/v1/agent/sessions/")
-		// rest 形如 "{id}" / "{id}/audit" / "{id}/fork"
+		// rest 形如 "{id}" / "{id}/state" / "{id}/audit" / "{id}/fork"
 		parts := strings.SplitN(rest, "/", 2)
+		id := parts[0]
 		if len(parts) == 2 && parts[1] == "fork" && r.Method == http.MethodPost {
 			// AR-12：e2e 不持久化 agent_sessions，返回桩 Session 保证 fork 契约兼容
 			respondSuccess(w, map[string]interface{}{
-				"id":                     "e2e-fork-" + parts[0],
-				"conversation_id":        "e2e-fork-conv-" + parts[0],
+				"id":                     "e2e-fork-" + id,
+				"conversation_id":        "e2e-fork-conv-" + id,
 				"parent_entry_id":        "e2e-entry",
-				"forked_from_session_id": parts[0],
+				"forked_from_session_id": id,
 				"title":                  "E2E Fork",
 				"status":                 "succeeded",
+			})
+			return
+		}
+		if len(parts) == 2 && parts[1] == "state" && r.Method == http.MethodGet {
+			// C10：查询运行状态；e2e 仅依据内存运行集合判断
+			uid := userIDFrom(r)
+			running := false
+			e2eRunningSessionsMu.RLock()
+			if set := e2eRunningSessions[uid]; set != nil {
+				_, running = set[id]
+			}
+			e2eRunningSessionsMu.RUnlock()
+			respondSuccess(w, map[string]interface{}{
+				"running":           running,
+				"is_streaming":      running,
+				"is_prompt_running": running,
+				"is_bash_running":   false,
+				"queued_messages": map[string]interface{}{
+					"steering": []interface{}{},
+					"followUp": []interface{}{},
+				},
 			})
 			return
 		}
@@ -7332,6 +7536,8 @@ func main() {
 			respondError(w, 1001, "方法不支持")
 		}
 	})))
+	// C10：运行中 Session 集合 SSE 推送
+	mux.HandleFunc("/v1/agent/running/events", cors(jwtAuth(e2eRunningSessionsEventsHandler)))
 	mux.HandleFunc("/v1/agent/resources/", cors(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}))

@@ -2,10 +2,13 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/service"
@@ -550,4 +553,129 @@ func (h *AgentWorkflowHandler) Memory(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": gin.H{"files": files}})
+}
+
+// GetSessionState C10：查询指定 Agent Session 的运行时状态（是否运行中、队列消息等）。
+func (h *AgentWorkflowHandler) GetSessionState(c *gin.Context) {
+	userID, ok := h.getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 2001, "message": "未登录"})
+		return
+	}
+
+	id := c.Param("id")
+	session, err := h.agentService.GetSession(c.Request.Context(), id, userID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": 3001, "message": "会话不存在或无权访问"})
+		return
+	}
+
+	running := session.Status == "running"
+	steering, followUp := []service.SteerMessage{}, []service.FollowupMessage{}
+	if q := h.agentService.GetSteerQueue(id); q != nil {
+		steering, followUp = q.Snapshot()
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "success",
+		"data": gin.H{
+			"running":           running,
+			"is_streaming":      running,
+			"is_prompt_running": running,
+			"is_bash_running":   false,
+			"queued_messages": gin.H{
+				"steering": steering,
+				"followUp": followUp,
+			},
+		},
+	})
+}
+
+// RunningSessionsEvents C10：SSE 流式推送当前用户运行中 Session 集合的变化。
+// 客户端应先订阅此接口，再读取初始快照；每次状态变化时收到 type=running 事件，
+// 30 秒一次心跳（: \n\n）。
+func (h *AgentWorkflowHandler) RunningSessionsEvents(c *gin.Context) {
+	userID, ok := h.getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 2001, "message": "未登录"})
+		return
+	}
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Status(http.StatusOK)
+
+	writeEvent := func(event string, data interface{}) bool {
+		b, _ := json.Marshal(data)
+		_, err := fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", event, string(b))
+		if err != nil {
+			return false
+		}
+		c.Writer.Flush()
+		return true
+	}
+
+	writeHeartbeat := func() bool {
+		_, err := fmt.Fprint(c.Writer, ":\n\n")
+		if err != nil {
+			return false
+		}
+		c.Writer.Flush()
+		return true
+	}
+
+	sendSnapshot := func() {
+		ids := h.agentService.GetRunningSessionIDs(userID)
+		writeEvent("running", map[string]interface{}{
+			"type":                "running",
+			"running_session_ids": ids,
+		})
+	}
+
+	sub := h.agentService.SubscribeRunningSessions(userID)
+	if sub == nil {
+		// 无订阅能力时只发送一次当前快照后保持心跳。
+		sendSnapshot()
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-c.Request.Context().Done():
+				return
+			case <-ticker.C:
+				if !writeHeartbeat() {
+					return
+				}
+			}
+		}
+	}
+
+	// 发送初始快照
+	sendSnapshot()
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	defer h.agentService.UnsubscribeRunningSessions(userID, sub)
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case <-sub:
+			// 收到变化信号，先订阅新的 channel 再释放旧的，避免丢失中间状态变更。
+			newSub := h.agentService.SubscribeRunningSessions(userID)
+			h.agentService.UnsubscribeRunningSessions(userID, sub)
+			sub = newSub
+			if sub == nil {
+				return
+			}
+			sendSnapshot()
+		case <-ticker.C:
+			if !writeHeartbeat() {
+				return
+			}
+		}
+	}
 }
