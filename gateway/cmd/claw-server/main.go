@@ -356,6 +356,13 @@ func main() {
 	// C1：装配权限决策引擎（always-allow 规则持久化到 {basePath}/permissions.json）
 	permissionSvc := service.NewPermissionService(filepath.Join(cfg.Agent.BasePath, "permissions.json"))
 	agentWorkflowService.SetPermissionService(permissionSvc)
+	// C2：装配生命周期钩子服务（hooks.json 与 claw.yaml 同目录，热重载；不存在则空配置）
+	hookPath := filepath.Join(filepath.Dir(configPath), "hooks.json")
+	hookSvc, _ := service.NewHookService(hookPath, logger)
+	hookLLMClient := llm.NewOpenAIClient(cfg.Agent.APIKey, cfg.Agent.BaseURL, cfg.LLM.Timeout)
+	hookLLMClient.SetLogger(logger)
+	hookSvc.SetLLMClient(hookLLMClient)
+	agentWorkflowService.SetHookService(hookSvc)
 	// C3：装配 plan 文件目录（ExitPlanMode 落盘 {basePath}/plans/{slug}.md）
 	agentWorkflowService.SetPlansDir(filepath.Join(cfg.Agent.BasePath, "plans"))
 	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry(), moduleRegistry)

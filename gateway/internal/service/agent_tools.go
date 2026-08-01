@@ -52,6 +52,8 @@ type ToolEnv struct {
 	PermissionMode model.PermissionMode
 	PermissionSvc  *PermissionService
 	Approver       Approver
+	// C2 生命周期钩子：PreToolUse/PostToolUse/Stop/PreCompact 可编程层。nil 时跳过。
+	HookSvc *HookService
 	// C3 plan 模式：当前工具调用 ID（循环每轮注入，供 ExitPlanMode 工具作为审批 key）
 	CurrentToolCallID string
 	// C3 plan 模式：plan 文件目录（claw 装配 basePath/plans），空则不落 plan 文件

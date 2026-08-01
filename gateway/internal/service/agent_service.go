@@ -52,6 +52,8 @@ type AgentService struct {
 	approvals *approvalRegistry
 	// C1：权限决策引擎（规则解析 + always-allow 持久化）。nil 时审批闸跳过规则直接 ask/allow。
 	permissionSvc *PermissionService
+	// C2：生命周期钩子服务（PreToolUse/PostToolUse/Stop/PreCompact）。nil 时跳过钩子。
+	hookSvc *HookService
 	// C3：plan 文件目录（claw 装配 basePath/plans）。空则 ExitPlanMode 不落 plan 文件，仅传内容。
 	plansDir string
 }
@@ -111,6 +113,11 @@ func (s *AgentService) SetPermissionService(svc *PermissionService) {
 // SetPlansDir C3：设置 plan 文件目录（claw 装配 basePath/plans）。空则 ExitPlanMode 不落盘。
 func (s *AgentService) SetPlansDir(dir string) {
 	s.plansDir = dir
+}
+
+// SetHookService 装配生命周期钩子服务（C2）。nil 时审批闸跳过钩子。
+func (s *AgentService) SetHookService(svc *HookService) {
+	s.hookSvc = svc
 }
 
 // SetMaxRetries 设置 Agent 工具循环上游可重试错误的最大尝试次数（对应 llm.max_retries 配置）
@@ -480,6 +487,8 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		PermissionMode: permissionMode,
 		PermissionSvc:  s.permissionSvc,
 		Approver:       approver,
+		// C2 生命周期钩子
+		HookSvc: s.hookSvc,
 		// C3 plan 模式：plan 文件目录（claw 装配；云端空，ExitPlanMode 仅传内容）
 		PlansDir: s.plansDir,
 		// Agent Team P3：委派计数器（每次 execute 独立，上限 5）+ 子调用用量累计钩子
@@ -571,6 +580,13 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	if err != nil {
 		execErr = err
 		s.writeEvent(w, "error", map[string]string{"message": err.Error()})
+		s.writeEvent(w, "done", nil)
+		return nil
+	}
+
+	// C2：Stop 生命周期钩子（回合结束）。deny 可拦截继续迭代；非阻断错误忽略。
+	if stopOutcome, _ := s.runStopHook(ctx, env, result); stopOutcome.Decision == model.PermissionDecisionDeny {
+		s.writeEvent(w, "error", map[string]string{"message": "Stop hook 拦截了本次执行"})
 		s.writeEvent(w, "done", nil)
 		return nil
 	}
@@ -1346,4 +1362,27 @@ func (s *AgentService) GetResource(ctx context.Context, resourceID string) (data
 		return nil, "", "", err
 	}
 	return data, output.MimeType, output.FileName, nil
+}
+
+// runStopHook 执行 Stop 生命周期钩子（C2）：回合结束时触发，可拦截继续迭代。
+func (s *AgentService) runStopHook(ctx context.Context, env *ToolEnv, result *RunResult) (HookOutcome, error) {
+	if env == nil || env.HookSvc == nil || !env.HookSvc.HasEvent(model.HookEventStop) {
+		return HookOutcome{}, nil
+	}
+	input := model.HookInput{
+		SessionID:      env.SessionID,
+		ConversationID: env.ConversationID,
+		ToolName:       "stop",
+		HookEventName:  string(model.HookEventStop),
+		ToolResult: map[string]interface{}{
+			"record_count":     len(result.Records),
+			"loop_detected":    result.LoopDetected,
+			"reach_max_steps":  result.ReachMaxSteps,
+			"reach_token_budget": result.ReachTokenBudget,
+			"cancelled":        result.Cancelled,
+			"budget_exceeded":  result.BudgetExceeded,
+			"reach_cost_budget": result.ReachCostBudget,
+		},
+	}
+	return env.HookSvc.Dispatch(ctx, model.HookEventStop, input)
 }

@@ -395,6 +395,8 @@ func (l *ToolCallingLoop) RunWithRegistry(
 							}
 						}
 					}
+					// C2：PostToolUse 生命周期钩子（审计/补充输出）。非阻断，失败仅记录。
+					runPostToolUseHooks(ctx, env, resolvedName, input, &record)
 				}
 			}
 
@@ -546,25 +548,30 @@ func toolResultToString(output map[string]interface{}, errStr string) string {
 	return string(b)
 }
 
-// requestToolApproval C1 审批闸：先查 PermissionService 决策（allow/deny/ask），
-// ask 时经 env.Approver 阻塞请求用户审批（发 SSE approval_request + 等待 /agent/approve 投递）。
+// requestToolApproval C1/C2 审批闸：先跑 PreToolUse hook（可改 input/切模式/返回决策），
+// 再查 PermissionService 决策，最后 ask 时经 env.Approver 阻塞请求用户审批。
 // 返回 true=放行执行，false=拒绝（record.Error 已填，调用方跳过 tool.Func）。
-// env 或 env.Approver 为 nil（云端）时直接放行，行为同现状。
+// env 为 nil 时直接放行；env.Approver 为 nil 时无法交互 ask，按 allow 处理（兼容云端）。
 func requestToolApproval(ctx context.Context, env *ToolEnv, tool *Tool, toolName string, input map[string]interface{}, toolCallID string, record *ToolCallRecord) bool {
-	if env == nil || env.Approver == nil {
-		return true // 云端无审批器：放行
+	if env == nil {
+		return true
 	}
-	var decision model.PermissionDecision
+
+	// C2：PreToolUse hook 作为可编程权限扩展层最先执行。
+	hookDecision := runPreToolUseHooks(ctx, env, toolName, input, record.Step)
+
+	var c1Decision model.PermissionDecision
 	if env.PermissionSvc != nil {
-		decision = env.PermissionSvc.Decide(env.PermissionMode, tool, input)
+		c1Decision = env.PermissionSvc.Decide(env.PermissionMode, tool, input)
 	} else {
-		// 无决策引擎：只读放行，其余 ask
 		if tool.ReadOnly {
-			decision = model.PermissionDecisionAllow
+			c1Decision = model.PermissionDecisionAllow
 		} else {
-			decision = model.PermissionDecisionAsk
+			c1Decision = model.PermissionDecisionAsk
 		}
 	}
+	decision := combinePermissionDecisions(hookDecision, c1Decision)
+
 	switch decision {
 	case model.PermissionDecisionAllow:
 		return true
@@ -572,6 +579,10 @@ func requestToolApproval(ctx context.Context, env *ToolEnv, tool *Tool, toolName
 		record.Error = "权限拒绝：当前模式（" + string(env.PermissionMode) + "）不允许执行此工具"
 		return false
 	default: // ask
+		if env.Approver == nil {
+			// 云端无审批器：无法交互，降级为放行（同 C1 既有行为）
+			return true
+		}
 		req := ApprovalRequest{
 			SessionID:     env.SessionID,
 			ToolCallID:    toolCallID,
@@ -600,4 +611,76 @@ func requestToolApproval(ctx context.Context, env *ToolEnv, tool *Tool, toolName
 		}
 		return true
 	}
+}
+
+// runPreToolUseHooks 执行 PreToolUse 钩子，应用 updatedInput/setMode，返回聚合决策（空=无影响）。
+func runPreToolUseHooks(ctx context.Context, env *ToolEnv, toolName string, input map[string]interface{}, step int) model.PermissionDecision {
+	if env == nil || env.HookSvc == nil || !env.HookSvc.HasEvent(model.HookEventPreToolUse) {
+		return ""
+	}
+	hookInput := model.HookInput{
+		SessionID:      env.SessionID,
+		ConversationID: env.ConversationID,
+		ToolName:       toolName,
+		ToolInput:      input,
+		Cwd:            env.Cwd,
+		PermissionMode: string(env.PermissionMode),
+		HookEventName:  string(model.HookEventPreToolUse),
+		Step:           step,
+	}
+	outcome, err := env.HookSvc.Dispatch(ctx, model.HookEventPreToolUse, hookInput)
+	if err != nil {
+		// 分发器自身错误不阻断工具（保守降级）
+		return ""
+	}
+	if len(outcome.UpdatedInput) > 0 {
+		for k := range input {
+			delete(input, k)
+		}
+		for k, v := range outcome.UpdatedInput {
+			input[k] = v
+		}
+	}
+	if outcome.SetMode != "" {
+		env.PermissionMode = model.NormalizePermissionMode(outcome.SetMode)
+	}
+	return outcome.Decision
+}
+
+// combinePermissionDecisions 合并 hook 与 C1 决策。hook 是 admin 配置的可编程层，
+// 其 ask/allow 可覆盖 C1 默认决策；但任何一方的 deny 都优先。
+func combinePermissionDecisions(hook, c1 model.PermissionDecision) model.PermissionDecision {
+	if hook == model.PermissionDecisionDeny || c1 == model.PermissionDecisionDeny {
+		return model.PermissionDecisionDeny
+	}
+	if hook == model.PermissionDecisionAsk || hook == model.PermissionDecisionAllow {
+		return hook
+	}
+	if c1 == model.PermissionDecisionAsk || c1 == model.PermissionDecisionAllow {
+		return c1
+	}
+	return model.PermissionDecisionAsk
+}
+
+// runPostToolUseHooks 执行 PostToolUse 钩子（C2）：传入工具输入、结果、错误，供审计/补充输出。
+// 当前仅触发，不消费 outcome（避免在工具循环内引入复杂的状态重入）。
+func runPostToolUseHooks(ctx context.Context, env *ToolEnv, toolName string, input map[string]interface{}, record *ToolCallRecord) {
+	if env == nil || env.HookSvc == nil || !env.HookSvc.HasEvent(model.HookEventPostToolUse) {
+		return
+	}
+	hookInput := model.HookInput{
+		SessionID:      env.SessionID,
+		ConversationID: env.ConversationID,
+		ToolName:       toolName,
+		ToolInput:      input,
+		HookEventName:  string(model.HookEventPostToolUse),
+		Step:           record.Step,
+	}
+	if record.Error != "" {
+		hookInput.ToolError = record.Error
+	} else if record.Output != nil {
+		hookInput.ToolResult = record.Output
+	}
+	// 忽略 outcome 与错误：PostToolUse 为非阻断审计层，失败不应影响主循环。
+	_, _ = env.HookSvc.Dispatch(ctx, model.HookEventPostToolUse, hookInput)
 }
