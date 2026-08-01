@@ -321,6 +321,56 @@ func (h *AgentWorkflowHandler) DeleteSessions(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success"})
 }
 
+// Steer C6：向运行中的 Agent Session 注入一条 steer 消息。
+// steer 在当前工具调用完成后、下一轮 LLM 调用前作为 user message 注入。
+func (h *AgentWorkflowHandler) Steer(c *gin.Context) {
+	userID, ok := h.getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 2001, "message": "未登录"})
+		return
+	}
+	id := c.Param("id")
+	var req struct {
+		Text string `json:"text"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Text) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "text 不能为空"})
+		return
+	}
+	// 所有权校验：会话必须属于当前用户
+	if _, err := h.agentService.GetSession(c.Request.Context(), id, userID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": 3001, "message": "会话不存在或无权访问"})
+		return
+	}
+	h.agentService.PushSteer(id, strings.TrimSpace(req.Text))
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success"})
+}
+
+// Followup C6：向 Agent Session 排队一条 follow-up 消息。
+// 当前 Agent 回合结束后自动作为新用户输入继续执行；Agent 已结束时行为等同于新发起执行。
+func (h *AgentWorkflowHandler) Followup(c *gin.Context) {
+	userID, ok := h.getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 2001, "message": "未登录"})
+		return
+	}
+	id := c.Param("id")
+	var req struct {
+		Text string `json:"text"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Text) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "text 不能为空"})
+		return
+	}
+	// 所有权校验：会话必须属于当前用户
+	if _, err := h.agentService.GetSession(c.Request.Context(), id, userID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": 3001, "message": "会话不存在或无权访问"})
+		return
+	}
+	h.agentService.PushFollowup(id, strings.TrimSpace(req.Text))
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success"})
+}
+
 // Compact C4：手动触发对话级上下文压缩。
 // 请求可指定 conversation_id 与 focus；模型缺省时使用会话绑定的模型/默认模型。
 func (h *AgentWorkflowHandler) Compact(c *gin.Context) {

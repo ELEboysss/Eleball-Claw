@@ -17,6 +17,11 @@ export function useAgent() {
   const [compactResult, setCompactResult] = useState(null)
   // 按真实时间顺序维护的 Agent 执行步骤，用于线性展示 thinking / tool / answer
   const [steps, setSteps] = useState([])
+  // C6：steer / follow-up 排队消息，供输入栏上方排队面板展示
+  const [steerQueue, setSteerQueue] = useState([])
+  const [followupQueue, setFollowupQueue] = useState([])
+  // C6：当前执行中的 Agent Session ID，用于 steer/follow-up 提交
+  const [sessionId, setSessionId] = useState('')
   const abortRef = useRef(false)
   // AR-02：AbortController 真正断连，让服务端 ctx 取消停止后续工具调用与 token 消耗
   const abortControllerRef = useRef(null)
@@ -35,6 +40,9 @@ export function useAgent() {
     setIsCompacting(false)
     setCompactResult(null)
     setSteps([])
+    setSteerQueue([])
+    setFollowupQueue([])
+    setSessionId('')
     abortRef.current = false
     abortControllerRef.current = null
   }, [])
@@ -81,6 +89,8 @@ export function useAgent() {
         },
         (event) => {
           if (abortRef.current) return
+          // C6：任何事件带 session_id 时同步到状态，供 steer/follow-up 使用
+          if (event.data?.session_id) setSessionId(event.data.session_id)
           switch (event.event) {
             case 'tool_call': {
               const sessionId = event.data.session_id || ''
@@ -340,6 +350,30 @@ export function useAgent() {
               setSteps(prev => [...prev, { type: 'cancelled' }])
               break
             }
+            case 'steer_accepted': {
+              // C6：服务端已消费 steer 消息，从本地待处理队列移除
+              const text = event.data?.text || ''
+              finalSteps = [...finalSteps, { type: 'steer_accepted', text }]
+              setSteerQueue(prev => {
+                const idx = prev.findIndex(q => q.text === text)
+                if (idx >= 0) return prev.filter((_, i) => i !== idx)
+                return prev
+              })
+              setSteps(prev => [...prev, { type: 'steer_accepted', text }])
+              break
+            }
+            case 'followup_queued': {
+              // C6：服务端已排队 follow-up 消息，从本地待处理队列移除
+              const text = event.data?.text || ''
+              finalSteps = [...finalSteps, { type: 'followup_queued', text }]
+              setFollowupQueue(prev => {
+                const idx = prev.findIndex(q => q.text === text)
+                if (idx >= 0) return prev.filter((_, i) => i !== idx)
+                return prev
+              })
+              setSteps(prev => [...prev, { type: 'followup_queued', text }])
+              break
+            }
             case 'compact_start': {
               // C4：服务端开始自动压缩上下文
               setIsCompacting(true)
@@ -438,12 +472,47 @@ export function useAgent() {
     })
   }, [])
 
+  // C6：提交 steer 消息到运行中的 session。图片不能 steer（调用方校验）。
+  const submitSteer = useCallback((sessionId, text) => {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    setSteerQueue(prev => [...prev, { text: trimmed, createdAt: Date.now() }])
+    agentApi.steer(sessionId, trimmed).catch(err => {
+      setError(err.message || 'steer 发送失败')
+      setSteerQueue(prev => prev.filter(q => q.text !== trimmed))
+    })
+  }, [])
+
+  // C6：提交 follow-up 消息到当前 session，Agent 当前回合结束后自动继续执行。
+  const submitFollowup = useCallback((sessionId, text) => {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    setFollowupQueue(prev => [...prev, { text: trimmed, createdAt: Date.now() }])
+    agentApi.followup(sessionId, trimmed).catch(err => {
+      setError(err.message || 'follow-up 发送失败')
+      setFollowupQueue(prev => prev.filter(q => q.text !== trimmed))
+    })
+  }, [])
+
+  // C6：从本地待处理队列中移除一条 steer / follow-up（用户手动取消或 recall）
+  const removeSteer = useCallback((text) => {
+    setSteerQueue(prev => prev.filter(q => q.text !== text))
+  }, [])
+
+  const removeFollowup = useCallback((text) => {
+    setFollowupQueue(prev => prev.filter(q => q.text !== text))
+  }, [])
+
   return {
     execute,
     abort,
     reset,
     approveToolCall,
     submitPlanReview,
+    submitSteer,
+    submitFollowup,
+    removeSteer,
+    removeFollowup,
     status,
     toolSteps,
     currentStep,
@@ -456,6 +525,9 @@ export function useAgent() {
     warning,
     isCompacting,
     compactResult,
-    steps
+    steps,
+    steerQueue,
+    followupQueue,
+    sessionId
   }
 }

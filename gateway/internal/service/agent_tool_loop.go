@@ -193,6 +193,16 @@ func (l *ToolCallingLoop) RunWithRegistry(
 			break
 		}
 
+		// C6：steer drain point。在每轮 LLM 调用前将用户 steer 消息作为 user message 注入。
+		if env != nil && env.SteerQueue != nil {
+			if steers := env.SteerQueue.PopSteers(); len(steers) > 0 {
+				for _, sm := range steers {
+					result.Messages = append(result.Messages, llm.Message{Role: "user", Content: sm.Text})
+					msgIDs = append(msgIDs, "")
+				}
+			}
+		}
+
 		// C4：自动上下文压缩。在每次调用 LLM 前检查 token 阈值；
 		// 压缩失败不中断循环，回退硬截断后继续使用。
 		if l.compactor != nil && l.compactor.cfg.Enabled && len(result.Messages) > 0 && len(msgIDs) == len(result.Messages) {

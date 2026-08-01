@@ -58,6 +58,8 @@ type AgentService struct {
 	plansDir string
 	// C4：对话级上下文压缩器。nil 时 ToolCallingLoop 不启用自动压缩。
 	compactor *ContextCompactor
+	// C6：steer / follow-up 内存队列管理器，execute 期间跨 HTTP 请求共享。
+	steerQueues *SteerQueueManager
 }
 
 // SetUnrestricted 设置是否跳过 VIP 门控（claw 本地不限 Agent 模式）。
@@ -102,6 +104,7 @@ func NewAgentService(
 		maxSteps:             maxSteps,
 		logger:               logger,
 		approvals:            newApprovalRegistry(),
+		steerQueues:          NewSteerQueueManager(),
 	}
 	svc.toolLoop.SetLogger(logger)
 	return svc
@@ -128,6 +131,21 @@ func (s *AgentService) SetCompactor(c *ContextCompactor) {
 	if s.toolLoop != nil {
 		s.toolLoop.SetCompactor(c)
 	}
+}
+
+// PushSteer C6：向指定 session 注入一条 steer 消息。
+func (s *AgentService) PushSteer(sessionID string, text string) {
+	s.steerQueues.Get(sessionID).PushSteer(text)
+}
+
+// PushFollowup C6：向指定 session 排队一条 follow-up 消息。
+func (s *AgentService) PushFollowup(sessionID string, text string) {
+	s.steerQueues.Get(sessionID).PushFollowup(text)
+}
+
+// GetSteerQueue C6：获取指定 session 的 steer/follow-up 内存队列（供 handler 校验存在性）。
+func (s *AgentService) GetSteerQueue(sessionID string) *SessionSteerQueue {
+	return s.steerQueues.Get(sessionID)
 }
 
 // SetMaxRetries 设置 Agent 工具循环上游可重试错误的最大尝试次数（对应 llm.max_retries 配置）
@@ -545,6 +563,12 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	if s.unrestricted {
 		approver = &sseApprover{svc: s, writer: w}
 	}
+	// C6：获取或创建当前 session 的 steer/follow-up 队列，并设置 SSE 回调。
+	// 同一 execute 生命周期内共享该队列；steer/followup HTTP 接口通过同一份 manager 写入。
+	steerQueue := s.steerQueues.Get(session.ID)
+	steerQueue.OnPopSteer = func(text string) {
+		s.writeEvent(w, "steer_accepted", map[string]string{"text": text})
+	}
 	env := &ToolEnv{
 		UserID:         userID,
 		ConversationID: conv.ID,
@@ -561,6 +585,8 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		HookSvc: s.hookSvc,
 		// C3 plan 模式：plan 文件目录（claw 装配；云端空，ExitPlanMode 仅传内容）
 		PlansDir: s.plansDir,
+		// C6：steer / follow-up 队列
+		SteerQueue: steerQueue,
 		// Agent Team P3：委派计数器（每次 execute 独立，上限 5）+ 子调用用量累计钩子
 		// （子 Usage 只经此钩子进 totalUsage 一次，与 result.Usage 的 addUsage 不重叠）
 		DelegateCalls: new(int),
@@ -609,150 +635,168 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	callRT.billingProvider = billingProvider
 	callRT.billingModel = billingModel
 
-	result, err := s.toolLoop.RunWithRegistry(ctx, registry, llmClient, modelName, availableTools, messages, msgIDs, env,
-		func(record ToolCallRecord) error {
-			s.writeEvent(w, "tool_call", map[string]interface{}{
-				"step":      record.Step,
-				"tool":      record.Tool,
-				"arguments": json.RawMessage(record.Arguments),
-			})
-			s.writeEvent(w, "tool_result", map[string]interface{}{
-				"step":          record.Step,
-				"tool":          record.Tool,
-				"status":        map[bool]string{true: "succeeded", false: "failed"}[record.Error == ""],
-				"output":        record.Output,
-				"error_message": record.Error,
-			})
-			// 如果工具产生了可下载资源，下发 resource 事件供前端展示下载入口
-			if record.Output != nil {
-				if resourceID, ok := record.Output["resource_id"].(string); ok && resourceID != "" {
-					fileName, _ := record.Output["path"].(string)
-					mimeType, _ := record.Output["mime_type"].(string)
-					s.writeEvent(w, "resource", map[string]interface{}{
-						"resource_id":  resourceID,
-						"file_name":    fileName,
-						"mime_type":    mimeType,
-						"download_url": fmt.Sprintf("/v1/agent/resources/%s", resourceID),
-					})
+	// C6：运行 Agent 回合，支持 steer 注入与 follow-up 继续。
+	// 单轮内部走完整 Function Calling 循环；一轮结束后若有 follow-up 排队，
+	// 自动追加为 user message 进入下一轮，对前端表现为同一 SSE 连接的持续输出。
+	runOneTurn := func(turnMessages []llm.Message, turnMsgIDs []string) (*RunResult, error) {
+		return s.toolLoop.RunWithRegistry(ctx, registry, llmClient, modelName, availableTools, turnMessages, turnMsgIDs, env,
+			func(record ToolCallRecord) error {
+				s.writeEvent(w, "tool_call", map[string]interface{}{
+					"step":      record.Step,
+					"tool":      record.Tool,
+					"arguments": json.RawMessage(record.Arguments),
+				})
+				s.writeEvent(w, "tool_result", map[string]interface{}{
+					"step":          record.Step,
+					"tool":          record.Tool,
+					"status":        map[bool]string{true: "succeeded", false: "failed"}[record.Error == ""],
+					"output":        record.Output,
+					"error_message": record.Error,
+				})
+				// 如果工具产生了可下载资源，下发 resource 事件供前端展示下载入口
+				if record.Output != nil {
+					if resourceID, ok := record.Output["resource_id"].(string); ok && resourceID != "" {
+						fileName, _ := record.Output["path"].(string)
+						mimeType, _ := record.Output["mime_type"].(string)
+						s.writeEvent(w, "resource", map[string]interface{}{
+							"resource_id":  resourceID,
+							"file_name":    fileName,
+							"mime_type":    mimeType,
+							"download_url": fmt.Sprintf("/v1/agent/resources/%s", resourceID),
+						})
+					}
+				}
+				return nil
+			},
+			func(output AssistantOutput) {
+				if output.ReasoningContent != "" {
+					s.writeEvent(w, "reasoning", map[string]string{"delta": output.ReasoningContent})
+				}
+				if !output.IsFinal && output.Delta != "" {
+					s.writeEvent(w, "intermediate_answer", map[string]string{"delta": output.Delta})
+				}
+			},
+			func(event CompactEvent) {
+				// C4：自动压缩生命周期事件（compact_start / compact_end）
+				s.writeEvent(w, event.Type, event.Data)
+			},
+		)
+	}
+
+	var allRecords []ToolCallRecord
+	turnInput := req.Message
+	for {
+		turnResult, turnErr := runOneTurn(messages, msgIDs)
+		if turnErr != nil {
+			execErr = turnErr
+			s.writeEvent(w, "error", map[string]string{"message": turnErr.Error()})
+			s.writeEvent(w, "done", nil)
+			return nil
+		}
+
+		// C2：Stop 生命周期钩子（回合结束）。deny 可拦截继续迭代；非阻断错误忽略。
+		if stopOutcome, _ := s.runStopHook(ctx, env, turnResult); stopOutcome.Decision == model.PermissionDecisionDeny {
+			s.writeEvent(w, "error", map[string]string{"message": "Stop hook 拦截了本次执行"})
+			s.writeEvent(w, "done", nil)
+			return nil
+		}
+
+		// 累计 Function Calling 循环的 token 用量与工具记录
+		totalUsage = addUsage(totalUsage, turnResult.Usage)
+		if len(turnResult.Records) > 0 {
+			allRecords = append(allRecords, turnResult.Records...)
+		}
+
+		// 输出当前回合的状态提示
+		if turnResult.LoopDetected {
+			s.writeEvent(w, "warning", map[string]string{"message": "检测到工具循环调用，将基于已有结果生成回答"})
+		} else if turnResult.ReachMaxSteps {
+			s.writeEvent(w, "warning", map[string]string{"message": "工具调用次数已达上限，将基于已有结果生成回答"})
+		} else if turnResult.ReachTokenBudget {
+			s.writeEvent(w, "warning", map[string]string{"message": "本次对话已达到 token 用量上限，将基于已有结果生成回答"})
+		} else if turnResult.BudgetExceeded {
+			s.writeEvent(w, "warning", map[string]string{"message": "弹丸余额不足，已基于已有结果生成回答，请充值后继续"})
+		} else if turnResult.ReachCostBudget {
+			s.writeEvent(w, "warning", map[string]string{"message": "子任务成本已达上限，将基于已有结果生成回答"})
+		}
+
+		// AR-02：客户端取消（断连）。连接已断，不再生成最终回答。
+		if turnResult.Cancelled {
+			execErr = fmt.Errorf("用户取消执行")
+			s.writeEvent(w, "cancelled", map[string]string{"session_id": session.ID})
+			s.writeEvent(w, "done", map[string]string{"session_id": session.ID, "cancelled": "true"})
+			return nil
+		}
+
+		// 当前回合最终回答
+		var finalAnswer string
+		if turnResult.FinalContent != "" {
+			s.writeEvent(w, "final_answer", map[string]string{"delta": turnResult.FinalContent})
+			finalAnswer = turnResult.FinalContent
+		} else {
+			finalReq := llm.ChatRequest{
+				Model:    modelName,
+				Messages: turnResult.Messages,
+				Stream:   true,
+			}
+			stream, sErr := llmClient.ChatStream(ctx, finalReq)
+			if sErr != nil {
+				execErr = sErr
+				s.writeEvent(w, "error", map[string]string{"message": sErr.Error()})
+				s.writeEvent(w, "done", nil)
+				return nil
+			}
+			emitted := false
+			for chunk := range stream {
+				if chunk.Delta != "" {
+					emitted = true
+					finalAnswer += chunk.Delta
+					s.writeEvent(w, "final_answer", map[string]string{"delta": chunk.Delta})
+				}
+				if chunk.ReasoningContent != "" {
+					s.writeEvent(w, "reasoning", map[string]string{"delta": chunk.ReasoningContent})
+				}
+				if chunk.Usage != nil {
+					totalUsage = addUsage(totalUsage, chunk.Usage)
 				}
 			}
-			return nil
-		},
-		func(output AssistantOutput) {
-			if output.ReasoningContent != "" {
-				s.writeEvent(w, "reasoning", map[string]string{"delta": output.ReasoningContent})
+			if !emitted {
+				s.writeEvent(w, "warning", map[string]string{"message": "模型未返回有效回答"})
 			}
-			if !output.IsFinal && output.Delta != "" {
-				s.writeEvent(w, "intermediate_answer", map[string]string{"delta": output.Delta})
-			}
-		},
-		func(event CompactEvent) {
-			// C4：自动压缩生命周期事件（compact_start / compact_end）
-			s.writeEvent(w, event.Type, event.Data)
-		},
-	)
-	if err != nil {
-		execErr = err
-		s.writeEvent(w, "error", map[string]string{"message": err.Error()})
-		s.writeEvent(w, "done", nil)
-		return nil
-	}
+		}
 
-	// C2：Stop 生命周期钩子（回合结束）。deny 可拦截继续迭代；非阻断错误忽略。
-	if stopOutcome, _ := s.runStopHook(ctx, env, result); stopOutcome.Decision == model.PermissionDecisionDeny {
-		s.writeEvent(w, "error", map[string]string{"message": "Stop hook 拦截了本次执行"})
-		s.writeEvent(w, "done", nil)
-		return nil
-	}
+		s.writeToolSummaryEvent(w, turnResult.Records)
+		s.saveAgentAssistantMessage(ctx, conv.ID, userID, session.ID, turnResult.Records, finalAnswer)
+		// Agent Team P2：组内对话执行成功后异步提取组共享记忆
+		s.extractTeamMemoryAsync(conv, userID, modelName, llmClient, turnInput, finalAnswer)
 
-	// 累计 Function Calling 循环的 token 用量
-	totalUsage = addUsage(totalUsage, result.Usage)
+		// 把当前回合的 assistant 回答追加到 messages/msgIDs，供下一轮 follow-up 使用
+		messages = append(messages, llm.Message{Role: "assistant", Content: finalAnswer})
+		msgIDs = append(msgIDs, "")
 
-	// 将工具调用记录持久化到 Session，便于历史回看
-	if len(result.Records) > 0 {
-		if b, err := json.Marshal(result.Records); err == nil {
+		// C6：检查 follow-up 队列；若有则追加为 user message 继续下一回合。
+		followups := steerQueue.PopFollowups()
+		if len(followups) == 0 {
+			break
+		}
+		for _, f := range followups {
+			s.writeEvent(w, "followup_queued", map[string]string{"text": f.Text})
+			messages = append(messages, llm.Message{Role: "user", Content: f.Text})
+			msgIDs = append(msgIDs, "")
+			turnInput = f.Text
+		}
+		// 进入下一回合前更新 session 状态中的工具链记录
+		if b, mErr := json.Marshal(allRecords); mErr == nil {
 			toolChainJSON = string(b)
 		}
-	}
-	stepCount = len(result.Records) // AR-07：工具步数供用量展示
-
-	// 11. 输出最终回答
-	if result.LoopDetected {
-		// 检测到同工具同参数循环调用，强制进入最终回答
-		s.writeEvent(w, "warning", map[string]string{"message": "检测到工具循环调用，将基于已有结果生成回答"})
-	} else if result.ReachMaxSteps {
-		// 使用 warning 事件而非 error，避免前端把“已达上限”误判为失败并丢弃后续最终回答
-		s.writeEvent(w, "warning", map[string]string{"message": "工具调用次数已达上限，将基于已有结果生成回答"})
-	} else if result.ReachTokenBudget {
-		// AR-03：达到 token 预算上限
-		s.writeEvent(w, "warning", map[string]string{"message": "本次对话已达到 token 用量上限，将基于已有结果生成回答"})
-	} else if result.BudgetExceeded {
-		// AR-03：执行中余额不足
-		s.writeEvent(w, "warning", map[string]string{"message": "弹丸余额不足，已基于已有结果生成回答，请充值后继续"})
-	} else if result.ReachCostBudget {
-		// AR-03：子任务成本超限（max_cost_per_task）
-		s.writeEvent(w, "warning", map[string]string{"message": "子任务成本已达上限，将基于已有结果生成回答"})
+		stepCount = len(allRecords)
 	}
 
-	// AR-02：客户端取消（断连）。连接已断，不再生成最终回答，仅持久化已产出的工具记录。
-	// session 状态由 defer 置为 failed；前端通过 aborted 状态区分「完成」与「已取消」。
-	if result.Cancelled {
-		execErr = fmt.Errorf("用户取消执行")
-		// writeEvent 在连接已断时会失败，忽略错误
-		s.writeEvent(w, "cancelled", map[string]string{"session_id": session.ID})
-		s.writeEvent(w, "done", map[string]string{"session_id": session.ID, "cancelled": "true"})
-		return nil
+	s.steerQueues.Delete(session.ID)
+	if b, mErr := json.Marshal(allRecords); mErr == nil {
+		toolChainJSON = string(b)
 	}
-
-	// 如果 Function Calling 循环已经得到了最终回答（例如模型在工具后直接给出文本，
-	// 或不需要工具的直连场景），直接下发该回答，避免再调一次流式接口导致空回复或长时间等待。
-	if result.FinalContent != "" {
-		s.writeEvent(w, "final_answer", map[string]string{"delta": result.FinalContent})
-		s.writeToolSummaryEvent(w, result.Records)
-		s.saveAgentAssistantMessage(ctx, conv.ID, userID, session.ID, result.Records, result.FinalContent)
-		// Agent Team P2：组内对话执行成功后异步提取组共享记忆（失败仅记日志）
-		s.extractTeamMemoryAsync(conv, userID, modelName, llmClient, req.Message, result.FinalContent)
-		s.writeEvent(w, "done", map[string]interface{}{"session_id": session.ID, "usage": s.buildUsagePayload(totalUsage, stepCount, billingProvider, billingModel)})
-		return nil
-	}
-
-	// 循环未直接得到回答时，再通过流式接口生成最终回答
-	finalReq := llm.ChatRequest{
-		Model:    modelName,
-		Messages: result.Messages,
-		Stream:   true,
-	}
-	stream, err := llmClient.ChatStream(ctx, finalReq)
-	if err != nil {
-		execErr = err
-		s.writeEvent(w, "error", map[string]string{"message": err.Error()})
-		s.writeEvent(w, "done", nil)
-		return nil
-	}
-
-	emitted := false
-	finalAnswer := ""
-	for chunk := range stream {
-		if chunk.Delta != "" {
-			emitted = true
-			finalAnswer += chunk.Delta
-			s.writeEvent(w, "final_answer", map[string]string{"delta": chunk.Delta})
-		}
-		if chunk.ReasoningContent != "" {
-			s.writeEvent(w, "reasoning", map[string]string{"delta": chunk.ReasoningContent})
-		}
-		if chunk.Usage != nil {
-			totalUsage = addUsage(totalUsage, chunk.Usage)
-		}
-	}
-	if !emitted {
-		s.writeEvent(w, "warning", map[string]string{"message": "模型未返回有效回答"})
-	}
-
-	s.writeToolSummaryEvent(w, result.Records)
-	s.saveAgentAssistantMessage(ctx, conv.ID, userID, session.ID, result.Records, finalAnswer)
-	// Agent Team P2：组内对话执行成功后异步提取组共享记忆（失败仅记日志）
-	s.extractTeamMemoryAsync(conv, userID, modelName, llmClient, req.Message, finalAnswer)
+	stepCount = len(allRecords)
 	s.writeEvent(w, "done", map[string]interface{}{"session_id": session.ID, "usage": s.buildUsagePayload(totalUsage, stepCount, billingProvider, billingModel)})
 	return nil
 }

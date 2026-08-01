@@ -318,6 +318,12 @@ export const agentApi = {
       base_url: baseUrl || undefined,
       api_key: apiKey || undefined
     }),
+  // C6：向运行中的 Agent Session 注入 steer 消息
+  steer: (sessionId, text) =>
+    client.post(`/agent/sessions/${sessionId}/steer`, { text }),
+  // C6：向 Agent Session 排队 follow-up 消息
+  followup: (sessionId, text) =>
+    client.post(`/agent/sessions/${sessionId}/followup`, { text }),
   execute: async (body, onEvent) => {
     const token = getItem('token')
     const response = await fetch(`${API_BASE}/agent/execute`, {

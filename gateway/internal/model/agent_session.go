@@ -26,6 +26,10 @@ type AgentSession struct {
 	TotalTokens int64  `json:"total_tokens,omitempty"`
 	StepCount   int    `json:"step_count,omitempty"`
 	CostAmount  int64  `json:"cost_amount,omitempty"`
+	// C6：steer / follow-up 队列持久化（云端多设备恢复；claw 可选持久化）。
+	// 执行开始时加载到内存队列并清空数据库字段，执行结束时写回。
+	SteerQueueJSON    string `gorm:"type:text" json:"-"`
+	FollowupQueueJSON string `gorm:"type:text" json:"-"`
 	CreatedAt   int64  `gorm:"index:idx_agent_session_user_created;not null" json:"created_at"`
 	UpdatedAt   int64  `gorm:"not null" json:"updated_at"`
 	CompletedAt *int64 `json:"completed_at,omitempty"`

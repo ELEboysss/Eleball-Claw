@@ -58,6 +58,8 @@ type ToolEnv struct {
 	CurrentToolCallID string
 	// C3 plan 模式：plan 文件目录（claw 装配 basePath/plans），空则不落 plan 文件
 	PlansDir string
+	// C6：steer / follow-up 内存队列引用；execute 期间跨 goroutine 共享，工具循环 drain point 读取。
+	SteerQueue *SessionSteerQueue
 }
 
 // ResolveFilePath 解析文件工具路径（AR-06）：env.Cwd 非空时优先解析到 cwd，否则回退会话沙箱。

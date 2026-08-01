@@ -170,7 +170,14 @@ export default function Chat() {
     compactResult,
     approveToolCall: approveToolCall,
     submitPlanReview,
-    abort: abortAgent
+    abort: abortAgent,
+    submitSteer,
+    submitFollowup,
+    removeSteer,
+    removeFollowup,
+    steerQueue,
+    followupQueue,
+    sessionId: agentSessionId
   } = useAgent()
 
   // 模型 Profile 状态（与 App 端 ModelProfile 对齐），按当前登录用户隔离
@@ -1234,6 +1241,15 @@ export default function Chat() {
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
+      // C6：Agent 执行中按 Enter 默认提交 steer（图片不能 steer）
+      if (loading && enableTools && supportsAgent && (agentStatus === 'executing' || agentStatus === 'answering') && agentSessionId && input.trim()) {
+        const hasImage = attachments.some(a => a.type === 'image')
+        if (!hasImage) {
+          submitSteer(agentSessionId, input)
+          setInput('')
+          return
+        }
+      }
       handleSend()
     }
     // C1：Shift+Tab 循环切换权限模式
@@ -1634,6 +1650,53 @@ export default function Chat() {
                 className="w-full resize-none border-0 px-4 pt-3 pb-2 focus:outline-none focus:ring-0 max-h-32 bg-transparent text-eleball-text placeholder:text-eleball-text-tertiary"
                 style={{ minHeight: '44px' }}
               />
+              {/* C6：steer / follow-up 排队面板 */}
+              {(steerQueue.length > 0 || followupQueue.length > 0) && (
+                <div className="flex flex-wrap gap-2 px-4 pb-2">
+                  {steerQueue.map((q) => (
+                    <div
+                      key={`steer-${q.text}`}
+                      className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-amber-50 text-amber-700 text-xs border border-amber-200"
+                    >
+                      <span className="font-medium">Steer:</span>
+                      <span className="max-w-[160px] truncate">{q.text}</span>
+                      <button
+                        onClick={() => removeSteer(q.text)}
+                        className="p-0.5 rounded hover:bg-amber-100"
+                        aria-label="取消" title="取消"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                  {followupQueue.map((q) => (
+                    <div
+                      key={`followup-${q.text}`}
+                      className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-indigo-50 text-indigo-700 text-xs border border-indigo-200"
+                    >
+                      <span className="font-medium">Follow-up:</span>
+                      <span className="max-w-[160px] truncate">{q.text}</span>
+                      <button
+                        onClick={() => {
+                          removeFollowup(q.text)
+                          setInput(q.text)
+                        }}
+                        className="p-0.5 rounded hover:bg-indigo-100"
+                        aria-label="召回输入" title="召回输入"
+                      >
+                        <Reply className="w-3 h-3" />
+                      </button>
+                      <button
+                        onClick={() => removeFollowup(q.text)}
+                        className="p-0.5 rounded hover:bg-indigo-100"
+                        aria-label="取消" title="取消"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
               {attachments.length > 0 && (
                 <div className="flex flex-wrap gap-2 px-4 pb-2">
                   {attachments.map((att) => (
@@ -1814,15 +1877,43 @@ export default function Chat() {
                     </span>
                     <ChevronDown className="w-4 h-4" />
                   </button>
-                  {/* AR-02：Agent 模式执行中显示停止按钮，调 abort 真正断连停止服务端工具循环 */}
+                  {/* C6：Agent 模式执行中显示 Stop / Steer / Follow-up 三按钮 */}
                   {loading && enableTools && supportsAgent && (agentStatus === 'executing' || agentStatus === 'answering') ? (
-                    <button
-                      onClick={abortAgent}
-                      className="p-3 rounded-full bg-red-500 hover:bg-red-600 text-white"
-                      aria-label="停止生成" title="停止生成"
-                    >
-                      <Square className="w-5 h-5" />
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={abortAgent}
+                        className="p-3 rounded-full bg-red-500 hover:bg-red-600 text-white"
+                        aria-label="停止生成" title="停止生成"
+                      >
+                        <Square className="w-5 h-5" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (agentSessionId && input.trim()) {
+                            submitSteer(agentSessionId, input)
+                            setInput('')
+                          }
+                        }}
+                        disabled={!agentSessionId || !input.trim() || attachments.some(a => a.type === 'image')}
+                        className="px-3 py-2 rounded-full bg-amber-500 hover:bg-amber-600 text-white text-sm font-medium disabled:opacity-50"
+                        aria-label="换方向" title="steer：当前工具执行完后注入该消息（图片不能 steer）"
+                      >
+                        Steer
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (agentSessionId && input.trim()) {
+                            submitFollowup(agentSessionId, input)
+                            setInput('')
+                          }
+                        }}
+                        disabled={!agentSessionId || !input.trim()}
+                        className="px-3 py-2 rounded-full bg-indigo-500 hover:bg-indigo-600 text-white text-sm font-medium disabled:opacity-50"
+                        aria-label="排队" title="follow-up：当前 Agent 回合结束后自动继续执行"
+                      >
+                        Follow-up
+                      </button>
+                    </div>
                   ) : (
                     <button
                       onClick={handleSend}
