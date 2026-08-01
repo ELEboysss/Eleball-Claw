@@ -48,6 +48,7 @@ import DirectoryPicker from '../components/DirectoryPicker'
 import FileExplorer from '../components/FileExplorer'
 import WorktreeSwitcher from '../components/WorktreeSwitcher'
 import FileViewer from '../components/FileViewer'
+import DragDropOverlay from '../components/DragDropOverlay'
 import { useAgent } from '../hooks/useAgent'
 import { Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
@@ -82,6 +83,7 @@ import {
   downloadTextFile,
   safeParseJSON
 } from '../utils/file'
+import { loadDraft, saveDraft, clearDraft } from '../utils/draft'
 
 // 仅保留支持文字对话的模型（对话页模型选择器）；
 // supports_chat 缺省视为支持，兼容未返回该字段的旧后端/旧数据。
@@ -103,6 +105,9 @@ export default function Chat() {
   } = useChat()
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState([])
+  // C7：整区拖拽上传遮罩；dragDepth 计数避免子元素 dragenter/leave 闪烁
+  const [dragging, setDragging] = useState(false)
+  const dragDepth = useRef(0)
   const [loading, setLoading] = useState(false)
   // AR-05-O5：替代原生 confirm() 的确认弹窗状态
   const [confirmState, setConfirmState] = useState({ open: false })
@@ -416,6 +421,15 @@ export default function Chat() {
     setAssistantId(currentConversation.assistantId || '')
     // AR-23：恢复该会话持久化的工作目录（cwd 跟会话走）
     setCwd(currentConversation.cwd || '')
+    // C7：恢复该会话的草稿（输入文本 + 附件，刷新/切会话不丢失）
+    const draft = loadDraft(currentConversation.id)
+    if (draft) {
+      setInput(draft.input)
+      setAttachments(draft.attachments)
+    } else {
+      setInput('')
+      setAttachments([])
+    }
     // 恢复该对话绑定的模型：按 model+provider 找匹配 profile（直接 setState，不触发后端写）
     if (currentConversation.model && currentConversation.provider) {
       const matched = profiles.find(
@@ -427,6 +441,19 @@ export default function Chat() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentConversationId, availableSearchProviders])
+
+  // C7：草稿持久化（输入文本 + 附件），防抖 300ms 避免每次按键序列化大附件卡顿
+  const draftTimer = useRef(null)
+  useEffect(() => {
+    if (!currentConversationId) return
+    if (draftTimer.current) clearTimeout(draftTimer.current)
+    draftTimer.current = setTimeout(() => {
+      saveDraft(currentConversationId, input, attachments)
+    }, 300)
+    return () => {
+      if (draftTimer.current) clearTimeout(draftTimer.current)
+    }
+  }, [input, attachments, currentConversationId])
 
   // Agent / 联网 / 搜索源 / 助手设置变化时同步到本地 conversation 和后端
   useEffect(() => {
@@ -878,6 +905,8 @@ export default function Chat() {
       }
       setInput('')
       setAttachments([])
+      // C7：发送后清空该会话草稿
+      clearDraft(currentConversation.id)
       setLoading(true)
       setError('')
 
@@ -1246,10 +1275,9 @@ export default function Chat() {
     ? 'image/*,.txt,.md,.markdown,.json,.csv,.html,.css,.js,.jsx,.ts,.tsx,.py,.go,.java,.c,.cpp,.h,.xml,.yaml,.yml'
     : '.txt,.md,.markdown,.json,.csv,.html,.css,.js,.jsx,.ts,.tsx,.py,.go,.java,.c,.cpp,.h,.xml,.yaml,.yml'
 
-  const handleFileSelect = useCallback(
-    (e) => {
-      const files = Array.from(e.target.files || [])
-      if (files.length === 0) return
+  // 共享文件添加逻辑：上传按钮与拖拽复用，保持 vision 拒绝策略一致
+  const addFiles = useCallback(
+    (files) => {
       files.forEach((file) => {
         if (!supportsVision && isImageFile(file)) {
           handleAttachmentChange({ type: 'reject', reason: '当前模型不支持图片理解，请切换到视觉模型（VLM）后重试。' })
@@ -1257,9 +1285,46 @@ export default function Chat() {
         }
         handleAttachmentChange({ type: 'add', file })
       })
-      e.target.value = ''
     },
     [handleAttachmentChange, supportsVision]
+  )
+
+  const handleFileSelect = useCallback(
+    (e) => {
+      const files = Array.from(e.target.files || [])
+      if (files.length > 0) addFiles(files)
+      e.target.value = ''
+    },
+    [addFiles]
+  )
+
+  // C7：拖拽上传--仅响应 Files 类型；dragDepth 计数防子元素 dragenter/leave 闪烁
+  const handleDragEnter = useCallback((e) => {
+    if (!e.dataTransfer?.types?.includes('Files')) return
+    e.preventDefault()
+    dragDepth.current += 1
+    setDragging(true)
+  }, [])
+  const handleDragOver = useCallback((e) => {
+    if (e.dataTransfer?.types?.includes('Files')) e.preventDefault()
+  }, [])
+  const handleDragLeave = useCallback((e) => {
+    e.preventDefault()
+    dragDepth.current -= 1
+    if (dragDepth.current <= 0) {
+      dragDepth.current = 0
+      setDragging(false)
+    }
+  }, [])
+  const handleDrop = useCallback(
+    (e) => {
+      e.preventDefault()
+      dragDepth.current = 0
+      setDragging(false)
+      const files = Array.from(e.dataTransfer?.files || [])
+      if (files.length > 0) addFiles(files)
+    },
+    [addFiles]
   )
 
   if (!isLoggedIn) {
@@ -1391,7 +1456,14 @@ export default function Chat() {
       </aside>
 
       {/* 主对话区 */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <div
+        className="flex-1 flex flex-col min-w-0 overflow-hidden relative"
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        <DragDropOverlay visible={dragging} />
         {/* Chat Header - 粘顶 */}
         <div className="flex-shrink-0 z-30 bg-eleball-surface border-b border-eleball-outline-variant px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2">

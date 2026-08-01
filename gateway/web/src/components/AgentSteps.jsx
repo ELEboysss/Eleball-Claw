@@ -226,7 +226,7 @@ function ApprovalStep({ step, onApprove }) {
           )}
         </span>
         {status === 'pending' && (
-          <button type="button" onClick={() => setExpanded(v => !v)} className="text-eleball-text-tertiary">
+          <button type="button" onClick={() => setExpanded(v => !v)} aria-label={expanded ? '收起参数' : '展开参数'} title={expanded ? '收起' : '展开'} className="text-eleball-text-tertiary">
             <ChevronDown className={`w-3.5 h-3.5 transition-transform ${expanded ? 'rotate-180' : ''}`} />
           </button>
         )}

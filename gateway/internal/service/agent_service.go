@@ -444,7 +444,12 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	availableTools := s.schemaBuilder.BuildWithOptionsAndDynamic(hasFileTools, enableWebSearch, dynamicTools)
 
 	// 10. 构建初始消息（Agent Team P2：组内对话注入组共享记忆区块；P3：能力目录区块）
-	messages := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID, resolvedCwd, true)
+	// C7：按模型视觉能力构建附件 content parts（非视觉模型图片走 OCR 降级）
+	agentModelName := req.Model
+	if agentModelName == "" {
+		agentModelName = s.model
+	}
+	messages := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID, resolvedCwd, true, s.supportsVision(req.Provider, agentModelName))
 
 	// 11. Function Calling 循环
 	// AR-03：执行中余额校验节流计数器（每 balanceCheckEvery 步查一次 DB，避免每轮查库）
@@ -725,7 +730,7 @@ func (s *AgentService) ensureSessionQuota(ctx context.Context, userID string) er
 // Agent Team P2：teamID 非空且 teamMemorySvc 已装配时，检索组共享记忆并把
 // 「组共享记忆」区块拼入 system 消息内容尾部（不新增消息，避免弱模型角色混乱）；
 // userID/teamID 传空则跳过注入（如工具关闭的普通对话路径）。
-func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID, resolvedCwd string, toolsEnabled bool) []llm.Message {
+func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID, resolvedCwd string, toolsEnabled bool, supportsVision bool) []llm.Message {
 	messages := make([]llm.Message, 0, len(req.History)+2)
 	systemContent := "你是一个有用的 AI 助手。\n" +
 		"规则：\n" +
@@ -764,14 +769,85 @@ func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecut
 
 	content := req.Message
 	if len(attachments) > 0 {
-		// TODO: 将附件构建为 content parts
-		content = content + "\n[附件信息待扩展]"
+		// C7：附件构建为 OpenAI 兼容 content parts（[]interface{} map），兼容 OpenAI/Anthropic/Gemini 客户端
+		parts := s.buildAttachmentContentParts(ctx, attachments, supportsVision)
+		if len(parts) > 0 {
+			if text := strings.TrimSpace(content); text != "" {
+				parts = append(parts, map[string]interface{}{"type": "text", "text": content})
+			}
+			messages = append(messages, llm.Message{Role: "user", Content: parts})
+			return messages
+		}
 	}
 	messages = append(messages, llm.Message{
 		Role:    "user",
 		Content: content,
 	})
 	return messages
+}
+
+// supportsVision 判断当前 provider/model 是否支持图片理解。
+// 复用 chat_proxy 的 modelSupportsVision 命名规则兜底 + Ele Agent 管理员配置（supports_vision）。
+// 未知自定义模型保守返回 false，触发图片 OCR 降级而非 image_url（避免非视觉模型空响应）。
+func (s *AgentService) supportsVision(provider, modelName string) bool {
+	if llm.Provider(provider) == llm.ProviderEleAgent {
+		subProvider, subModel, err := parseEleAgentModel(modelName)
+		if err != nil || s.eleAgentModelService == nil {
+			return false
+		}
+		return s.eleAgentModelService.GetModelCapability(subProvider, subModel)
+	}
+	supported, known := modelSupportsVision(provider, modelName)
+	if known {
+		return supported
+	}
+	return false
+}
+
+// buildAttachmentContentParts C7：把附件构建为 OpenAI 兼容 content parts。
+// - image：视觉模型 -> image_url（data URI）；非视觉模型 -> OCR 降级为文本 part（复用 OCRDataURI/tesseract）；
+//   OCR 不可用时降级为占位说明，避免图片被静默丢弃。
+// - file：文本内容直接拼为 text part（带文件名前缀）；二进制文件（无 text）给占位说明。
+// 附件在前、用户文本在后（OpenAI/Kimi 多模态惯例），用户文本由调用方追加。
+func (s *AgentService) buildAttachmentContentParts(ctx context.Context, attachments []AgentAttachment, supportsVision bool) []interface{} {
+	var parts []interface{}
+	for _, att := range attachments {
+		switch att.Type {
+		case "image":
+			if supportsVision && att.DataURL != "" {
+				parts = append(parts, map[string]interface{}{
+					"type":      "image_url",
+					"image_url": map[string]interface{}{"url": att.DataURL},
+				})
+			} else if att.DataURL != "" {
+				text, err := s.registry.OCRDataURI(ctx, att.DataURL)
+				if err == nil && strings.TrimSpace(text) != "" {
+					parts = append(parts, map[string]interface{}{
+						"type": "text",
+						"text": fmt.Sprintf("【图片：%s】\n%s", att.Name, text),
+					})
+				} else {
+					parts = append(parts, map[string]interface{}{
+						"type": "text",
+						"text": fmt.Sprintf("【图片：%s（当前模型不支持图片理解，且 OCR 不可用，请切换视觉模型）】", att.Name),
+					})
+				}
+			}
+		case "file":
+			if strings.TrimSpace(att.Text) != "" {
+				parts = append(parts, map[string]interface{}{
+					"type": "text",
+					"text": fmt.Sprintf("【文件：%s】\n%s", att.Name, att.Text),
+				})
+			} else if att.DataURL != "" {
+				parts = append(parts, map[string]interface{}{
+					"type": "text",
+					"text": fmt.Sprintf("【文件：%s（二进制文件，当前模型无法直接解析，可用对应工具处理）】", att.Name),
+				})
+			}
+		}
+	}
+	return parts
 }
 
 // resolveClient 根据请求中的模型配置解析 LLM 客户端
@@ -818,7 +894,7 @@ func (s *AgentService) chatStream(ctx context.Context, req AgentExecuteRequest, 
 	modelName = normalizeAgentModelName(req.Provider, modelName)
 
 	// 工具关闭的普通对话路径不注入组共享记忆（userID/teamID 传空跳过；保持与历史行为一致）
-	messages := s.buildInitialMessages(ctx, req, req.Attachments, "", "", "", false)
+	messages := s.buildInitialMessages(ctx, req, req.Attachments, "", "", "", false, s.supportsVision(req.Provider, modelName))
 	stream, err := llmClient.ChatStream(ctx, llm.ChatRequest{
 		Model:    modelName,
 		Messages: messages,

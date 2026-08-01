@@ -823,3 +823,33 @@ func (r *ToolRegistry) toolOCR(ctx context.Context, input map[string]interface{}
 		"text": text,
 	}, nil
 }
+
+// OCRDataURI C7 多模态降级：对 data URI 形式的图片执行 OCR。
+// 解码 data URI -> 落临时文件（按 MIME 取扩展名）-> 复用 runner.OCR（tesseract）-> 清理。
+// 用于非视觉模型收到图片附件时把图片转为文本注入对话，避免图片被丢弃。
+func (r *ToolRegistry) OCRDataURI(ctx context.Context, dataURI string) (string, error) {
+	data, mimeType, err := decodeDataURI(dataURI)
+	if err != nil {
+		return "", fmt.Errorf("解析图片 data URI 失败: %w", err)
+	}
+	ext := ".png"
+	if exts, _ := mime.ExtensionsByType(mimeType); len(exts) > 0 {
+		ext = exts[0]
+	}
+	tmpFile, err := os.CreateTemp("", "claw-ocr-*"+ext)
+	if err != nil {
+		return "", fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		return "", fmt.Errorf("写入临时文件失败: %w", err)
+	}
+	tmpFile.Close()
+	text, err := r.runner.OCR(ctx, tmpPath)
+	if err != nil {
+		return "", err
+	}
+	return text, nil
+}
