@@ -15,7 +15,9 @@ import {
   Wrench,
   Shield,
   Check,
-  X
+  X,
+  FileText,
+  Edit3
 } from 'lucide-react'
 import { agentApi } from '../api/client'
 
@@ -278,7 +280,105 @@ function ApprovalStep({ step, onApprove }) {
   )
 }
 
-function StepItem({ step, onApprove }) {
+// C3：Plan 审批卡--ExitPlanMode 触发，阻塞等用户接受/拒绝/细化。
+// pending 时显示目标/计划路径/内容摘要；接受后前端切权限模式为 acceptEdits。
+function PlanReviewStep({ step, onPlanReview }) {
+  const [expanded, setExpanded] = useState(true)
+  const [feedback, setFeedback] = useState('')
+  const status = step.status || 'pending'
+
+  const decide = (decision) => {
+    const payload = decision === 'refined' ? feedback : undefined
+    onPlanReview?.(step.sessionId, step.tool_call_id, decision, payload)
+  }
+
+  return (
+    <div className="rounded-lg border text-xs border-eleball-outline-variant bg-eleball-surface">
+      <div className="px-2.5 py-2 flex items-center justify-between gap-2">
+        <span className="flex items-center gap-2 min-w-0">
+          <FileText className="w-3.5 h-3.5 text-eleball-primary flex-shrink-0" />
+          <span className="font-medium truncate">Plan 待确认：{step.goal || '研究计划'}</span>
+        </span>
+        {status === 'pending' && (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            aria-label={expanded ? '收起计划' : '展开计划'}
+            title={expanded ? '收起' : '展开'}
+            className="text-eleball-text-tertiary"
+          >
+            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+          </button>
+        )}
+      </div>
+      {step.planPath && (
+        <div className="px-2.5 pb-1 text-eleball-text-secondary truncate" title={step.planPath}>
+          文件：{step.planPath}
+        </div>
+      )}
+      {expanded && status === 'pending' && (
+        <div className="px-2.5 pb-2.5 space-y-2">
+          {step.planContent && (
+            <div className="bg-white/60 rounded p-1.5 overflow-auto max-h-60 text-eleball-text-secondary">
+              <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={markdownComponents}>
+                {step.planContent}
+              </ReactMarkdown>
+            </div>
+          )}
+          <div className="space-y-2">
+            <textarea
+              value={feedback}
+              onChange={(e) => setFeedback(e.target.value)}
+              placeholder="如需细化，请补充要求…"
+              rows={2}
+              className="w-full text-xs border border-eleball-outline rounded p-1.5 focus:outline-none focus:border-eleball-primary bg-transparent resize-none"
+            />
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => decide('accepted')}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-green-600 text-white hover:bg-green-700"
+              >
+                <Check className="w-3.5 h-3.5" /> 接受并执行
+              </button>
+              <button
+                type="button"
+                onClick={() => decide('refined')}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-eleball-primary text-white hover:opacity-90"
+              >
+                <Edit3 className="w-3.5 h-3.5" /> 细化
+              </button>
+              <button
+                type="button"
+                onClick={() => decide('rejected')}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-gray-200 text-gray-700 hover:bg-gray-300"
+              >
+                <X className="w-3.5 h-3.5" /> 拒绝
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {status === 'accepted' && (
+        <div className="px-2.5 pb-2 flex items-center gap-1.5 text-green-700">
+          <CheckCircle className="w-3.5 h-3.5" /> 已接受，进入执行阶段
+        </div>
+      )}
+      {status === 'rejected' && (
+        <div className="px-2.5 pb-2 flex items-center gap-1.5 text-red-600">
+          <XCircle className="w-3.5 h-3.5" /> 已拒绝
+        </div>
+      )}
+      {status === 'refined' && (
+        <div className="px-2.5 pb-2 flex items-center gap-1.5 text-eleball-primary">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" /> 已发送细化要求
+        </div>
+      )}
+    </div>
+  )
+}
+
+function StepItem({ step, onApprove, onPlanReview }) {
   switch (step.type) {
     case 'thinking':
       return <ThinkingStep content={step.content} />
@@ -289,6 +389,8 @@ function StepItem({ step, onApprove }) {
       return <ToolStep step={step} />
     case 'approval':
       return <ApprovalStep step={step} onApprove={onApprove} />
+    case 'plan_review':
+      return <PlanReviewStep step={step} onPlanReview={onPlanReview} />
     case 'answer':
       return <AnswerStep content={step.content} />
     case 'resource':
@@ -302,7 +404,7 @@ function StepItem({ step, onApprove }) {
   }
 }
 
-function AgentSteps({ steps, loading, onApprove }) {
+function AgentSteps({ steps, loading, onApprove, onPlanReview }) {
   if (!steps || steps.length === 0) {
     if (!loading) return null
     return (
@@ -322,7 +424,7 @@ function AgentSteps({ steps, loading, onApprove }) {
         return (
           <div key={`${step.type}-${idx}`} className={isSub ? 'ml-3 pl-3 border-l-2 border-eleball-primary/30' : ''}>
             {showLabel && <div className="text-[10px] text-eleball-primary/70 mb-0.5">↳ 委派子任务进度</div>}
-            <StepItem step={step} onApprove={onApprove} />
+            <StepItem step={step} onApprove={onApprove} onPlanReview={onPlanReview} />
           </div>
         )
       })}

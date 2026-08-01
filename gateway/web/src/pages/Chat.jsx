@@ -167,6 +167,7 @@ export default function Chat() {
     warning: agentWarning,
     steps: agentSteps,
     approveToolCall: approveToolCall,
+    submitPlanReview,
     abort: abortAgent
   } = useAgent()
 
@@ -1220,6 +1221,14 @@ export default function Chat() {
     })
   }, [])
 
+  // C3：提交 Plan 审批决策；接受后把本会话权限模式切为 acceptEdits，让后续工具直接执行。
+  const handlePlanReview = useCallback((sessionId, toolCallId, decision, feedback) => {
+    submitPlanReview(sessionId, toolCallId, decision, feedback)
+    if (decision === 'accepted') {
+      setPermissionMode('acceptEdits')
+    }
+  }, [submitPlanReview])
+
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -2082,7 +2091,7 @@ function MessageBubble({ message, isLast, loading, onFork, forkingMessageId }) {
         {/* 新版 Agent 按时间线展示 thinking / tool / answer；旧消息无 steps 时回退到旧布局 */}
         {isAssistant && message.steps && message.steps.length > 0 ? (
           <div className="rounded-2xl px-4 py-2.5 text-sm leading-relaxed bg-eleball-surface-variant text-eleball-text rounded-bl-md">
-            <AgentSteps steps={message.steps} loading={loading && isLast} onApprove={approveToolCall} />
+            <AgentSteps steps={message.steps} loading={loading && isLast} onApprove={approveToolCall} onPlanReview={handlePlanReview} />
           </div>
         ) : (
           <>
