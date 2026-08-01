@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"syscall"
 	"time"
@@ -347,6 +348,18 @@ func main() {
 	visualGenerationService := service.NewVisualGenerationService(visualTaskRepo, visualConversationService, billingService, eleAgentModelService, settingService, chatService, visualUploadService, logger)
 	agentWorkflowService := service.NewAgentService(conversationService, agentSessionRepo, userRepo, vipService, billingService, eleAgentModelService, agentSandbox, agentRegistry, agentSchemaBuilder, agentTrigger, agentClientResolver, cfg.Agent.Model, cfg.Agent.MaxSteps, logger)
 	agentWorkflowService.SetMaxRetries(cfg.LLM.MaxRetries)
+
+	// C5：slash 命令服务（输入栏命令中心），提示词模板默认 ~/.claw/prompts
+	promptsDir := filepath.Join(os.Getenv("HOME"), ".claw", "prompts")
+	if runtime.GOOS == "windows" {
+		if home := os.Getenv("USERPROFILE"); home != "" {
+			promptsDir = filepath.Join(home, ".claw", "prompts")
+		}
+	}
+	if envDir := os.Getenv("CLAW_PROMPTS_DIR"); envDir != "" {
+		promptsDir = envDir
+	}
+	slashCommandService := service.NewSlashCommandService(agentRepo, promptsDir, agentSandbox)
 	// AR-03：单次 Agent 执行 token 预算上限（0 表示不限制）
 	agentWorkflowService.SetTokenBudget(cfg.Agent.MaxTokensPerExecute)
 	// AR-03：CallAssistant 子任务单次成本上限（0 表示不限制），每轮按估算成本门控
@@ -408,6 +421,8 @@ func main() {
 	// claw 云端第三方模块拉取安装需 VIP1+
 	moduleHandler.SetCloudAccountService(cloudAccountService)
 	agentWorkflowHandler := handler.NewAgentWorkflowHandler(agentWorkflowService)
+	// C5：注入 slash 命令服务
+	agentWorkflowHandler.SetSlashCommandService(slashCommandService)
 	// claw：search-providers 优先转发 search-web 模块的 list_sources（搜索源配置在模块侧）
 	agentWorkflowHandler.SetModuleRegistry(moduleRegistry)
 	agentHandler := handler.NewAgentHandler(agentService)

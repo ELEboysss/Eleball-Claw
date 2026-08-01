@@ -151,6 +151,9 @@ func NewClawRouter(
 				auth.GET("/agent/permission-rules", agentWorkflowHandler.ListPermissionRules)
 				auth.POST("/agent/permission-rules", agentWorkflowHandler.AddPermissionRule)
 				auth.DELETE("/agent/permission-rules", agentWorkflowHandler.DeletePermissionRule)
+				// C5：slash 命令列表与 @ 文件 fuzzy 补全（输入栏命令中心）
+				auth.GET("/agent/slash-commands", agentWorkflowHandler.SlashCommands)
+				auth.GET("/agent/files/fuzzy", agentWorkflowHandler.FilesFuzzy)
 				auth.GET("/agent/search-providers", agentWorkflowHandler.ListSearchProviders)
 				auth.GET("/agent/sessions", agentWorkflowHandler.ListSessions)
 				auth.DELETE("/agent/sessions", agentWorkflowHandler.DeleteSessions)

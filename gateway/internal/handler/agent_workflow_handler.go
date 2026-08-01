@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/service"
@@ -16,6 +17,8 @@ type AgentWorkflowHandler struct {
 	agentService *service.AgentService
 	// claw：搜索能力下沉到 search-web 模块，注入后 ListSearchProviders 优先转发模块 list_sources
 	moduleRegistry *service.ModuleRegistry
+	// C5：slash 命令服务（输入栏命令中心）
+	slashService *service.SlashCommandService
 }
 
 // NewAgentWorkflowHandler 创建处理器
@@ -27,6 +30,11 @@ func NewAgentWorkflowHandler(agentService *service.AgentService) *AgentWorkflowH
 // 不改构造签名以保持向后兼容；未注入时 ListSearchProviders 回退环境变量。
 func (h *AgentWorkflowHandler) SetModuleRegistry(r *service.ModuleRegistry) {
 	h.moduleRegistry = r
+}
+
+// SetSlashCommandService 注入 slash 命令服务（C5）
+func (h *AgentWorkflowHandler) SetSlashCommandService(s *service.SlashCommandService) {
+	h.slashService = s
 }
 
 // getUserID 从 gin context 获取当前用户 ID
@@ -418,4 +426,48 @@ func (h *AgentWorkflowHandler) GetResource(c *gin.Context) {
 		c.Header("Content-Disposition", "attachment; filename=\""+fileName+"\"")
 	}
 	c.Data(http.StatusOK, mimeType, data)
+}
+
+// SlashCommands C5：返回当前用户可见的 slash 命令列表（输入栏命令中心）
+func (h *AgentWorkflowHandler) SlashCommands(c *gin.Context) {
+	userID, ok := h.getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 2001, "message": "未登录"})
+		return
+	}
+	if h.slashService == nil {
+		c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": gin.H{"categories": []interface{}{}}})
+		return
+	}
+	resp, err := h.slashService.ListCommands(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 5000, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": resp})
+}
+
+// FilesFuzzy C5：返回工作区文件 fuzzy 补全结果（@ mention）
+func (h *AgentWorkflowHandler) FilesFuzzy(c *gin.Context) {
+	if _, ok := h.getUserID(c); !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 2001, "message": "未登录"})
+		return
+	}
+	if h.slashService == nil {
+		c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": gin.H{"files": []interface{}{}}})
+		return
+	}
+	q := strings.TrimSpace(c.Query("q"))
+	if q == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "q 参数不能为空"})
+		return
+	}
+	cwd := c.Query("cwd")
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	resp, err := h.slashService.FuzzyFiles(cwd, q, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 5000, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": resp})
 }
