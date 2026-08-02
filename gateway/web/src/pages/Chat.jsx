@@ -49,7 +49,11 @@ import FileExplorer from '../components/FileExplorer'
 import WorktreeSwitcher from '../components/WorktreeSwitcher'
 import FileViewer from '../components/FileViewer'
 import DragDropOverlay from '../components/DragDropOverlay'
+import SlashPalette from '../components/SlashPalette'
+import FileMention from '../components/FileMention'
 import { useAgent } from '../hooks/useAgent'
+import { useInputHistory } from '../hooks/useInputHistory'
+import { useSlashCommands } from '../hooks/useSlashCommands'
 import ChatMinimap, { useMessageRefs } from '../components/ChatMinimap'
 import { Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
@@ -161,6 +165,7 @@ export default function Chat() {
   const messagesEndRef = useRef(null)
   const abortRef = useRef(false)
   const fileInputRef = useRef(null)
+  const textareaRef = useRef(null)
   // C10：消息滚动区与 Minimap 测量 ref
   const scrollContainerRef = useRef(null)
   const messageRefs = useMessageRefs(currentConversation?.messages?.length || 0)
@@ -168,6 +173,18 @@ export default function Chat() {
   const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE)
   const sentinelRef = useRef(null)
   const prevScrollDistanceRef = useRef(null)
+  // C5：slash 命令 / @ 文件补全 / 输入历史
+  const slashCommands = useSlashCommands(isLoggedIn)
+  const inputHistory = useInputHistory(user?.user_id)
+  const [slashOpen, setSlashOpen] = useState(false)
+  const [slashQuery, setSlashQuery] = useState('')
+  const [slashSelectedIndex, setSlashSelectedIndex] = useState(0)
+  const [fileMentionOpen, setFileMentionOpen] = useState(false)
+  const [fileMentionQuery, setFileMentionQuery] = useState('')
+  const [fileMentionSelectedIndex, setFileMentionSelectedIndex] = useState(0)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [historyIndex, setHistoryIndex] = useState(-1)
+  const [historyDraft, setHistoryDraft] = useState('')
   const {
     execute: executeAgent,
     reset: resetAgent,
@@ -911,8 +928,225 @@ export default function Chat() {
     }
   }, [])
 
+  // C5：从当前光标位置提取触发上下文（slash / @ / 无）
+  const getTriggerContext = useCallback((text, cursor) => {
+    if (cursor == null || cursor < 0) cursor = text.length
+    let start = cursor
+    while (start > 0 && !/\s/.test(text[start - 1])) start--
+    const token = text.slice(start, cursor)
+    if (token.startsWith('/') && !token.includes('@')) {
+      return { type: 'slash', query: token.slice(1), start, end: cursor }
+    }
+    if (token.startsWith('@') && !token.includes('/')) {
+      return { type: 'at', query: token.slice(1), start, end: cursor }
+    }
+    return { type: 'none', query: '', start, end: cursor }
+  }, [])
+
+  // C5：根据输入和光标更新 slash / @ 面板状态
+  const updateTriggerPanels = useCallback((text, cursor) => {
+    const ctx = getTriggerContext(text, cursor)
+    if (ctx.type === 'slash') {
+      setSlashQuery(ctx.query)
+      setSlashSelectedIndex(0)
+      setSlashOpen(true)
+      setFileMentionOpen(false)
+      setHistoryOpen(false)
+    } else if (ctx.type === 'at') {
+      setFileMentionQuery(ctx.query)
+      setFileMentionSelectedIndex(0)
+      setFileMentionOpen(true)
+      setSlashOpen(false)
+      setHistoryOpen(false)
+    } else {
+      setSlashOpen(false)
+      setFileMentionOpen(false)
+    }
+  }, [getTriggerContext])
+
+  // C5：过滤后的 slash 命令分类
+  const slashFilteredCategories = useMemo(() => {
+    const cats = slashCommands.filter(slashQuery)
+    // 默认不显示空分类
+    return cats.filter((cat) => (cat.commands || []).length > 0)
+  }, [slashCommands, slashQuery])
+
+  // C5：打平命令列表用于键盘导航
+  const slashFlatCommands = useMemo(() => {
+    const items = []
+    for (const cat of slashFilteredCategories) {
+      for (const cmd of cat.commands || []) items.push({ ...cmd, categoryName: cat.name })
+    }
+    return items
+  }, [slashFilteredCategories])
+
+  // C5：获取输入框光标位置
+  const getCursorPosition = useCallback(() => {
+    const el = textareaRef.current
+    return el ? (el.selectionStart || el.value.length) : input.length
+  }, [input.length])
+
+  // C5：在光标处替换文本
+  const replaceInputRange = useCallback((start, end, replacement) => {
+    const el = textareaRef.current
+    const before = input.slice(0, start)
+    const after = input.slice(end)
+    const next = before + replacement + after
+    setInput(next)
+    setSlashOpen(false)
+    setFileMentionOpen(false)
+    setHistoryOpen(false)
+    requestAnimationFrame(() => {
+      if (!el) return
+      const pos = start + replacement.length
+      el.focus()
+      el.setSelectionRange(pos, pos)
+    })
+  }, [input])
+
+  // C5：应用 slash 内置命令
+  const applyBuiltinCommand = useCallback(async (cmd, argsText) => {
+    const handler = cmd.handler
+    if (handler === 'clear') {
+      const ok = await new Promise((resolve) => {
+        setConfirmState({
+          open: true,
+          title: '清空对话',
+          message: '确定清空当前对话的所有消息吗？此操作不可恢复。',
+          confirmText: '清空',
+          onConfirm: () => { setConfirmState({ open: false }); resolve(true) },
+          onCancel: () => { setConfirmState({ open: false }); resolve(false) }
+        })
+      })
+      if (!ok) return
+      if (currentConversation) {
+        try {
+          await agentApi.deleteSessionsByConversation(currentConversation.id)
+        } catch (e) { /* ignore */ }
+        updateConversations((prev) =>
+          prev.map((c) => (c.id === currentConversation.id ? { ...c, messages: [], updatedAt: Date.now() } : c))
+        )
+      }
+      setInput('')
+      return
+    }
+
+    if (handler === 'compact') {
+      if (!currentConversation) {
+        setError('请先创建或选择一个对话')
+        return
+      }
+      setLoading(true)
+      try {
+        const res = await agentApi.compact({ conversation_id: currentConversation.id, focus: argsText.trim() || undefined })
+        setError('')
+        setConfirmState({
+          open: true,
+          title: '上下文压缩完成',
+          message: `压缩前 ${res?.before_tokens ?? '?'} tokens → 压缩后 ${res?.after_tokens ?? '?'} tokens`,
+          danger: false,
+          confirmText: '好的',
+          cancelText: '关闭',
+          onConfirm: () => setConfirmState({ open: false }),
+          onCancel: () => setConfirmState({ open: false })
+        })
+      } catch (err) {
+        setError('压缩失败：' + (err.message || '未知错误'))
+      } finally {
+        setLoading(false)
+      }
+      setInput('')
+      return
+    }
+
+    if (handler === 'model') {
+      const target = argsText.trim()
+      if (!target) {
+        setSettingsOpen(true)
+        setInput('')
+        return
+      }
+      const matched = profiles.find((p) =>
+        p.id === target || p.modelName === target || p.name === target ||
+        `${p.provider}/${p.modelName}`.toLowerCase() === target.toLowerCase()
+      )
+      if (matched) {
+        switchProfile(matched.id)
+        setInput('')
+      } else {
+        setError(`未找到模型：${target}`)
+      }
+      return
+    }
+
+    if (handler === 'plan') {
+      // C3：切换会话到 Plan 模式，并把 prompt 填入输入框供用户确认后发送
+      if (supportsAgent && currentConversation) {
+        setEnableTools(true)
+        updateConversations((prev) =>
+          prev.map((c) =>
+            c.id === currentConversation.id
+              ? { ...c, permissionMode: 'plan', planFilePath: '', updatedAt: Date.now() }
+              : c
+          )
+        )
+        conversationApi
+          .update(currentConversation.id, { permission_mode: 'plan', plan_file_path: '' })
+          .catch(() => {})
+        const prompt = argsText.trim()
+        setInput(prompt || '')
+      } else {
+        setError('当前模型不支持 Agent 模式，无法进入 Plan')
+      }
+      return
+    }
+
+    if (handler === 'memory') {
+      setInput('')
+      setConfirmState({
+        open: true,
+        title: '项目记忆',
+        message: '项目记忆功能（C8）正在实现中，敬请期待。',
+        danger: false,
+        confirmText: '好的',
+        cancelText: '关闭',
+        onConfirm: () => setConfirmState({ open: false }),
+        onCancel: () => setConfirmState({ open: false })
+      })
+      return
+    }
+  }, [currentConversation, profiles, supportsAgent, updateConversations, conversationApi, setEnableTools, setError, setInput, agentApi, switchProfile, setLoading, setSettingsOpen])
+
+  // C5：选择 slash 命令（内置命令直接执行，其余插入文本）
+  const handleSlashSelect = useCallback((cmd, argsText) => {
+    const ctx = getTriggerContext(input, getCursorPosition())
+    if (ctx.type !== 'slash') return
+    if (cmd.requires_handler && cmd.handler) {
+      setInput('')
+      applyBuiltinCommand(cmd, argsText)
+      return
+    }
+    const replacement = `${cmd.name}${argsText ? ' ' + argsText : ''} `
+    replaceInputRange(ctx.start, ctx.end, replacement)
+  }, [getTriggerContext, getCursorPosition, input, replaceInputRange, applyBuiltinCommand])
+
+  // C5：选择 @ 文件路径
+  const handleFileMentionSelect = useCallback((path) => {
+    const ctx = getTriggerContext(input, getCursorPosition())
+    if (ctx.type !== 'at') return
+    const replacement = `@${path} `
+    replaceInputRange(ctx.start, ctx.end, replacement)
+  }, [getTriggerContext, getCursorPosition, input, replaceInputRange])
+
+  // C5：发送前把输入计入历史
+  const pushInputHistory = useCallback((text) => {
+    inputHistory.push(text)
+  }, [inputHistory])
+
   const handleSend = useCallback(async () => {
     if (!input.trim() && attachments.length === 0) return
+    pushInputHistory(input)
+    inputHistory.resetIndex()
     if (!currentProfile) {
       setError('请先配置模型：点击右上角设置图标')
       return
@@ -1290,7 +1524,92 @@ export default function Chat() {
     }
   }, [submitPlanReview])
 
+  // C5：键盘导航 slash / @ 补全、输入历史、发送
   const handleKeyDown = (e) => {
+    // slash 面板导航
+    if (slashOpen && slashFlatCommands.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSlashSelectedIndex((i) => (i + 1) % slashFlatCommands.length)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSlashSelectedIndex((i) => (i - 1 + slashFlatCommands.length) % slashFlatCommands.length)
+        return
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault()
+        const cmd = slashFlatCommands[slashSelectedIndex]
+        if (cmd) handleSlashSelect(cmd, slashQuery)
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setSlashOpen(false)
+        return
+      }
+    }
+
+    // @ 文件面板导航
+    if (fileMentionOpen) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        // 文件数量在 FileMention 内部，这里没法拿到总数；通过最大 20 估算，实际由组件控制滚动
+        setFileMentionSelectedIndex((i) => i + 1)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setFileMentionSelectedIndex((i) => Math.max(0, i - 1))
+        return
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault()
+        // 选中动作由 FileMention 内部 Enter 触发；这里简单关闭面板并保留 @query
+        setFileMentionOpen(false)
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setFileMentionOpen(false)
+        return
+      }
+    }
+
+    // 输入历史（空输入时 ArrowUp）
+    if (!slashOpen && !fileMentionOpen && input.trim() === '' && e.key === 'ArrowUp') {
+      e.preventDefault()
+      if (inputHistory.history.length > 0) {
+        setHistoryDraft('')
+        setHistoryIndex(0)
+        setInput(inputHistory.history[0])
+        setHistoryOpen(true)
+      }
+      return
+    }
+    if (historyOpen && inputHistory.history.length > 0) {
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        const nextIndex = Math.min(historyIndex + 1, inputHistory.history.length - 1)
+        setHistoryIndex(nextIndex)
+        setInput(inputHistory.history[nextIndex])
+        return
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        const nextIndex = Math.max(historyIndex - 1, -1)
+        setHistoryIndex(nextIndex)
+        setInput(nextIndex === -1 ? historyDraft : inputHistory.history[nextIndex])
+        return
+      }
+      if (e.key === 'Enter' || e.key === 'Escape') {
+        setHistoryOpen(false)
+        if (e.key === 'Enter') e.preventDefault()
+        return
+      }
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       // C6：Agent 执行中按 Enter 默认提交 steer（图片不能 steer）
@@ -1724,14 +2043,62 @@ export default function Chat() {
 
         {/* Input */}
         <div className="flex-shrink-0 bg-eleball-surface border-t border-eleball-outline-variant px-3 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
-          <div className="max-w-3xl mx-auto">
+          <div className="max-w-3xl mx-auto relative">
+            {/* C5：输入历史浮层（空输入按 ArrowUp 触发） */}
+            {historyOpen && inputHistory.history.length > 0 && (
+              <div className="absolute left-0 right-0 bottom-full mb-2 bg-white rounded-xl border border-eleball-outline shadow-lg overflow-hidden z-50 flex flex-col max-h-[min(280px,40vh)]">
+                <div className="px-3 py-1.5 border-b border-eleball-outline-variant bg-eleball-surface text-[10px] text-eleball-text-secondary">
+                  输入历史
+                </div>
+                <div className="flex-1 overflow-y-auto py-1">
+                  {inputHistory.history.map((text, idx) => (
+                    <button
+                      key={`${text}-${idx}`}
+                      type="button"
+                      onClick={() => { setInput(text); setHistoryOpen(false) }}
+                      className={[
+                        'w-full text-left px-3 py-2 text-sm truncate transition-colors',
+                        idx === historyIndex ? 'bg-eleball-primary-light text-eleball-primary' : 'hover:bg-eleball-surface-variant text-eleball-text'
+                      ].join(' ')}
+                    >
+                      {text}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* C5：slash 命令面板 */}
+            {slashOpen && (
+              <SlashPalette
+                categories={slashFilteredCategories}
+                query={slashQuery}
+                selectedIndex={slashSelectedIndex}
+                onSelect={handleSlashSelect}
+                onClose={() => setSlashOpen(false)}
+              />
+            )}
+            {/* C5：@ 文件补全面板 */}
+            {fileMentionOpen && (
+              <FileMention
+                query={fileMentionQuery}
+                cwd={cwd}
+                selectedIndex={fileMentionSelectedIndex}
+                onSelect={handleFileMentionSelect}
+                onClose={() => setFileMentionOpen(false)}
+              />
+            )}
             <div className="border border-eleball-outline rounded-2xl bg-white shadow-sm overflow-hidden focus-within:border-eleball-primary/40 focus-within:shadow-md transition-colors">
               <textarea
+                ref={textareaRef}
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => {
+                  setInput(e.target.value)
+                  updateTriggerPanels(e.target.value, e.target.selectionStart)
+                }}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
-                placeholder="输入消息，或粘贴/上传图片、文件…"
+                onSelect={(e) => updateTriggerPanels(e.target.value, e.target.selectionStart)}
+                placeholder="输入 / 查看命令，@ 引用文件，或粘贴/上传图片、文件…"
                 rows={1}
                 className="w-full resize-none border-0 px-4 pt-3 pb-2 focus:outline-none focus:ring-0 max-h-32 bg-transparent text-eleball-text placeholder:text-eleball-text-tertiary"
                 style={{ minHeight: '44px' }}
@@ -1783,6 +2150,36 @@ export default function Chat() {
                   ))}
                 </div>
               )}
+              {/* C5：快捷回复 chips（首轮引导 + 错误后建议） */}
+              {(() => {
+                const isEmpty = !input.trim() && attachments.length === 0 && !loading
+                const noUserMessage = !currentConversation?.messages.some((m) => m.role === 'user')
+                const chips = []
+                if (isEmpty && noUserMessage) {
+                  chips.push({ label: '制定计划', action: () => setInput('/plan ') })
+                  chips.push({ label: '压缩上下文', action: () => setInput('/compact ') })
+                  if (supportsAgent) chips.push({ label: '联网搜索', action: () => { setEnableTools(true); setEnableWebSearch(true); setInput('搜索最近的新闻') } })
+                } else if (error) {
+                  chips.push({ label: '重试', action: handleSend })
+                  chips.push({ label: '换个说法', action: () => { setInput((v) => `请用另一种方式回答：${v}`); textareaRef.current?.focus() } })
+                }
+                if (chips.length === 0) return null
+                return (
+                  <div className="flex flex-wrap gap-2 px-4 pb-2">
+                    {chips.map((chip) => (
+                      <button
+                        key={chip.label}
+                        type="button"
+                        onClick={chip.action}
+                        disabled={loading}
+                        className="inline-flex items-center px-2.5 py-1 rounded-full text-xs bg-eleball-primary-light text-eleball-primary hover:bg-eleball-primary-light/80 transition-colors disabled:opacity-50"
+                      >
+                        {chip.label}
+                      </button>
+                    ))}
+                  </div>
+                )
+              })()}
               {attachments.length > 0 && (
                 <div className="flex flex-wrap gap-2 px-4 pb-2">
                   {attachments.map((att) => (

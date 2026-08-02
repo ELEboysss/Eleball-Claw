@@ -489,6 +489,15 @@ export const visualApi = {
   deleteConversation: (id) => client.delete(`/visual/conversations/${id}`)
 }
 
+// ====== Slash 命令与 @ 文件 fuzzy 补全 API（C5）======
+export const slashApi = {
+  // 获取当前用户可见的分组 slash 命令列表（内置 / 秘技 / 模板）
+  listCommands: () => client.get('/agent/slash-commands'),
+  // 工作区文件路径 fuzzy 补全，q 参数不能为空
+  fuzzyFiles: (q, cwd = '', limit = 20) =>
+    client.get('/agent/files/fuzzy', { params: { q, cwd, limit } })
+}
+
 export default client
 
 // ====== Agent 市场 API（本地 + 云端混合）======
