@@ -269,6 +269,7 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 				TransportType: transportType,
 				Status:        model.ModuleStatusOffline,
 				Version:       "",
+				Official:      true, // marketplace/ 目录扫描到的均为官方内置模块
 			}
 			rec.SetCapabilities(m.Capabilities)
 			if err := s.RegisterModule(rec); err != nil {
@@ -284,10 +285,17 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 			caps := model.ModuleRecord{}
 			caps.SetCapabilities(m.Capabilities)
 			if existingModule.URL != moduleURL || existingModule.Name != m.Name ||
-				existingModule.Description != m.Description || existingModule.Capabilities != caps.Capabilities {
+				existingModule.Description != m.Description || existingModule.Capabilities != caps.Capabilities || !existingModule.Official {
 				if s.moduleRepo != nil {
 					if err := s.moduleRepo.SyncManifest(m.ModuleID, moduleURL, m.Name, m.Description, caps.Capabilities); err != nil && logger != nil {
 						logger.Warn("同步内置模块清单失败", zap.String("module_id", m.ModuleID), zap.Error(err))
+					}
+				}
+				// marketplace/ 目录扫描到的均为官方内置模块，回填缺失的 Official 标记
+				if !existingModule.Official {
+					existingModule.Official = true
+					if err := s.moduleRepo.CreateOrUpdate(existingModule); err != nil && logger != nil {
+						logger.Warn("回填内置模块 Official 标记失败", zap.String("module_id", m.ModuleID), zap.Error(err))
 					}
 				}
 			}
