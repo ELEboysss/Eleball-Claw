@@ -85,6 +85,13 @@ import {
   safeParseJSON
 } from '../utils/file'
 import { loadDraft, saveDraft, clearDraft } from '../utils/draft'
+import {
+  VISIBLE_PAGE_SIZE,
+  getVisibleRenderWindow,
+  getNextVisibleCount,
+  captureScrollDistance,
+  restoreScrollTop
+} from '../utils/chatLazyLoad'
 
 // 仅保留支持文字对话的模型（对话页模型选择器）；
 // supports_chat 缺省视为支持，兼容未返回该字段的旧后端/旧数据。
@@ -157,6 +164,10 @@ export default function Chat() {
   // C10：消息滚动区与 Minimap 测量 ref
   const scrollContainerRef = useRef(null)
   const messageRefs = useMessageRefs(currentConversation?.messages?.length || 0)
+  // C10 T4：历史消息向上懒加载（初始只渲染最近 N 条，滚动到顶 sentinel 时加载更早）
+  const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE)
+  const sentinelRef = useRef(null)
+  const prevScrollDistanceRef = useRef(null)
   const {
     execute: executeAgent,
     reset: resetAgent,
@@ -296,6 +307,38 @@ export default function Chat() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [currentConversation?.messages])
+
+  // C10 T4：切换对话时重置懒加载窗口，避免上一会话的 visibleCount 带到新会话
+  useEffect(() => {
+    setVisibleCount(VISIBLE_PAGE_SIZE)
+  }, [currentConversationId])
+
+  // C10 T4：监听顶部 sentinel，进入视口时加载更早一页并保持滚动位置稳定
+  useEffect(() => {
+    const sentinel = sentinelRef.current
+    const container = scrollContainerRef.current
+    if (!sentinel || !container) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop)
+          setVisibleCount((prev) => getNextVisibleCount(prev))
+        }
+      },
+      { root: container, threshold: 0 }
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [visibleCount, currentConversation?.messages?.length])
+
+  // C10 T4：visibleCount 增加（prepend 更早消息）后恢复滚动位置
+  useEffect(() => {
+    if (prevScrollDistanceRef.current == null) return
+    const container = scrollContainerRef.current
+    if (!container) return
+    container.scrollTop = restoreScrollTop(container.scrollHeight, prevScrollDistanceRef.current)
+    prevScrollDistanceRef.current = null
+  }, [visibleCount])
 
   // 切换对话时，恢复该对话上次保存的错误提示
   useEffect(() => {
@@ -1623,24 +1666,43 @@ export default function Chat() {
             ref={scrollContainerRef}
             className="flex-1 overflow-y-auto min-h-0 px-4 py-4 space-y-4"
           >
-            {(currentConversation?.messages || []).map((message, idx) => (
-              <div
-                key={idx}
-                ref={(el) => { messageRefs.current[idx] = el }}
-              >
-                {message.role === 'compaction' ? (
-                  <CompactionBubble message={message} />
-                ) : (
-                  <MessageBubble
-                    message={message}
-                    isLast={idx === currentConversation.messages.length - 1}
-                    loading={loading}
-                    onFork={handleFork}
-                    forkingMessageId={forkingMessageId}
-                  />
-                )}
-              </div>
-            ))}
+            {(() => {
+              const allMessages = currentConversation?.messages || []
+              const renderWindow = getVisibleRenderWindow(allMessages.length, visibleCount)
+              const visibleMessages = allMessages.slice(renderWindow.startIndex)
+              return (
+                <>
+                  {renderWindow.hasMore && (
+                    <div
+                      ref={sentinelRef}
+                      className="h-2 w-full"
+                      aria-label="加载更早消息"
+                    />
+                  )}
+                  {visibleMessages.map((message, localIdx) => {
+                    const actualIdx = renderWindow.startIndex + localIdx
+                    return (
+                      <div
+                        key={message.id || actualIdx}
+                        ref={(el) => { messageRefs.current[actualIdx] = el }}
+                      >
+                        {message.role === 'compaction' ? (
+                          <CompactionBubble message={message} />
+                        ) : (
+                          <MessageBubble
+                            message={message}
+                            isLast={actualIdx === allMessages.length - 1}
+                            loading={loading}
+                            onFork={handleFork}
+                            forkingMessageId={forkingMessageId}
+                          />
+                        )}
+                      </div>
+                    )
+                  })}
+                </>
+              )
+            })()}
 
             {error && (
               <div className="flex items-center gap-2 text-sm text-eleball-error bg-red-50 rounded-xl px-3 py-2">
