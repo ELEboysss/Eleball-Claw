@@ -282,6 +282,80 @@ export const agentApi = {
   getSession: (id) => client.get(`/agent/sessions/${id}`),
   // C10：查询运行中 session 的实时状态，用于 reconcile 兜底
   getSessionState: (id) => client.get(`/agent/sessions/${id}/state`),
+  // C10 T5：订阅运行中 Session 集合变化（SSE），用于侧栏实时运行指示
+  subscribeRunningSessions: (onUpdate, onError) => {
+    let active = true
+    let controller = null
+
+    const parseSSE = async (reader) => {
+      const decoder = new TextDecoder('utf-8')
+      let buffer = ''
+      let currentEvent = null
+      while (active) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed) {
+            currentEvent = null
+            continue
+          }
+          if (trimmed.startsWith(':')) continue // 心跳/注释
+          if (trimmed.startsWith('event:')) {
+            currentEvent = trimmed.slice(6).trim()
+            continue
+          }
+          if (trimmed.startsWith('data:') && currentEvent) {
+            const raw = trimmed.slice(5).trim()
+            try {
+              const parsed = JSON.parse(raw)
+              if (parsed.type === 'running' && Array.isArray(parsed.running_session_ids)) {
+                onUpdate(parsed.running_session_ids)
+              }
+            } catch {
+              // 忽略非 JSON 帧
+            }
+            currentEvent = null
+          }
+        }
+      }
+    }
+
+    const connect = async () => {
+      if (!active) return
+      controller = new AbortController()
+      try {
+        const token = getItem('token')
+        const response = await fetch(`${API_BASE}/agent/running/events`, {
+          method: 'GET',
+          headers: {
+            'Authorization': token ? `Bearer ${token}` : ''
+          },
+          signal: controller.signal
+        })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const reader = response.body?.getReader()
+        if (!reader) throw new Error('无法读取响应流')
+        await parseSSE(reader)
+      } catch (err) {
+        if (active && onError) onError(err)
+      } finally {
+        controller = null
+      }
+      if (active) {
+        setTimeout(connect, 3000)
+      }
+    }
+
+    connect()
+    return () => {
+      active = false
+      if (controller) controller.abort()
+    }
+  },
   deleteSession: (id) => client.delete(`/agent/sessions/${id}`),
   deleteAllSessions: () => client.delete('/agent/sessions'),
   deleteSessionsByConversation: (conversationId) =>

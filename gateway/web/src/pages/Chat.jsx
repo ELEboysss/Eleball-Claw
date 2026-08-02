@@ -195,7 +195,9 @@ export default function Chat() {
     sessionId: agentSessionId,
     // C10：流式消息状态，用于 ChatMinimap 实时预览
     isStreaming: agentIsStreaming,
-    streamingMessage: agentStreamingMessage
+    streamingMessage: agentStreamingMessage,
+    // C10 T5：运行中 Session 集合，传给 AgentSessionList 显示实时指示
+    runningSessionIds: agentRunningSessionIds
   } = useAgent()
 
   // 模型 Profile 状态（与 App 端 ModelProfile 对齐），按当前登录用户隔离
@@ -1528,7 +1530,7 @@ export default function Chat() {
           })()}
         </div>
         <div className="p-3 border-t border-eleball-outline-variant flex-shrink-0">
-          <AgentSessionList onRefresh={agentSessionRefresh} onSelect={handleSelectSession} />
+          <AgentSessionList onRefresh={agentSessionRefresh} onSelect={handleSelectSession} runningSessionIds={agentRunningSessionIds} />
         </div>
       </aside>
 

@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react'
+import { Loader2 } from 'lucide-react'
 import { agentApi } from '../api/client'
 import ConfirmDialog from './ConfirmDialog'
 
 // AgentSessionList 展示当前用户的历史 Agent Session 列表
-export default function AgentSessionList({ onSelect, onRefresh }) {
+export default function AgentSessionList({ onSelect, onRefresh, runningSessionIds = new Set() }) {
   const [sessions, setSessions] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -129,8 +130,15 @@ export default function AgentSessionList({ onSelect, onRefresh }) {
               <div className="text-sm text-eleball-text truncate">
                 {session.title || '未命名 Session'}
               </div>
-              <div className="text-xs text-eleball-text-tertiary flex gap-2 mt-0.5">
-                <span className={statusClass(session.status)}>{session.status}</span>
+              <div className="text-xs text-eleball-text-tertiary flex items-center gap-2 mt-0.5">
+                {runningSessionIds.has(session.id) ? (
+                  <span className="inline-flex items-center gap-1 text-eleball-primary">
+                    <Loader2 className="w-3 h-3 animate-spin" aria-hidden="true" />
+                    运行中
+                  </span>
+                ) : (
+                  <span className={statusClass(session.status)}>{session.status}</span>
+                )}
                 <span>{new Date(session.created_at * 1000).toLocaleString()}</span>
               </div>
             </div>

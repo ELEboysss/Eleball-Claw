@@ -44,6 +44,8 @@ export function useAgent() {
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null })
   // C10：Agent 当前运行阶段（等待模型 / 工具执行 / 命令执行）
   const [agentPhase, setAgentPhase] = useState(null)
+  // C10 T5：当前运行中 Session ID 集合，用于侧栏实时指示
+  const [runningSessionIds, setRunningSessionIds] = useState(() => new Set())
 
   const abortRef = useRef(false)
   // AR-02：AbortController 真正断连，让服务端 ctx 取消停止后续工具调用与 token 消耗
@@ -172,6 +174,13 @@ export function useAgent() {
           if (event.data?.session_id) {
             setSessionId(event.data.session_id)
             runningSessionIdRef.current = event.data.session_id
+            // C10 T5：乐观加入运行中集合，侧栏立即显示运行指示
+            setRunningSessionIds((prev) => {
+              if (prev.has(event.data.session_id)) return prev
+              const next = new Set(prev)
+              next.add(event.data.session_id)
+              return next
+            })
           }
           switch (event.event) {
             case 'agent_start': {
@@ -581,6 +590,27 @@ export function useAgent() {
     }
   }, [streamState.isStreaming])
 
+  // C10 T5：订阅运行中 Session 集合变化，侧栏实时指示
+  useEffect(() => {
+    return agentApi.subscribeRunningSessions(
+      (ids) => setRunningSessionIds(new Set(ids)),
+      (err) => console.error('running sessions SSE error:', err)
+    )
+  }, [])
+
+  // C10 T5：当前流式任务结束时从运行中集合移除
+  useEffect(() => {
+    if (streamState.isStreaming) return
+    const sid = runningSessionIdRef.current
+    if (!sid) return
+    setRunningSessionIds((prev) => {
+      if (!prev.has(sid)) return prev
+      const next = new Set(prev)
+      next.delete(sid)
+      return next
+    })
+  }, [streamState.isStreaming])
+
   // C1：提交工具审批决策（跨 HTTP 请求解锁阻塞的工具循环）。
   // 决策投递后服务端下发 approval_resolved，卡片状态随之更新；失败时服务端按超时 deny。
   const approveToolCall = useCallback((sessionId, toolCallId, decision, alwaysAllow) => {
@@ -657,6 +687,8 @@ export function useAgent() {
     // C10：新增流式/阶段状态
     isStreaming: streamState.isStreaming,
     streamingMessage: streamState.streamingMessage,
-    agentPhase
+    agentPhase,
+    // C10 T5：运行中 Session ID 集合，供侧栏显示实时指示
+    runningSessionIds
   }
 }
