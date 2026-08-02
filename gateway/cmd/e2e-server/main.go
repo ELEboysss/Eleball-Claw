@@ -2722,6 +2722,9 @@ type E2EChatConversation struct {
 	EnableWebSearch bool              `json:"enable_web_search"`
 	SearchProvider  string            `json:"search_provider"`
 	TeamID          string            `json:"team_id,omitempty"`
+	// C3：会话级权限模式与 plan 文件路径
+	PermissionMode string            `json:"permission_mode,omitempty"`
+	PlanFilePath   string            `json:"plan_file_path,omitempty"`
 	CreatedAt       int64             `json:"created_at"`
 	UpdatedAt       int64             `json:"updated_at"`
 	Messages        []*E2EChatMessage `json:"messages,omitempty"`
@@ -7449,13 +7452,110 @@ func main() {
 		}
 		respondSuccess(w, map[string]interface{}{"ok": true})
 	})))
-	// C3：plan 审批决策（e2e no-op，端点保留以维持 API 契约一致）
+	// C3：plan 审批决策 mock（与云端保持一致，写入会话状态）
 	mux.HandleFunc("/v1/agent/plan-review", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			respondError(w, 1001, "方法不支持")
 			return
 		}
-		respondSuccess(w, map[string]interface{}{"ok": true})
+		var req struct {
+			ConversationID string `json:"conversation_id"`
+			Action         string `json:"action"`
+			PlanFilePath   string `json:"plan_file_path,omitempty"`
+			Content        string `json:"content,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondError(w, 1001, "参数错误")
+			return
+		}
+		uid := userIDFrom(r)
+		mu.Lock()
+		defer mu.Unlock()
+		conv := e2eConversations[req.ConversationID]
+		if conv == nil || conv.UserID != uid {
+			respondError(w, 4004, "对话不存在")
+			return
+		}
+		switch req.Action {
+		case "accept", "edit_accept":
+			conv.PermissionMode = "accept_edits"
+			conv.PlanFilePath = req.PlanFilePath
+		case "reject":
+			conv.PermissionMode = ""
+			conv.PlanFilePath = ""
+		case "refine":
+			conv.PermissionMode = "plan"
+			conv.PlanFilePath = ""
+		default:
+			respondError(w, 1001, "非法审批动作")
+			return
+		}
+		conv.UpdatedAt = time.Now().Unix()
+		respondSuccess(w, nil)
+	})))
+	// C5：slash 命令与快捷选项 mock
+	mux.HandleFunc("/v1/agent/slash-commands", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			respondError(w, 1001, "方法不支持")
+			return
+		}
+		respondSuccess(w, map[string]interface{}{
+			"categories": []map[string]interface{}{
+				{
+					"name":  "builtin",
+					"label": "内置命令",
+					"commands": []map[string]interface{}{
+						{"name": "/clear", "description": "清空当前对话", "category": "builtin", "requires_handler": true, "handler": "clear", "icon": "🗑️"},
+						{"name": "/compact", "description": "手动压缩对话上下文", "category": "builtin", "arguments_hint": "[focus]", "requires_handler": true, "handler": "compact", "icon": "🗜️"},
+						{"name": "/plan", "description": "进入 Plan 模式", "category": "builtin", "requires_handler": true, "handler": "plan", "icon": "📋"},
+						{"name": "/model", "description": "切换当前会话模型", "category": "builtin", "arguments_hint": "{model_id}", "requires_handler": true, "handler": "model", "icon": "🤖"},
+						{"name": "/memory", "description": "查看项目记忆", "category": "builtin", "requires_handler": true, "handler": "memory", "icon": "🧠"},
+					},
+				},
+				{
+					"name":  "skills",
+					"label": "已安装秘技",
+					"commands": []map[string]interface{}{
+						{"name": "/skill:e2e-search", "description": "E2E 搜索秘技", "category": "skills", "requires_handler": false},
+					},
+				},
+				{
+					"name":     "templates",
+					"label":    "提示词模板",
+					"commands": []map[string]interface{}{},
+				},
+			},
+		})
+	})))
+	// C5：@ 文件 fuzzy 补全 mock
+	mux.HandleFunc("/v1/agent/files/fuzzy", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			respondError(w, 1001, "方法不支持")
+			return
+		}
+		q := strings.TrimSpace(r.URL.Query().Get("q"))
+		if q == "" {
+			respondError(w, 1001, "q 参数不能为空")
+			return
+		}
+		respondSuccess(w, map[string]interface{}{
+			"files": []map[string]interface{}{
+				{"path": "src/main.go", "type": "file", "score": 100},
+				{"path": "src/util.go", "type": "file", "score": 80},
+			},
+		})
+	})))
+	// C8：项目记忆文件列表 mock
+	mux.HandleFunc("/v1/agent/memory", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			respondError(w, 1001, "方法不支持")
+			return
+		}
+		respondSuccess(w, map[string]interface{}{
+			"files": []map[string]interface{}{
+				{"path": "AGENTS.md", "source": "AGENTS.md", "size": 42, "applied": true},
+			},
+		})
 	})))
 	mux.HandleFunc("/v1/agent/permission-rules", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -7491,9 +7591,19 @@ func main() {
 	})))
 	mux.HandleFunc("/v1/agent/sessions/", cors(jwtAuth(func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, "/v1/agent/sessions/")
-		// rest 形如 "{id}" / "{id}/state" / "{id}/audit" / "{id}/fork"
+		// rest 形如 "{id}" / "{id}/state" / "{id}/audit" / "{id}/fork" / "{id}/steer" / "{id}/followup"
 		parts := strings.SplitN(rest, "/", 2)
 		id := parts[0]
+		if len(parts) == 2 && parts[1] == "steer" && r.Method == http.MethodPost {
+			// C6：e2e 仅验证端点存在与鉴权，steer 效果在真实网关测试
+			respondSuccess(w, nil)
+			return
+		}
+		if len(parts) == 2 && parts[1] == "followup" && r.Method == http.MethodPost {
+			// C6：e2e 仅验证端点存在与鉴权，follow-up 效果在真实网关测试
+			respondSuccess(w, nil)
+			return
+		}
 		if len(parts) == 2 && parts[1] == "fork" && r.Method == http.MethodPost {
 			// AR-12：e2e 不持久化 agent_sessions，返回桩 Session 保证 fork 契约兼容
 			respondSuccess(w, map[string]interface{}{
