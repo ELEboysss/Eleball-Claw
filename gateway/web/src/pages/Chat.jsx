@@ -50,6 +50,7 @@ import WorktreeSwitcher from '../components/WorktreeSwitcher'
 import FileViewer from '../components/FileViewer'
 import DragDropOverlay from '../components/DragDropOverlay'
 import { useAgent } from '../hooks/useAgent'
+import ChatMinimap, { useMessageRefs } from '../components/ChatMinimap'
 import { Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -153,6 +154,9 @@ export default function Chat() {
   const messagesEndRef = useRef(null)
   const abortRef = useRef(false)
   const fileInputRef = useRef(null)
+  // C10：消息滚动区与 Minimap 测量 ref
+  const scrollContainerRef = useRef(null)
+  const messageRefs = useMessageRefs(currentConversation?.messages?.length || 0)
   const {
     execute: executeAgent,
     reset: resetAgent,
@@ -177,7 +181,10 @@ export default function Chat() {
     removeFollowup,
     steerQueue,
     followupQueue,
-    sessionId: agentSessionId
+    sessionId: agentSessionId,
+    // C10：流式消息状态，用于 ChatMinimap 实时预览
+    isStreaming: agentIsStreaming,
+    streamingMessage: agentStreamingMessage
   } = useAgent()
 
   // 模型 Profile 状态（与 App 端 ModelProfile 对齐），按当前登录用户隔离
@@ -1610,30 +1617,45 @@ export default function Chat() {
           />
         </div>
 
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto min-h-0 px-4 py-4 space-y-4">
-          {(currentConversation?.messages || []).map((message, idx) =>
-            message.role === 'compaction' ? (
-              <CompactionBubble key={idx} message={message} />
-            ) : (
-              <MessageBubble
+        {/* Messages + Minimap */}
+        <div className="flex-1 flex min-h-0 overflow-hidden">
+          <div
+            ref={scrollContainerRef}
+            className="flex-1 overflow-y-auto min-h-0 px-4 py-4 space-y-4"
+          >
+            {(currentConversation?.messages || []).map((message, idx) => (
+              <div
                 key={idx}
-                message={message}
-                isLast={idx === currentConversation.messages.length - 1}
-                loading={loading}
-                onFork={handleFork}
-                forkingMessageId={forkingMessageId}
-              />
-            )
-          )}
+                ref={(el) => { messageRefs.current[idx] = el }}
+              >
+                {message.role === 'compaction' ? (
+                  <CompactionBubble message={message} />
+                ) : (
+                  <MessageBubble
+                    message={message}
+                    isLast={idx === currentConversation.messages.length - 1}
+                    loading={loading}
+                    onFork={handleFork}
+                    forkingMessageId={forkingMessageId}
+                  />
+                )}
+              </div>
+            ))}
 
-          {error && (
-            <div className="flex items-center gap-2 text-sm text-eleball-error bg-red-50 rounded-xl px-3 py-2">
-              <AlertCircle className="w-4 h-4" />
-              {error}
-            </div>
-          )}
-          <div ref={messagesEndRef} />
+            {error && (
+              <div className="flex items-center gap-2 text-sm text-eleball-error bg-red-50 rounded-xl px-3 py-2">
+                <AlertCircle className="w-4 h-4" />
+                {error}
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+          <ChatMinimap
+            messages={currentConversation?.messages || []}
+            streamingMessage={agentIsStreaming ? agentStreamingMessage : null}
+            scrollContainer={scrollContainerRef}
+            messageRefs={messageRefs}
+          />
         </div>
 
         {/* Input */}
