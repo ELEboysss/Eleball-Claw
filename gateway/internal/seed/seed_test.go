@@ -70,11 +70,21 @@ func TestSyncClawOfficialSKUs(t *testing.T) {
 	require.Contains(t, mb.Credentials, "bing_search_api_key")
 	assert.True(t, mb.Credentials["bing_search_api_key"].Required)
 
+	// mcp-hello 示例 SKU 已同步
+	hello, err := repo.GetByID("mcp-hello-hello")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), hello.PriceDanwan)
+	assert.Equal(t, model.AgentStatusApproved, hello.Status)
+	mh, err := hello.Manifest()
+	require.NoError(t, err)
+	require.NotNil(t, mh)
+	assert.Equal(t, model.ToolDriverType("mcp_hello"), mh.Driver)
+
 	// 幂等：重跑不产生重复、不报错
 	require.NoError(t, SyncOfficialSKUs(repo, "claw", logger))
 	total, err := repo.Count()
 	require.NoError(t, err)
-	assert.Equal(t, int64(2), total)
+	assert.Equal(t, int64(3), total)
 }
 
 // TestSkillMakerSKU 预置官方 Prompt 型秘技「秘技制造机」：SystemPrompt 非空、ManifestJSON 空，

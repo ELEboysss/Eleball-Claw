@@ -148,13 +148,14 @@ func (s *ModuleService) RegisterModuleFromPlugin(req *model.ModuleRegisterReques
 
 // marketplaceModuleManifest 内置模块目录中的 module.json 定义。
 type marketplaceModuleManifest struct {
-	ModuleID      string   `json:"module_id"`
-	Name          string   `json:"name"`
-	Description   string   `json:"description"`
-	URL           string   `json:"url"`
-	TransportType string   `json:"transport_type"`
-	Capabilities  []string `json:"capabilities"`
-	Driver        struct {
+	ModuleID        string                 `json:"module_id"`
+	Name            string                 `json:"name"`
+	Description     string                 `json:"description"`
+	URL             string                 `json:"url"`
+	TransportType   string                 `json:"transport_type"`
+	Capabilities    []string               `json:"capabilities"`
+	MCPServerConfig *model.MCPServerConfig `json:"mcp_server_config,omitempty"`
+	Driver          struct {
 		ID          string `json:"driver_id"`
 		Name        string `json:"name"`
 		Description string `json:"description"`
@@ -246,6 +247,16 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 			continue
 		}
 
+		// 确定传输类型，默认 module；mcp / remote_url 需要特殊处理。
+		transportType := model.ModuleTransportTypeModule
+		if m.TransportType != "" {
+			transportType = model.ModuleTransportType(m.TransportType)
+		}
+		moduleURL := m.URL
+		if transportType == model.ModuleTransportTypeMCP && moduleURL == "" && m.MCPServerConfig != nil {
+			moduleURL = m.MCPServerConfig.URL
+		}
+
 		// 确保模块记录存在；已存在时同步 module.json 的 url/名称/描述/能力
 		//（官方模块以 marketplace 文件为准，兼容旧版本登记的 URL 变更，如 docker 内网名改宿主机端口）
 		existingModule, err := s.GetModule(m.ModuleID)
@@ -254,8 +265,8 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 				ID:            m.ModuleID,
 				Name:          m.Name,
 				Description:   m.Description,
-				URL:           m.URL,
-				TransportType: model.ModuleTransportTypeModule,
+				URL:           moduleURL,
+				TransportType: transportType,
 				Status:        model.ModuleStatusOffline,
 				Version:       "",
 			}
@@ -266,16 +277,16 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 				}
 			} else {
 				if logger != nil {
-					logger.Info("已自动补齐内置模块", zap.String("module_id", m.ModuleID))
+					logger.Info("已自动补齐内置模块", zap.String("module_id", m.ModuleID), zap.String("transport_type", string(transportType)))
 				}
 			}
 		} else {
 			caps := model.ModuleRecord{}
 			caps.SetCapabilities(m.Capabilities)
-			if existingModule.URL != m.URL || existingModule.Name != m.Name ||
+			if existingModule.URL != moduleURL || existingModule.Name != m.Name ||
 				existingModule.Description != m.Description || existingModule.Capabilities != caps.Capabilities {
 				if s.moduleRepo != nil {
-					if err := s.moduleRepo.SyncManifest(m.ModuleID, m.URL, m.Name, m.Description, caps.Capabilities); err != nil && logger != nil {
+					if err := s.moduleRepo.SyncManifest(m.ModuleID, moduleURL, m.Name, m.Description, caps.Capabilities); err != nil && logger != nil {
 						logger.Warn("同步内置模块清单失败", zap.String("module_id", m.ModuleID), zap.Error(err))
 					}
 				}
@@ -285,19 +296,27 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 		// 确保驱动别名存在
 		existingDriver, err := s.ResolveDriver(m.Driver.ID)
 		if err != nil || existingDriver == nil {
-			if err := s.RegisterDriver(&model.DriverRegisterRequest{
+			req := &model.DriverRegisterRequest{
 				ID:            m.Driver.ID,
 				Name:          m.Driver.Name,
 				Description:   m.Driver.Description,
-				TransportType: string(model.ModuleTransportTypeModule),
+				TransportType: string(transportType),
 				ModuleID:      m.ModuleID,
-			}); err != nil {
+			}
+			if transportType == model.ModuleTransportTypeMCP {
+				req.ModuleID = "" // MCP 驱动不绑定 module_id，直接调用 mcp_server_config.url
+				req.MCPServerConfig = m.MCPServerConfig
+			}
+			if transportType == model.ModuleTransportTypeRemoteURL {
+				req.Endpoint = moduleURL
+			}
+			if err := s.RegisterDriver(req); err != nil {
 				if logger != nil {
 					logger.Warn("自动补齐内置驱动失败", zap.String("driver_id", m.Driver.ID), zap.Error(err))
 				}
 			} else {
 				if logger != nil {
-					logger.Info("已自动补齐内置驱动", zap.String("driver_id", m.Driver.ID), zap.String("module_id", m.ModuleID))
+					logger.Info("已自动补齐内置驱动", zap.String("driver_id", m.Driver.ID), zap.String("module_id", m.ModuleID), zap.String("transport_type", string(transportType)))
 				}
 			}
 		}

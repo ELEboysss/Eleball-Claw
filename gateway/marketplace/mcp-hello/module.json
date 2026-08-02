@@ -1,0 +1,17 @@
+{
+  "module_id": "mcp-hello",
+  "name": "MCP Hello 示例",
+  "description": "MCP Streamable HTTP 驱动示例，暴露 hello/echo 工具。",
+  "transport_type": "mcp",
+  "sku_scope": "claw",
+  "capabilities": ["hello", "echo"],
+  "mcp_server_config": {
+    "url": "http://localhost:8081/mcp",
+    "headers": {}
+  },
+  "driver": {
+    "driver_id": "mcp_hello",
+    "name": "MCP Hello 示例",
+    "description": "MCP Streamable HTTP 驱动示例，暴露 hello/echo 工具。"
+  }
+}

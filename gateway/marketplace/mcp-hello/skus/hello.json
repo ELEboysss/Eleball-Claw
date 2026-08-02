@@ -1,0 +1,26 @@
+{
+  "$schema": "../../../../specs/tool-manifest-schema.json",
+  "id": "com.eleball.tools.mcp_hello.hello",
+  "name": "MCP Hello",
+  "description": "MCP Streamable HTTP 示例工具：向服务器打招呼并返回问候语。",
+  "driver": "mcp_hello",
+  "runtime_type": "remote",
+  "category": "示例",
+  "level": 1,
+  "price_danwan": 0,
+  "permissions": ["network"],
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "称呼"
+      }
+    },
+    "required": ["name"]
+  },
+  "actions": [
+    { "name": "hello", "description": "返回问候语" }
+  ],
+  "timeout_seconds": 30
+}
