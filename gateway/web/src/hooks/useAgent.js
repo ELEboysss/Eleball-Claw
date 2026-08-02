@@ -1,5 +1,23 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useReducer, useEffect } from 'react'
 import { agentApi } from '../api/client'
+
+// C10：流式消息状态机，用于驱动持续更新的消息气泡与加载指示
+function streamReducer(state, action) {
+  switch (action.type) {
+    case 'start':
+      return { isStreaming: true, streamingMessage: null }
+    case 'update':
+      return { isStreaming: true, streamingMessage: action.message }
+    case 'end':
+    case 'reset':
+      return { isStreaming: false, streamingMessage: null }
+    default:
+      return state
+  }
+}
+
+// C10：服务端状态校准时，SSE 丢失/切后台/断网时兜底完成
+const RECONCILE_INTERVAL_MS = 15000
 
 export function useAgent() {
   const [status, setStatus] = useState('idle') // idle / executing / answering / done / error
@@ -22,9 +40,20 @@ export function useAgent() {
   const [followupQueue, setFollowupQueue] = useState([])
   // C6：当前执行中的 Agent Session ID，用于 steer/follow-up 提交
   const [sessionId, setSessionId] = useState('')
+  // C10：流式状态与当前增量消息
+  const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null })
+  // C10：Agent 当前运行阶段（等待模型 / 工具执行 / 命令执行）
+  const [agentPhase, setAgentPhase] = useState(null)
+
   const abortRef = useRef(false)
   // AR-02：AbortController 真正断连，让服务端 ctx 取消停止后续工具调用与 token 消耗
   const abortControllerRef = useRef(null)
+  // C10：运行中 session id，用于 reconcile 轮询
+  const runningSessionIdRef = useRef('')
+  // C10：当前流式消息文本，避免 reducer 异步合并导致追加丢失
+  const streamingMessageRef = useRef(null)
+  // C10：完成回调，轮询在发现服务端已结束时调用
+  const finishRunRef = useRef(null)
 
   const reset = useCallback(() => {
     setStatus('idle')
@@ -43,8 +72,23 @@ export function useAgent() {
     setSteerQueue([])
     setFollowupQueue([])
     setSessionId('')
+    setAgentPhase(null)
+    dispatch({ type: 'reset' })
+    streamingMessageRef.current = null
     abortRef.current = false
     abortControllerRef.current = null
+    runningSessionIdRef.current = ''
+    finishRunRef.current = null
+  }, [])
+
+  // C10：把增量文本同步到 streamingMessage，供 Chat 持续展示
+  const appendStreamingMessage = useCallback((role, delta) => {
+    const prev = streamingMessageRef.current
+    const next = prev && prev.role === role
+      ? { role, content: prev.content + delta }
+      : { role, content: delta }
+    streamingMessageRef.current = next
+    dispatch({ type: 'update', message: next })
   }, [])
 
   const execute = useCallback(({ conversationId, message, attachments = [], history = [], model, provider, baseUrl, apiKey, enableTools, enableWebSearch, searchProvider, assistantId, cwd, permissionMode }) => {
@@ -66,6 +110,41 @@ export function useAgent() {
       let finalToolSummary = ''
       let finalWarning = ''
       let finalSteps = []
+      let isCompleted = false
+
+      // C10：统一完成路径，防止 reconcile / done / AbortError 重复 resolve/reject
+      const finish = (err) => {
+        if (isCompleted) return
+        isCompleted = true
+        finishRunRef.current = null
+        streamingMessageRef.current = null
+        if (abortControllerRef.current) {
+          abortControllerRef.current.abort()
+          abortControllerRef.current = null
+        }
+        setAgentPhase(null)
+        dispatch({ type: 'end' })
+        if (err) {
+          setStatus('error')
+          setError(err.message || String(err) || '请求失败')
+          reject(err)
+        } else {
+          setStatus('done')
+          resolve({
+            answer: finalAnswer,
+            toolSteps: finalToolSteps,
+            reasoningContent: finalReasoning,
+            intermediateAnswer: finalIntermediate,
+            resources: finalResources,
+            toolSummary: finalToolSummary,
+            warning: finalWarning,
+            sessionId: runningSessionIdRef.current || '',
+            usage: null, // AR-07：用量可见性（tokens/cost/步数/上下文规模）
+            steps: finalSteps
+          })
+        }
+      }
+      finishRunRef.current = finish
 
       agentApi.execute(
         {
@@ -89,9 +168,18 @@ export function useAgent() {
         },
         (event) => {
           if (abortRef.current) return
-          // C6：任何事件带 session_id 时同步到状态，供 steer/follow-up 使用
-          if (event.data?.session_id) setSessionId(event.data.session_id)
+          // C6 / C10：任何事件带 session_id 时同步到状态与 ref，供 steer/follow-up / reconcile 使用
+          if (event.data?.session_id) {
+            setSessionId(event.data.session_id)
+            runningSessionIdRef.current = event.data.session_id
+          }
           switch (event.event) {
+            case 'agent_start': {
+              // C10：兼容未来后端下发 agent_start 事件
+              setAgentPhase({ kind: 'waiting_model' })
+              dispatch({ type: 'start' })
+              break
+            }
             case 'tool_call': {
               const sessionId = event.data.session_id || ''
               const callStep = {
@@ -106,6 +194,15 @@ export function useAgent() {
               setToolSteps(prev => [...prev, callStep])
               setCurrentStep(event.data.step)
               setSteps(prev => [...prev, { type: 'tool_call', ...callStep }])
+              // C10：标记工具执行阶段
+              setAgentPhase(prev => {
+                const toolId = `${sessionId || 'main'}:${event.data.step}`
+                const tools = prev?.kind === 'running_tools' ? [...prev.tools] : []
+                if (!tools.some(t => t.id === toolId)) {
+                  tools.push({ id: toolId, name: event.data.tool })
+                }
+                return { kind: 'running_tools', tools }
+              })
               break
             }
             case 'tool_result': {
@@ -147,6 +244,14 @@ export function useAgent() {
                   )
                 }
                 return [...prev, { type: 'tool_result', step, tool, status, output, error: error_message, sessionId }]
+              })
+              // C10：工具完成，从阶段中移除
+              setAgentPhase(prev => {
+                if (prev?.kind !== 'running_tools') return prev
+                const toolId = `${sessionId || 'main'}:${step}`
+                const tools = prev.tools.filter(t => t.id !== toolId)
+                if (tools.length === 0) return { kind: 'waiting_model' }
+                return { kind: 'running_tools', tools }
               })
               break
             }
@@ -231,7 +336,10 @@ export function useAgent() {
               } else {
                 finalSteps = [...finalSteps, { type: 'thinking', content: delta, sessionId }]
               }
-              if (sessionId === '') setReasoningContent(prev => prev + delta)
+              if (sessionId === '') {
+                setReasoningContent(prev => prev + delta)
+                appendStreamingMessage('reasoning', delta)
+              }
               setSteps(prev => {
                 const lastStep = prev[prev.length - 1]
                 if (lastStep && lastStep.type === 'thinking' && (lastStep.sessionId || '') === sessionId) {
@@ -243,6 +351,7 @@ export function useAgent() {
                 }
                 return [...prev, { type: 'thinking', content: delta, sessionId }]
               })
+              setAgentPhase({ kind: 'waiting_model' })
               break
             }
             case 'intermediate_answer': {
@@ -260,7 +369,10 @@ export function useAgent() {
               } else {
                 finalSteps = [...finalSteps, { type: 'intermediate', content: delta, sessionId }]
               }
-              if (sessionId === '') setIntermediateAnswer(prev => prev + delta)
+              if (sessionId === '') {
+                setIntermediateAnswer(prev => prev + delta)
+                appendStreamingMessage('intermediate', delta)
+              }
               setSteps(prev => {
                 const lastStep = prev[prev.length - 1]
                 if (lastStep && lastStep.type === 'intermediate' && (lastStep.sessionId || '') === sessionId) {
@@ -272,6 +384,7 @@ export function useAgent() {
                 }
                 return [...prev, { type: 'intermediate', content: delta, sessionId }]
               })
+              setAgentPhase({ kind: 'waiting_model' })
               break
             }
             case 'final_answer': {
@@ -289,6 +402,7 @@ export function useAgent() {
                 finalSteps = [...finalSteps, { type: 'answer', content: delta }]
               }
               setAnswer(prev => prev + delta)
+              appendStreamingMessage('assistant', delta)
               setSteps(prev => {
                 const lastStep = prev[prev.length - 1]
                 if (lastStep && lastStep.type === 'answer') {
@@ -300,6 +414,7 @@ export function useAgent() {
                 }
                 return [...prev, { type: 'answer', content: delta }]
               })
+              setAgentPhase({ kind: 'waiting_model' })
               break
             }
             case 'tool_summary': {
@@ -348,6 +463,7 @@ export function useAgent() {
               setStatus('done')
               finalSteps = [...finalSteps, { type: 'cancelled' }]
               setSteps(prev => [...prev, { type: 'cancelled' }])
+              finish()
               break
             }
             case 'steer_accepted': {
@@ -412,40 +528,20 @@ export function useAgent() {
               break
             }
             case 'done':
-              setStatus('done')
-              if (finalError) {
-                reject(new Error(finalError))
-              } else {
-                resolve({
-                  answer: finalAnswer,
-                  toolSteps: finalToolSteps,
-                  reasoningContent: finalReasoning,
-                  intermediateAnswer: finalIntermediate,
-                  resources: finalResources,
-                  toolSummary: finalToolSummary,
-                  warning: finalWarning,
-                  sessionId: event.data?.session_id || '',
-                  usage: event.data?.usage || null, // AR-07：用量可见性（tokens/cost/步数/上下文规模）
-                  steps: finalSteps
-                })
-              }
+              finish(finalError ? new Error(finalError) : null)
               break
           }
-        },
-        controller.signal // AR-02：传入 AbortController.signal
+        }
       ).catch(err => {
         // AR-02：用户主动取消（AbortError）不算错误，置为 done/cancelled 状态
         if (err.name === 'AbortError' || abortRef.current) {
-          setStatus('done')
-          resolve({ answer: finalAnswer, toolSteps: finalToolSteps, reasoningContent: finalReasoning, intermediateAnswer: finalIntermediate, resources: finalResources, toolSummary: finalToolSummary, warning: finalWarning, sessionId: '', usage: null, steps: finalSteps, cancelled: true })
+          finish()
           return
         }
-        setStatus('error')
-        setError(err.message || '请求失败')
-        reject(err)
+        finish(err)
       })
     })
-  }, [reset])
+  }, [reset, appendStreamingMessage])
 
   const abort = useCallback(() => {
     abortRef.current = true
@@ -455,6 +551,35 @@ export function useAgent() {
       abortControllerRef.current = null
     }
   }, [])
+
+  // C10：SSE 丢失/切后台/断网恢复时，向服务端校准运行状态，必要时强制完成
+  useEffect(() => {
+    if (!streamState.isStreaming) return
+    const reconcile = async () => {
+      const sid = runningSessionIdRef.current
+      if (!sid || !finishRunRef.current) return
+      try {
+        const state = await agentApi.getSessionState(sid)
+        if (!state.running) {
+          finishRunRef.current()
+        }
+      } catch (e) {
+        console.error('reconcile session state failed:', e)
+      }
+    }
+    const interval = setInterval(reconcile, RECONCILE_INTERVAL_MS)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') reconcile()
+    }
+    const onOnline = () => reconcile()
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('online', onOnline)
+    return () => {
+      clearInterval(interval)
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('online', onOnline)
+    }
+  }, [streamState.isStreaming])
 
   // C1：提交工具审批决策（跨 HTTP 请求解锁阻塞的工具循环）。
   // 决策投递后服务端下发 approval_resolved，卡片状态随之更新；失败时服务端按超时 deny。
@@ -528,6 +653,10 @@ export function useAgent() {
     steps,
     steerQueue,
     followupQueue,
-    sessionId
+    sessionId,
+    // C10：新增流式/阶段状态
+    isStreaming: streamState.isStreaming,
+    streamingMessage: streamState.streamingMessage,
+    agentPhase
   }
 }

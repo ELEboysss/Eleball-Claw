@@ -280,6 +280,8 @@ export const agentApi = {
   listSessions: (page = 1, pageSize = 20) =>
     client.get(`/agent/sessions?page=${page}&page_size=${pageSize}`),
   getSession: (id) => client.get(`/agent/sessions/${id}`),
+  // C10：查询运行中 session 的实时状态，用于 reconcile 兜底
+  getSessionState: (id) => client.get(`/agent/sessions/${id}/state`),
   deleteSession: (id) => client.delete(`/agent/sessions/${id}`),
   deleteAllSessions: () => client.delete('/agent/sessions'),
   deleteSessionsByConversation: (conversationId) =>
