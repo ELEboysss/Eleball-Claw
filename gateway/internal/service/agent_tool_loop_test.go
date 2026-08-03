@@ -3,9 +3,13 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/eleball/gateway/internal/config"
 	"github.com/eleball/gateway/pkg/llm"
 )
 
@@ -318,3 +322,55 @@ func TestToolCallingLoop_FunctionGetLimit(t *testing.T) {
 }
 
 var _ AgentLLMClient = (*mockAgentLLM)(nil)
+
+// TestToolCallingLoop_DynamicRuleInjection C8：工具调用触及的文件路径会触发 .claw/rules/*.md 动态注入。
+func TestToolCallingLoop_DynamicRuleInjection(t *testing.T) {
+	root := t.TempDir()
+	rulesDir := filepath.Join(root, ".claw", "rules")
+	_ = os.MkdirAll(rulesDir, 0755)
+	_ = os.WriteFile(filepath.Join(rulesDir, "go.md"), []byte("---\npaths:\n  - '*.go'\n---\nuse gofmt for Go files"), 0644)
+
+	svc := NewContextFileService(config.ContextFilesConfig{Enabled: true, RulesEnabled: true})
+
+	registry := NewToolRegistryWithDeps(&mockRunner{}, &mockSearchProvider{})
+	registry.Register(&Tool{
+		Name:        "FakeFileTool",
+		Description: "fake file tool",
+		ReadOnly:    true,
+		Driver:      "builtin",
+		Parameters: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{"path": map[string]interface{}{"type": "string"}},
+			"required":   []string{"path"},
+		},
+		Func: func(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
+			return map[string]interface{}{"ok": true}, nil
+		},
+	})
+	loop := NewToolCallingLoop(registry, 5)
+	client := &mockAgentLLM{
+		responses: []llm.ChatChunk{
+			{ToolCalls: []llm.ToolCall{
+				{ID: "tc1", Type: "function", Function: llm.ToolCallFunction{Name: "FakeFileTool", Arguments: `{"path":"main.go"}`}},
+			}},
+			{Delta: "done"},
+		},
+	}
+
+	env := &ToolEnv{Cwd: root, ContextFileSvc: svc}
+	result, err := loop.Run(context.Background(), client, "m", nil, []llm.Message{{Role: "user", Content: "run"}}, env, nil, nil)
+	if err != nil {
+		t.Fatalf("不应报错: %v", err)
+	}
+
+	found := false
+	for _, m := range result.Messages {
+		if m.Role == "system" && strings.Contains(fmt.Sprintf("%v", m.Content), "use gofmt for Go files") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("未在消息列表中找到动态注入的规则：%v", result.Messages)
+	}
+}

@@ -276,6 +276,75 @@ func ruleMatchesAny(globs, touchedPaths []string) bool {
 	return false
 }
 
+// ExtractTouchedPaths 从工具调用输入中抽取可能触及的文件路径。
+// 递归遍历 input，收集 key 为 path / file_path / paths / directory / dir / file 的字符串值。
+// 返回结果按出现顺序去重，空字符串被忽略。
+func ExtractTouchedPaths(toolName string, input map[string]interface{}) []string {
+	if len(input) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []string
+
+	var walk func(key string, v interface{})
+	walk = func(key string, v interface{}) {
+		switch val := v.(type) {
+		case string:
+			if val == "" {
+				return
+			}
+			lk := strings.ToLower(key)
+			isPathKey := lk == "path" || lk == "file_path" || lk == "paths" ||
+				lk == "directory" || lk == "dir" || lk == "file"
+			if !isPathKey {
+				return
+			}
+			if _, ok := seen[val]; ok {
+				return
+			}
+			seen[val] = struct{}{}
+			out = append(out, val)
+		case []interface{}:
+			if strings.ToLower(key) == "paths" {
+				for _, item := range val {
+					walk("path", item)
+				}
+			}
+		case map[string]interface{}:
+			for k, vv := range val {
+				walk(k, vv)
+			}
+		}
+	}
+
+	for k, v := range input {
+		walk(k, v)
+	}
+	return out
+}
+
+// MakeRelativeTouchedPaths 将绝对路径转换为基于 cwd 的相对路径（路径在 cwd 外时保留原值）。
+// cwd 为空时原样返回。
+func MakeRelativeTouchedPaths(cwd string, paths []string) []string {
+	if cwd == "" {
+		return paths
+	}
+	relPaths := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if !filepath.IsAbs(p) {
+			relPaths = append(relPaths, p)
+			continue
+		}
+		rel, err := filepath.Rel(cwd, p)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			relPaths = append(relPaths, p)
+			continue
+		}
+		relPaths = append(relPaths, rel)
+	}
+	return relPaths
+}
+
 // escapeXML 对属性值中的特殊字符做简单转义，用于 <project_instructions> 标签属性。
 func escapeXML(s string) string {
 	s = strings.ReplaceAll(s, "&", "&amp;")

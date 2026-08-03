@@ -237,3 +237,66 @@ func TestLoadRuleFiles_GlobCases(t *testing.T) {
 		}
 	}
 }
+
+// TestExtractTouchedPaths 验证从工具参数中按 key 提取路径。
+func TestExtractTouchedPaths(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  map[string]interface{}
+		want   []string
+	}{
+		{
+			name:  "ReadFile path",
+			input: map[string]interface{}{"path": "src/main.go"},
+			want:  []string{"src/main.go"},
+		},
+		{
+			name:  "WriteFile path + content",
+			input: map[string]interface{}{"path": "README.md", "content": "hello"},
+			want:  []string{"README.md"},
+		},
+		{
+			name:  "paths array",
+			input: map[string]interface{}{"paths": []interface{}{"a.go", "b.go"}},
+			want:  []string{"a.go", "b.go"},
+		},
+		{
+			name:  "nested directory",
+			input: map[string]interface{}{"options": map[string]interface{}{"directory": "configs"}},
+			want:  []string{"configs"},
+		},
+		{
+			name:  "non-path keys ignored",
+			input: map[string]interface{}{"query": "src/main.go", "url": "http://x/a.go"},
+			want:  nil,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ExtractTouchedPaths("FakeTool", c.input)
+			if len(got) != len(c.want) {
+				t.Fatalf("ExtractTouchedPaths got %v, want %v", got, c.want)
+			}
+			for i := range c.want {
+				if got[i] != c.want[i] {
+					t.Fatalf("ExtractTouchedPaths[%d] = %q, want %q", i, got[i], c.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestMakeRelativeTouchedPaths 验证绝对路径在 cwd 内时转为相对路径。
+func TestMakeRelativeTouchedPaths(t *testing.T) {
+	cwd := t.TempDir()
+	got := MakeRelativeTouchedPaths(cwd, []string{filepath.Join(cwd, "src", "main.go"), "README.md", filepath.FromSlash("/other/file.go")})
+	want := []string{filepath.Join("src", "main.go"), "README.md", filepath.FromSlash("/other/file.go")}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("[%d] got %q, want %q", i, got[i], want[i])
+		}
+	}
+}

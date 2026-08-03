@@ -612,6 +612,8 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		PlansDir: s.plansDir,
 		// C6：steer / follow-up 队列
 		SteerQueue: steerQueue,
+		// C8：项目记忆动态规则注入
+		ContextFileSvc: s.contextFileSvc,
 		// Agent Team P3：委派计数器（每次 execute 独立，上限 5）+ 子调用用量累计钩子
 		// （子 Usage 只经此钩子进 totalUsage 一次，与 result.Usage 的 addUsage 不重叠）
 		DelegateCalls: new(int),

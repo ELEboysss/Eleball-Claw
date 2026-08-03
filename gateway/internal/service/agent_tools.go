@@ -60,6 +60,10 @@ type ToolEnv struct {
 	PlansDir string
 	// C6：steer / follow-up 内存队列引用；execute 期间跨 goroutine 共享，工具循环 drain point 读取。
 	SteerQueue *SessionSteerQueue
+	// C8：项目记忆动态规则注入服务。非空时工具循环会在每次工具执行后按触及路径加载 .claw/rules/*.md。
+	ContextFileSvc *ContextFileService
+	// C8：已注入动态规则文件路径集合，防止同一规则在每轮工具调用后重复注入。
+	injectedRulePaths map[string]struct{}
 }
 
 // ResolveFilePath 解析文件工具路径（AR-06）：env.Cwd 非空时优先解析到 cwd，否则回退会话沙箱。

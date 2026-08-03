@@ -388,8 +388,19 @@ func (l *ToolCallingLoop) RunWithRegistry(
 			break
 		}
 
+		// C8：收集本轮工具调用触及的文件路径，用于回合结束后按需注入动态规则。
+		var roundTouchedPaths []string
+
 		// 执行本轮返回的每个 tool_call
 		for _, tc := range resp.ToolCalls {
+			// 先解析参数并抽取路径；解析失败也继续，便于后续错误处理。
+			var input map[string]interface{}
+			var inputErr error
+			if tc.Function.Arguments != "" {
+				inputErr = json.Unmarshal([]byte(tc.Function.Arguments), &input)
+			}
+			roundTouchedPaths = append(roundTouchedPaths, ExtractTouchedPaths(tc.Function.Name, input)...)
+
 			// AR-26：FunctionGet 元工具拦截。走内嵌标记的模型用它主动拉取工具列表，
 			// 不执行真实工具，返回当前 assistant 的工具能力（RenderToolsAsText）作为 tool_result。
 			if strings.EqualFold(tc.Function.Name, functionGetName) {
@@ -439,9 +450,8 @@ func (l *ToolCallingLoop) RunWithRegistry(
 				record.Error = fmt.Sprintf("未知工具: %s。可用工具：%s", tc.Function.Name, strings.Join(avail, ", "))
 			} else {
 				record.Tool = resolvedName // AR-20：记录归一化后的真实工具名
-				var input map[string]interface{}
-				if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
-					record.Error = fmt.Sprintf("参数解析失败: %v", err)
+				if inputErr != nil {
+					record.Error = fmt.Sprintf("参数解析失败: %v", inputErr)
 				} else {
 					// C1：审批闸（env.Approver 非空时判定 allow/deny/ask）。deny/失败时跳过 tool.Func，
 					// record.Error 已填，下方 compactToolResult 将拒绝原因回灌 LLM 供其改道。
@@ -487,6 +497,41 @@ func (l *ToolCallingLoop) RunWithRegistry(
 			msgIDs = append(msgIDs, "")
 			toolCallCount++
 
+		}
+
+		// C8：按本轮触及路径注入动态项目规则。在下一 LLM 调用前以 system 消息追加，
+		// 避免已注入规则重复追加。
+		if len(roundTouchedPaths) > 0 && env != nil && env.ContextFileSvc != nil {
+			contextKey := env.Cwd
+			if contextKey == "" {
+				contextKey = env.UserID
+			}
+			if contextKey != "" {
+				touched := MakeRelativeTouchedPaths(env.Cwd, roundTouchedPaths)
+				if rules, err := env.ContextFileSvc.LoadRuleFiles(contextKey, touched); err == nil && len(rules) > 0 {
+					if env.injectedRulePaths == nil {
+						env.injectedRulePaths = make(map[string]struct{})
+					}
+					var newRules []ContextFile
+					for _, r := range rules {
+						if _, ok := env.injectedRulePaths[r.Path]; ok {
+							continue
+						}
+						newRules = append(newRules, r)
+						env.injectedRulePaths[r.Path] = struct{}{}
+					}
+					if len(newRules) > 0 {
+						block := env.ContextFileSvc.FormatInjectionBlock(newRules)
+						if block != "" {
+							result.Messages = append(result.Messages, llm.Message{
+								Role:    "system",
+								Content: "（系统提示：根据你刚操作的文件，以下项目规则适用）\n\n" + block,
+							})
+							msgIDs = append(msgIDs, "")
+						}
+					}
+				}
+			}
 		}
 
 		// AR-01 滑动窗口：保留最近 recentToolKeep 个 tool message 完整内容，
