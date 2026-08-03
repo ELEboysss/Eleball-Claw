@@ -17,7 +17,17 @@ function streamReducer(state, action) {
 }
 
 // C10：服务端状态校准时，SSE 丢失/切后台/断网时兜底完成
-const RECONCILE_INTERVAL_MS = 15000
+// AR-47：运行 bash 类命令时 1s 快速对账，其它状态 15s 兜底
+const RECONCILE_INTERVAL_COMMAND_MS = 1000
+const RECONCILE_INTERVAL_DEFAULT_MS = 15000
+
+function isCommandLikeTool(name = '') {
+  return /^(bash|shell|sh|executecommand|runcommand|cmd)$/i.test(name)
+}
+
+function getReconcileIntervalForPhase(phase) {
+  return phase?.kind === 'running_command' ? RECONCILE_INTERVAL_COMMAND_MS : RECONCILE_INTERVAL_DEFAULT_MS
+}
 
 export function useAgent() {
   const [status, setStatus] = useState('idle') // idle / executing / answering / done / error
@@ -56,6 +66,8 @@ export function useAgent() {
   const streamingMessageRef = useRef(null)
   // C10：完成回调，轮询在发现服务端已结束时调用
   const finishRunRef = useRef(null)
+  // AR-47：让 reconcile 调度器读到最新 phase，而不受闭包/重渲染影响
+  const agentPhaseRef = useRef(null)
 
   const reset = useCallback(() => {
     setStatus('idle')
@@ -203,14 +215,15 @@ export function useAgent() {
               setToolSteps(prev => [...prev, callStep])
               setCurrentStep(event.data.step)
               setSteps(prev => [...prev, { type: 'tool_call', ...callStep }])
-              // C10：标记工具执行阶段
+              // C10 / AR-47：标记工具执行阶段；bash/shell 类工具提升为 running_command，用于更快的 reconcile
               setAgentPhase(prev => {
                 const toolId = `${sessionId || 'main'}:${event.data.step}`
-                const tools = prev?.kind === 'running_tools' ? [...prev.tools] : []
-                if (!tools.some(t => t.id === toolId)) {
-                  tools.push({ id: toolId, name: event.data.tool })
+                const existingTools = (prev?.kind === 'running_tools' || prev?.kind === 'running_command') ? [...prev.tools] : []
+                if (!existingTools.some(t => t.id === toolId)) {
+                  existingTools.push({ id: toolId, name: event.data.tool })
                 }
-                return { kind: 'running_tools', tools }
+                const hasCommand = existingTools.some(t => isCommandLikeTool(t.name))
+                return { kind: hasCommand ? 'running_command' : 'running_tools', tools: existingTools }
               })
               break
             }
@@ -254,13 +267,14 @@ export function useAgent() {
                 }
                 return [...prev, { type: 'tool_result', step, tool, status, output, error: error_message, sessionId }]
               })
-              // C10：工具完成，从阶段中移除
+              // C10 / AR-47：工具完成，从阶段中移除；若仍有 bash/shell 类工具则保持 running_command
               setAgentPhase(prev => {
-                if (prev?.kind !== 'running_tools') return prev
+                if (prev?.kind !== 'running_tools' && prev?.kind !== 'running_command') return prev
                 const toolId = `${sessionId || 'main'}:${step}`
                 const tools = prev.tools.filter(t => t.id !== toolId)
                 if (tools.length === 0) return { kind: 'waiting_model' }
-                return { kind: 'running_tools', tools }
+                const hasCommand = tools.some(t => isCommandLikeTool(t.name))
+                return { kind: hasCommand ? 'running_command' : 'running_tools', tools }
               })
               break
             }
@@ -561,7 +575,8 @@ export function useAgent() {
     }
   }, [])
 
-  // C10：SSE 丢失/切后台/断网恢复时，向服务端校准运行状态，必要时强制完成
+  // C10 / AR-47：SSE 丢失/切后台/断网恢复时，向服务端校准运行状态，必要时强制完成
+  // reconcile 间隔按 phase 动态：bash 类命令 1s，其它 15s
   useEffect(() => {
     if (!streamState.isStreaming) return
     const reconcile = async () => {
@@ -576,7 +591,15 @@ export function useAgent() {
         console.error('reconcile session state failed:', e)
       }
     }
-    const interval = setInterval(reconcile, RECONCILE_INTERVAL_MS)
+    let timeoutId = null
+    const scheduleNext = () => {
+      timeoutId = setTimeout(async () => {
+        if (!finishRunRef.current) return
+        await reconcile()
+        if (finishRunRef.current) scheduleNext()
+      }, getReconcileIntervalForPhase(agentPhaseRef.current))
+    }
+    scheduleNext()
     const onVisible = () => {
       if (document.visibilityState === 'visible') reconcile()
     }
@@ -584,11 +607,16 @@ export function useAgent() {
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('online', onOnline)
     return () => {
-      clearInterval(interval)
+      clearTimeout(timeoutId)
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('online', onOnline)
     }
   }, [streamState.isStreaming])
+
+  // AR-47：保持 ref 与最新 agentPhase 同步，reconcile 调度据此选间隔
+  useEffect(() => {
+    agentPhaseRef.current = agentPhase
+  }, [agentPhase])
 
   // C10 T5：订阅运行中 Session 集合变化，侧栏实时指示
   useEffect(() => {
