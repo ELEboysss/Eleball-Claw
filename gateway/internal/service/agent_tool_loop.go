@@ -211,6 +211,7 @@ func (l *ToolCallingLoop) RunWithRegistry(
 			}
 			res, newMessages, newMsgIDs, cErr := l.compactor.CompactDuringLoop(
 				ctx, client, model, env.ConversationID, env.UserID, env.SessionID, result.Messages, msgIDs, "",
+				env.PermissionMode, env.PlanFilePath, env.Cwd,
 			)
 			if cErr == nil && res != nil {
 				result.Messages = newMessages

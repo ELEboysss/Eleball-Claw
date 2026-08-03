@@ -197,9 +197,11 @@ func (s *AgentService) SetMaxCostPerTask(c int64) {
 
 // AgentHistoryMessage 带数据库 ID 的历史消息，用于 C4 上下文压缩时定位要删除的前缀消息。
 // ID 为空时表示非持久化消息（如本地草稿或旧客户端未上报 ID）。
+// ToolResults 仅在 role=compaction 等后端元数据消息中由后端回传，供跨 compact 恢复 plan 等状态。
 type AgentHistoryMessage struct {
 	llm.Message
-	ID string `json:"id,omitempty"`
+	ID          string `json:"id,omitempty"`
+	ToolResults string `json:"tool_results,omitempty"`
 }
 
 // AgentExecuteRequest Agent 执行请求
@@ -224,6 +226,8 @@ type AgentExecuteRequest struct {
 	Cwd string `json:"cwd"`
 	// PermissionMode C1 权限模式覆盖（default/acceptEdits/plan/auto）。空则用会话持久化的 conv.PermissionMode。
 	PermissionMode *string `json:"permission_mode,omitempty"`
+	// PlanFilePath C3/C4：plan 模式下已提交的计划文件路径，用于 accept_edits 模式加载已批准计划并跨 compact 保留。
+	PlanFilePath string `json:"plan_file_path,omitempty"`
 }
 func (req *AgentExecuteRequest) normalize() {
 	if req.Message == "" && req.Content != "" {
@@ -362,6 +366,12 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	permissionMode := model.NormalizePermissionMode(conv.PermissionMode)
 	if req.PermissionMode != nil && *req.PermissionMode != "" {
 		permissionMode = model.NormalizePermissionMode(*req.PermissionMode)
+	}
+	// C3/C4：计划文件路径解析。请求显式传入优先；否则从历史 compaction 条目的 plan_path 元数据恢复，
+	// 确保 accept_edits 模式或跨 compact 后仍能加载已批准计划。
+	planFilePath := req.PlanFilePath
+	if planFilePath == "" && permissionMode == model.PermissionModeAcceptEdits {
+		planFilePath = extractPlanPathFromHistory(req.History)
 	}
 	// 同时持久化到 conversation（AR-23：req.Cwd 非空时一并写回会话，供后续 execute 回填）
 	if req.EnableTools != nil || req.EnableWebSearch != nil || req.SearchProvider != nil || req.Cwd != "" {
@@ -576,7 +586,7 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	if agentModelName == "" {
 		agentModelName = s.model
 	}
-	messages, msgIDs := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID, resolvedCwd, true, s.supportsVision(req.Provider, agentModelName), permissionMode)
+	messages, msgIDs := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID, resolvedCwd, true, s.supportsVision(req.Provider, agentModelName), permissionMode, planFilePath)
 
 	// 11. Function Calling 循环
 	// AR-03：执行中余额校验节流计数器（每 balanceCheckEvery 步查一次 DB，避免每轮查库）
@@ -609,7 +619,8 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		// C2 生命周期钩子
 		HookSvc: s.hookSvc,
 		// C3 plan 模式：plan 文件目录（claw 装配；云端空，ExitPlanMode 仅传内容）
-		PlansDir: s.plansDir,
+		PlansDir:     s.plansDir,
+		PlanFilePath: planFilePath,
 		// C6：steer / follow-up 队列
 		SteerQueue: steerQueue,
 		// C8：项目记忆动态规则注入
@@ -903,7 +914,7 @@ func (s *AgentService) ensureSessionQuota(ctx context.Context, userID string) er
 // 「组共享记忆」区块拼入 system 消息内容尾部（不新增消息，避免弱模型角色混乱）；
 // userID/teamID 传空则跳过注入（如工具关闭的普通对话路径）。
 // C4：历史消息中的 role="compaction" 转换为 system 消息，前缀提示模型这是摘要。
-func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID, resolvedCwd string, toolsEnabled bool, supportsVision bool, permissionMode model.PermissionMode) ([]llm.Message, []string) {
+func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecuteRequest, attachments []AgentAttachment, userID, teamID, resolvedCwd string, toolsEnabled bool, supportsVision bool, permissionMode model.PermissionMode, planFilePath string) ([]llm.Message, []string) {
 	messages := make([]llm.Message, 0, len(req.History)+2)
 	msgIDs := make([]string, 0, len(req.History)+2)
 	systemContent := "你是一个有用的 AI 助手。\n" +
@@ -946,6 +957,14 @@ func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecut
 	// 此处再次明示避免模型反复尝试写操作浪费轮次）。
 	if permissionMode == model.PermissionModePlan {
 		systemContent += "\n\n【当前为 plan（计划）模式】你只能使用只读工具（ReadFile/Grep/FetchURL/OCR/Shell 只读命令等）进行调研，禁止直接修改文件或执行写操作。完成调研后，必须调用 ExitPlanMode 工具提交结构化计划（含步骤、涉及文件/命令、风险、验收标准）供用户审批。用户接受后会话切到 acceptEdits 模式再执行；用户要求细化时按反馈修订后重新提交。"
+	}
+	// C3/C4：accept_edits 模式加载已批准计划文件内容，确保跨 compact 后仍能执行。
+	if permissionMode == model.PermissionModeAcceptEdits && planFilePath != "" {
+		if content, err := os.ReadFile(planFilePath); err == nil && len(content) > 0 {
+			systemContent += "\n\n【已批准计划】(" + planFilePath + ")：\n" + string(content)
+		} else if err != nil && s.logger != nil {
+			s.logger.Warn("加载已批准计划文件失败", zap.String("plan_path", planFilePath), zap.Error(err))
+		}
 	}
 	messages = append(messages, llm.Message{
 		Role:    "system",
@@ -998,6 +1017,27 @@ func historyToLLMMessages(history []AgentHistoryMessage) ([]llm.Message, []strin
 		ids = append(ids, h.ID)
 	}
 	return out, ids
+}
+
+// extractPlanPathFromHistory 从历史 compaction 条目的 ToolResults 元数据中恢复 plan_path。
+// 用于 accept_edits 模式跨 compact 后仍能定位已批准计划文件（C3/C4）。
+func extractPlanPathFromHistory(history []AgentHistoryMessage) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		h := history[i]
+		if h.Role != "compaction" || h.ToolResults == "" {
+			continue
+		}
+		var meta struct {
+			PlanPath string `json:"plan_path"`
+		}
+		if err := json.Unmarshal([]byte(h.ToolResults), &meta); err != nil {
+			continue
+		}
+		if meta.PlanPath != "" {
+			return meta.PlanPath
+		}
+	}
+	return ""
 }
 
 // supportsVision 判断当前 provider/model 是否支持图片理解。
@@ -1108,7 +1148,7 @@ func (s *AgentService) chatStream(ctx context.Context, req AgentExecuteRequest, 
 	modelName = normalizeAgentModelName(req.Provider, modelName)
 
 	// 工具关闭的普通对话路径不注入组共享记忆（userID/teamID 传空跳过；保持与历史行为一致）
-	messages, _ := s.buildInitialMessages(ctx, req, req.Attachments, "", "", "", false, s.supportsVision(req.Provider, modelName), model.PermissionModeDefault)
+	messages, _ := s.buildInitialMessages(ctx, req, req.Attachments, "", "", "", false, s.supportsVision(req.Provider, modelName), model.PermissionModeDefault, "")
 	stream, err := llmClient.ChatStream(ctx, llm.ChatRequest{
 		Model:    modelName,
 		Messages: messages,

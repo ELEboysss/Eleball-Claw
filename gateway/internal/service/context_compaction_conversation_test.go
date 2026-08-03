@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/eleball/gateway/internal/config"
@@ -130,7 +132,7 @@ func TestContextCompactor_ThresholdNotMet(t *testing.T) {
 		{Role: "system", Content: "sys"},
 		{Role: "user", Content: "hi"},
 	}
-	res, newMsgs, newIDs, err := c.CompactDuringLoop(context.Background(), client, "m", "conv", "u", "s", msgs, []string{"", ""}, "")
+	res, newMsgs, newIDs, err := c.CompactDuringLoop(context.Background(), client, "m", "conv", "u", "s", msgs, []string{"", ""}, "", model.PermissionModeDefault, "", "")
 	require.NoError(t, err)
 	require.Nil(t, res)
 	require.Equal(t, msgs, newMsgs)
@@ -153,7 +155,7 @@ func TestContextCompactor_CompactDuringLoop(t *testing.T) {
 		{Role: "user", Content: "what is next"},
 	}
 	ids := []string{"sys", "u1", "a1", "u2"}
-	res, newMsgs, newIDs, err := c.CompactDuringLoop(context.Background(), client, "m", "conv", "u", "s", msgs, ids, "")
+	res, newMsgs, newIDs, err := c.CompactDuringLoop(context.Background(), client, "m", "conv", "u", "s", msgs, ids, "", model.PermissionModeDefault, "", "")
 	require.NoError(t, err)
 	require.NotNil(t, res)
 	assert.Equal(t, "threshold", res.Reason)
@@ -193,11 +195,11 @@ func TestContextCompactor_CircuitBreaker_AutoPause(t *testing.T) {
 	}
 	ids := []string{"", "", "", ""}
 	for i := 0; i < 3; i++ {
-		_, _, _, err := c.CompactDuringLoop(context.Background(), client, "m", "conv", "u", "s", msgs, ids, "")
+		_, _, _, err := c.CompactDuringLoop(context.Background(), client, "m", "conv", "u", "s", msgs, ids, "", model.PermissionModeDefault, "", "")
 		require.Error(t, err)
 	}
 	// 第四次自动压缩应被熔断
-	_, _, _, err := c.CompactDuringLoop(context.Background(), client, "m", "conv", "u", "s", msgs, ids, "")
+	_, _, _, err := c.CompactDuringLoop(context.Background(), client, "m", "conv", "u", "s", msgs, ids, "", model.PermissionModeDefault, "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "自动压缩已熔断")
 }
@@ -237,7 +239,7 @@ func TestContextCompactor_ImmediateRehitPause(t *testing.T) {
 	}
 	ids := []string{"", "", "", ""}
 	for i := 0; i < 3; i++ {
-		res, _, _, err := c.CompactDuringLoop(context.Background(), client, "m", "conv", "u", "s", msgs, ids, "")
+		res, _, _, err := c.CompactDuringLoop(context.Background(), client, "m", "conv", "u", "s", msgs, ids, "", model.PermissionModeDefault, "", "")
 		require.NoError(t, err)
 		require.NotNil(t, res)
 		require.GreaterOrEqual(t, res.AfterTokens, c.cfg.ThresholdTokens)
@@ -245,7 +247,7 @@ func TestContextCompactor_ImmediateRehitPause(t *testing.T) {
 		msgs = newMessagesAfterCompact(res, msgs)
 	}
 	// 第四次自动压缩应因抖动熔断
-	_, _, _, err := c.CompactDuringLoop(context.Background(), client, "m", "conv", "u", "s", msgs, ids, "")
+	_, _, _, err := c.CompactDuringLoop(context.Background(), client, "m", "conv", "u", "s", msgs, ids, "", model.PermissionModeDefault, "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "自动压缩已熔断")
 }
@@ -281,3 +283,71 @@ func repeatString(s string, n int) string {
 
 var _ AgentLLMClient = (*mockAgentLLM)(nil)
 var _ AgentLLMClient = (*fixedSummaryLLM)(nil)
+
+func TestContextCompactor_PlanModePreservesPlanPath(t *testing.T) {
+	c, repo := setupCompactor(t)
+	c.cfg.KeepRecentTokens = 10
+	c.cfg.ThresholdTokens = 1
+	require.NoError(t, repo.Create(&model.ChatConversation{ID: "conv-plan", UserID: "u", Title: "t"}))
+
+	summaryJSON := `{"goal":"plan goal","constraints":[],"progress_done":[],"progress_in_progress":[],"progress_blocked":[],"decisions":[],"next_steps":[],"critical_context":"","read_files":[],"modified_files":[]}`
+	client := &mockAgentLLM{responses: []llm.ChatChunk{{Delta: summaryJSON}}}
+
+	msgs := []llm.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "hello world"},
+		{Role: "assistant", Content: "hello"},
+		{Role: "user", Content: "what is next"},
+	}
+	ids := []string{"sys", "u1", "a1", "u2"}
+	res, _, _, err := c.CompactDuringLoop(context.Background(), client, "m", "conv-plan", "u", "s", msgs, ids, "", model.PermissionModePlan, "/tmp/plan.md", "")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.True(t, res.PlanMode)
+	assert.Equal(t, "/tmp/plan.md", res.PlanPath)
+	assert.Contains(t, res.SummaryMarkdown, "Plan 模式")
+
+	// 持久化元数据应包含 plan_mode/plan_path
+	all, _, err := repo.ListMessages("conv-plan", 1, 100)
+	require.NoError(t, err)
+	var compactMsg *model.ChatMessage
+	for i := range all {
+		if all[i].Role == "compaction" {
+			compactMsg = &all[i]
+			break
+		}
+	}
+	require.NotNil(t, compactMsg)
+	assert.Contains(t, compactMsg.ToolResults, `"plan_mode":true`)
+	assert.Contains(t, compactMsg.ToolResults, `"plan_path":"/tmp/plan.md"`)
+}
+
+func TestContextCompactor_PreCompactHookBlocks(t *testing.T) {
+	c, repo := setupCompactor(t)
+	c.cfg.KeepRecentTokens = 10
+	c.cfg.ThresholdTokens = 1
+	require.NoError(t, repo.Create(&model.ChatConversation{ID: "conv-hook", UserID: "u", Title: "t"}))
+
+	// 构造一个总是阻断的 PreCompact hook（exit 2）
+	tmpDir := t.TempDir()
+	hookPath := filepath.Join(tmpDir, "hooks.json")
+	require.NoError(t, os.WriteFile(hookPath, []byte(`[{"event":"pre_compact","type":"command","command":"exit 2","name":"blocker"}]`), 0o644))
+	hookSvc, err := NewHookService(hookPath, zap.NewNop())
+	require.NoError(t, err)
+	c.SetHookService(hookSvc)
+
+	client := &mockAgentLLM{responses: []llm.ChatChunk{{Delta: "{}"}}}
+	msgs := []llm.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "hello world"},
+		{Role: "assistant", Content: "hello"},
+		{Role: "user", Content: "what is next"},
+	}
+	ids := []string{"sys", "u1", "a1", "u2"}
+	res, newMsgs, newIDs, err := c.CompactDuringLoop(context.Background(), client, "m", "conv-hook", "u", "s", msgs, ids, "", model.PermissionModeDefault, "", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "PreCompact hook 拒绝压缩")
+	assert.Nil(t, res)
+	assert.GreaterOrEqual(t, len(newMsgs), 3)
+	assert.Equal(t, len(newMsgs), len(newIDs))
+}

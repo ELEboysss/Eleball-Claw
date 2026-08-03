@@ -58,6 +58,8 @@ type ToolEnv struct {
 	CurrentToolCallID string
 	// C3 plan 模式：plan 文件目录（claw 装配 basePath/plans），空则不落 plan 文件
 	PlansDir string
+	// C3 plan 模式：当前生效的计划文件路径（由 execute 请求或 ExitPlanMode 工具结果确定）。
+	PlanFilePath string
 	// C6：steer / follow-up 内存队列引用；execute 期间跨 goroutine 共享，工具循环 drain point 读取。
 	SteerQueue *SessionSteerQueue
 	// C8：项目记忆动态规则注入服务。非空时工具循环会在每次工具执行后按触及路径加载 .claw/rules/*.md。

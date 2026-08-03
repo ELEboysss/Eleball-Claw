@@ -29,6 +29,9 @@ type CompactionSummary struct {
 	CriticalContext      string   `json:"critical_context"`
 	ReadFiles            []string `json:"read_files"`
 	ModifiedFiles        []string `json:"modified_files"`
+	// C4 plan 模式：压缩时保留 plan 状态，确保摘要和后端元数据携带该上下文。
+	PlanMode bool   `json:"plan_mode,omitempty"`
+	PlanPath string `json:"plan_path,omitempty"`
 }
 
 // CompactionResult C4：一次压缩的完整结果，用于 SSE 事件与持久化。
@@ -42,6 +45,9 @@ type CompactionResult struct {
 	Focus             string   `json:"focus"`
 	ReadFiles         []string `json:"read_files"`
 	ModifiedFiles     []string `json:"modified_files"`
+	// C4 plan 模式：标记本次压缩处于 plan 模式及对应的计划文件路径，用于跨压缩恢复上下文。
+	PlanMode bool   `json:"plan_mode,omitempty"`
+	PlanPath string `json:"plan_path,omitempty"`
 }
 
 // compactCircuitBreaker C4：单会话熔断状态。
@@ -58,6 +64,8 @@ type ContextCompactor struct {
 	repo   *repository.ChatConversationRepo
 	cfg    config.CompactionConfig
 	logger *zap.Logger
+	// C2：PreCompact 生命周期钩子服务（claw-only）；nil 时跳过。
+	hookSvc *HookService
 
 	cbMu sync.Mutex
 	cb   map[string]*compactCircuitBreaker
@@ -80,15 +88,24 @@ func NewContextCompactor(repo *repository.ChatConversationRepo, cfg config.Compa
 	}
 }
 
+// SetHookService 注入 C2 PreCompact 钩子服务（claw-only）。
+func (c *ContextCompactor) SetHookService(svc *HookService) {
+	c.hookSvc = svc
+}
+
 // CompactDuringLoop 在工具循环内执行压缩。传入已解析的 client/model 与平行 msgIDs，
 // 返回压缩结果、新的消息列表与新的平行 ID 列表。
+// permissionMode/planFilePath/cwd 用于 C4 plan 模式上下文保留与 C2 PreCompact hook。
 func (c *ContextCompactor) CompactDuringLoop(
 	ctx context.Context,
 	client AgentLLMClient,
-	model, conversationID, userID, sessionID string,
+	modelName, conversationID, userID, sessionID string,
 	messages []llm.Message,
 	msgIDs []string,
 	focus string,
+	permissionMode model.PermissionMode,
+	planFilePath string,
+	cwd string,
 ) (*CompactionResult, []llm.Message, []string, error) {
 	lock := c.convLock(conversationID)
 	lock.Lock()
@@ -98,14 +115,14 @@ func (c *ContextCompactor) CompactDuringLoop(
 	if focus != "" {
 		reason = "manual"
 	}
-	return c.compact(ctx, client, model, conversationID, userID, sessionID, messages, msgIDs, focus, reason, true)
+	return c.compact(ctx, client, modelName, conversationID, userID, sessionID, messages, msgIDs, focus, reason, true, permissionMode, planFilePath, cwd)
 }
 
 // CompactConversation 手动压缩整个对话历史。client 由调用方按当前会话模型解析。
 func (c *ContextCompactor) CompactConversation(
 	ctx context.Context,
 	client AgentLLMClient,
-	model, conversationID, userID string,
+	modelName, conversationID, userID string,
 	focus string,
 ) (*CompactionResult, error) {
 	lock := c.convLock(conversationID)
@@ -117,7 +134,7 @@ func (c *ContextCompactor) CompactConversation(
 		return nil, err
 	}
 	msgIDs := make([]string, len(msgs))
-	res, _, _, err := c.compact(ctx, client, model, conversationID, userID, "", msgs, msgIDs, focus, "manual", true)
+	res, _, _, err := c.compact(ctx, client, modelName, conversationID, userID, "", msgs, msgIDs, focus, "manual", true, model.PermissionModeDefault, "", "")
 	if err != nil {
 		return nil, err
 	}
@@ -138,11 +155,14 @@ func (c *ContextCompactor) convLock(conversationID string) *sync.Mutex {
 func (c *ContextCompactor) compact(
 	ctx context.Context,
 	client AgentLLMClient,
-	model, conversationID, userID, sessionID string,
+	modelName, conversationID, userID, sessionID string,
 	messages []llm.Message,
 	msgIDs []string,
 	focus, reason string,
 	persist bool,
+	permissionMode model.PermissionMode,
+	planFilePath string,
+	cwd string,
 ) (*CompactionResult, []llm.Message, []string, error) {
 	cb := c.cbState(conversationID)
 	if cb.paused && reason == "threshold" {
@@ -175,7 +195,23 @@ func (c *ContextCompactor) compact(
 		c.logger.Warn("累计文件列表失败", zap.Error(err))
 	}
 
-	summary, err := c.summarize(ctx, client, model, prefix, focus, readFiles, modifiedFiles)
+	// C2：调用 LLM 摘要前分发 PreCompact 钩子；被阻断时回退硬截断。
+	if c.hookSvc != nil {
+		preview := fmt.Sprintf("即将对前缀中的 %d 条消息生成结构化摘要（focus=%q, plan_mode=%v, plan_path=%q）", len(prefix), focus, permissionMode == model.PermissionModePlan, planFilePath)
+		outcome, hErr := c.hookSvc.DispatchPreCompact(ctx, sessionID, conversationID, cwd, preview)
+		if hErr == nil && !outcome.IsAllow() {
+			fallback := c.fallbackTruncate(messages, cut)
+			if outcome.SystemMessage != "" {
+				fallback = append(fallback, llm.Message{Role: "system", Content: outcome.SystemMessage})
+			}
+			return nil, fallback, msgIDs, fmt.Errorf("PreCompact hook 拒绝压缩: %s", outcome.BlockReason)
+		}
+		if hErr != nil && c.logger != nil {
+			c.logger.Warn("PreCompact hook 分发失败", zap.Error(hErr))
+		}
+	}
+
+	summary, err := c.summarize(ctx, client, modelName, prefix, focus, readFiles, modifiedFiles, permissionMode == model.PermissionModePlan, planFilePath)
 	if err != nil {
 		cb.consecutiveFailures++
 		c.checkCircuitBreaker(cb, conversationID)
@@ -185,6 +221,9 @@ func (c *ContextCompactor) compact(
 
 	summary.ReadFiles = mergeUnique(summary.ReadFiles, readFiles)
 	summary.ModifiedFiles = mergeUnique(summary.ModifiedFiles, modifiedFiles)
+	// C4 plan 模式：把当前 plan 状态写入摘要结构，便于渲染和持久化。
+	summary.PlanMode = permissionMode == model.PermissionModePlan
+	summary.PlanPath = planFilePath
 
 	summaryMarkdown := renderCompactionMarkdown(summary)
 	summaryMsg := llm.Message{
@@ -225,6 +264,8 @@ func (c *ContextCompactor) compact(
 		Focus:             focus,
 		ReadFiles:         summary.ReadFiles,
 		ModifiedFiles:     summary.ModifiedFiles,
+		PlanMode:          summary.PlanMode,
+		PlanPath:          summary.PlanPath,
 	}
 
 	if beforeTokens >= c.cfg.ThresholdTokens && afterTokens >= c.cfg.ThresholdTokens {
@@ -484,17 +525,19 @@ func collectPaths(m map[string]interface{}, set map[string]struct{}) {
 func (c *ContextCompactor) summarize(
 	ctx context.Context,
 	client AgentLLMClient,
-	model string,
+	modelName string,
 	prefix []llm.Message,
 	focus string,
 	readFiles, modifiedFiles []string,
+	planMode bool,
+	planPath string,
 ) (*CompactionSummary, error) {
 	if client == nil {
 		return nil, fmt.Errorf("LLM 客户端未提供")
 	}
-	prompt := buildSummaryPrompt(prefix, focus, readFiles, modifiedFiles)
+	prompt := buildSummaryPrompt(prefix, focus, readFiles, modifiedFiles, planMode, planPath)
 	req := llm.ChatRequest{
-		Model:    model,
+		Model:    modelName,
 		Messages: []llm.Message{{Role: "system", Content: prompt}},
 		Stream:   false,
 	}
@@ -506,7 +549,7 @@ func (c *ContextCompactor) summarize(
 }
 
 // buildSummaryPrompt 构造摘要生成提示词。
-func buildSummaryPrompt(prefix []llm.Message, focus string, readFiles, modifiedFiles []string) string {
+func buildSummaryPrompt(prefix []llm.Message, focus string, readFiles, modifiedFiles []string, planMode bool, planPath string) string {
 	var b strings.Builder
 	b.WriteString("请对以下对话历史进行结构化摘要。输出必须是合法 JSON，格式如下：\n")
 	b.WriteString(`{
@@ -519,7 +562,9 @@ func buildSummaryPrompt(prefix []llm.Message, focus string, readFiles, modifiedF
   "next_steps": ["建议下一步"],
   "critical_context": "必须保留的精确信息",
   "read_files": ["读取过的文件路径"],
-  "modified_files": ["修改/创建过的文件路径"]
+  "modified_files": ["修改/创建过的文件路径"],
+  "plan_mode": true,
+  "plan_path": "计划文件路径（若处于 plan 模式）"
 }`)
 	b.WriteString("\n\n对话历史（从旧到新）：\n")
 	for i, m := range prefix {
@@ -537,6 +582,9 @@ func buildSummaryPrompt(prefix []llm.Message, focus string, readFiles, modifiedF
 	}
 	if focus != "" {
 		fmt.Fprintf(&b, "\n\n请重点关注：%s", focus)
+	}
+	if planMode {
+		fmt.Fprintf(&b, "\n\n【Plan 模式上下文】当前会话处于 Plan 模式。摘要中必须保留该状态，并在 critical_context 中说明：计划文件路径为 %q，后续轮次仍应遵守 plan 模式约束（只读调研，直到用户接受计划）。", planPath)
 	}
 	if len(readFiles) > 0 {
 		fmt.Fprintf(&b, "\n\n历史已读取文件（请保留并在本次更新）：\n%s", strings.Join(readFiles, "\n"))
@@ -622,6 +670,13 @@ func renderCompactionMarkdown(s *CompactionSummary) string {
 		}
 		b.WriteString("\n")
 	}
+	if s.PlanMode {
+		fmt.Fprintf(&b, "\n**Plan 模式**：当前会话处于 Plan 模式")
+		if s.PlanPath != "" {
+			fmt.Fprintf(&b, "，计划文件：`%s`", s.PlanPath)
+		}
+		b.WriteString("；摘要后仍需遵守只读调研约束，直到用户接受计划。\n")
+	}
 	return strings.TrimSpace(b.String())
 }
 
@@ -661,6 +716,8 @@ func (c *ContextCompactor) persist(
 		"after_tokens":         res.AfterTokens,
 		"read_files":           res.ReadFiles,
 		"modified_files":       res.ModifiedFiles,
+		"plan_mode":            res.PlanMode,
+		"plan_path":            res.PlanPath,
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {

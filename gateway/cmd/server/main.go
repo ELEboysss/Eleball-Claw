@@ -409,6 +409,11 @@ func main() {
 	// C4：对话级上下文压缩器（自动压缩阈值由配置控制，手动 /agent/compact 始终可用）
 	agentCompactor := service.NewContextCompactor(chatConversationRepo, cfg.Agent.Compaction, logger)
 	agentWorkflowService.SetCompactor(agentCompactor)
+	// C2：装配生命周期钩子服务（hooks.json 与 config.yaml 同目录，热重载；不存在则空配置不报错）
+	hookPath := filepath.Join(filepath.Dir(configPath), "hooks.json")
+	hookSvc, _ := service.NewHookService(hookPath, logger)
+	agentWorkflowService.SetHookService(hookSvc)
+	agentCompactor.SetHookService(hookSvc)
 	// 动态工具加载器：将用户购买的集市 SKU 注入 Agent 工作流
 	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry(), moduleRegistry)
 	agentToolLoader.SetModuleService(moduleService)

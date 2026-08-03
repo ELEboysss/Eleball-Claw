@@ -207,7 +207,7 @@ func TestAgentService_DeleteSession(t *testing.T) {
 
 func TestAgentService_buildInitialMessages(t *testing.T) {
 	agentSvc, _, _ := setupAgentService(t)
-	msgs, ids := agentSvc.buildInitialMessages(context.Background(), AgentExecuteRequest{Message: "hello", History: []AgentHistoryMessage{{Message: llm.Message{Role: "user", Content: "prev"}, ID: "msg-prev"}}}, nil, "u1", "", "", false, false, model.PermissionModeDefault)
+	msgs, ids := agentSvc.buildInitialMessages(context.Background(), AgentExecuteRequest{Message: "hello", History: []AgentHistoryMessage{{Message: llm.Message{Role: "user", Content: "prev"}, ID: "msg-prev"}}}, nil, "u1", "", "", false, false, model.PermissionModeDefault, "")
 	require.Len(t, msgs, 3)
 	require.Len(t, ids, 3)
 	assert.Equal(t, "system", msgs[0].Role)
@@ -221,14 +221,14 @@ func TestAgentService_buildInitialMessages(t *testing.T) {
 func TestAgentService_buildInitialMessages_ToolsEnabled(t *testing.T) {
 	// AR-26：toolsEnabled=true 时 system prompt 含 FunctionGet 拉取说明；false 时不含。
 	agentSvc, _, _ := setupAgentService(t)
-	msgs, _ := agentSvc.buildInitialMessages(context.Background(), AgentExecuteRequest{Message: "hi"}, nil, "u1", "", "", true, false, model.PermissionModeDefault)
+	msgs, _ := agentSvc.buildInitialMessages(context.Background(), AgentExecuteRequest{Message: "hi"}, nil, "u1", "", "", true, false, model.PermissionModeDefault, "")
 	require.NotEmpty(t, msgs)
 	sys, ok := msgs[0].Content.(string)
 	require.True(t, ok)
 	assert.Contains(t, sys, "FunctionGet")
 	assert.Contains(t, sys, "FunctionCallBegin")
 
-	msgs2, _ := agentSvc.buildInitialMessages(context.Background(), AgentExecuteRequest{Message: "hi"}, nil, "u1", "", "", false, false, model.PermissionModeDefault)
+	msgs2, _ := agentSvc.buildInitialMessages(context.Background(), AgentExecuteRequest{Message: "hi"}, nil, "u1", "", "", false, false, model.PermissionModeDefault, "")
 	sys2, _ := msgs2[0].Content.(string)
 	assert.NotContains(t, sys2, "FunctionGet")
 }
