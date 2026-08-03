@@ -12,7 +12,7 @@ import TeamDetail from './pages/TeamDetail'
 
 function App() {
   const location = useLocation()
-  const isChat = location.pathname === '/chat'
+  const isChat = location.pathname === '/chat' || location.pathname.startsWith('/chat/')
   const isVisual = location.pathname === '/visual'
   // 内嵌云端内容的页面：iframe 撑满视口，隐藏 Footer，与 Chat/Visual 同为全屏视图。
   const isEmbed = ['/', '/recharge'].includes(location.pathname)
@@ -25,6 +25,7 @@ function App() {
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/chat" element={<Chat />} />
+          <Route path="/chat/:conversationId" element={<Chat />} />
           <Route path="/recharge" element={<Recharge />} />
           <Route path="/models" element={<Models />} />
           <Route path="/agents" element={<AgentMarket />} />

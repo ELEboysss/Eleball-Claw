@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import useSEO from '../hooks/useSEO'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import {
   Send,
   MoreHorizontal,
@@ -105,6 +105,7 @@ const filterChatCapableModels = (list) => list.filter((m) => m?.supports_chat !=
 export default function Chat() {
   useSEO('在线 AI 对话', '多轮对话、多模型切换、语音输入。登录即享每日免费额度。')
   const navigate = useNavigate()
+  const { conversationId: urlConversationId } = useParams()
   const { isLoggedIn, token, user } = useAuth()
   const {
     conversations,
@@ -630,7 +631,21 @@ export default function Chat() {
   const switchConversation = (id) => {
     setCurrentConversationId(id)
     setSidebarOpen(false)
+    // 同步更新 URL，使刷新/分享后仍能定位到该对话
+    if (id) {
+      navigate(`/chat/${id}`, { replace: true })
+    }
   }
+
+  // 支持 /chat/:conversationId 路由：URL 指定对话时切换过去。
+  // ChatContext 初始化完成后若 conversations 中存在该对话即选中；否则保留当前选择，
+  // 避免 URL 拼错时强制创建幽灵对话。
+  useEffect(() => {
+    if (!initialized || !urlConversationId) return
+    if (urlConversationId !== currentConversationId && conversations.some((c) => c.id === urlConversationId)) {
+      setCurrentConversationId(urlConversationId)
+    }
+  }, [initialized, urlConversationId, conversations, currentConversationId])
 
   // 点击 Agent 关键节点时，跳回到该 Session 所属的对话。
   // 若该对话已不存在（例如被用户删除），不再新建兜底对话，避免产生无法删除的本地幽灵对话。
