@@ -1,9 +1,12 @@
 {
-  "module_id": "search-web",
+  "id": "search-web",
   "name": "联网搜索（本地）",
   "description": "本地运行的网页搜索工具。",
-  "url": "http://localhost:8091",
-  "transport_type": "module",
+  "source": "marketplace",
+  "transport": "execute",
+  "deployment": "docker",
+  "endpoint": "http://localhost:8091",
+  "docker_compose_path": "marketplace/search-web/docker-compose.yml",
   "sku_scope": "claw",
   "capabilities": [
     "list_sources",

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,18 +16,22 @@ import (
 // 旧终端/旧资源管理器会话启动 claw exe，进程 PATH 中没有 docker，
 // exec.LookPath("docker") 即失败——尽管 Docker 已安装。
 //
-// 对策：LookPath 未命中时，回退探测 Docker Desktop 默认安装目录与注册表
-// Path（见 docker_path_windows.go），找到后把所在目录临时注入进程 PATH，
-// 使后续所有 exec.Command("docker", ...)（compose 上下线、镜像安装、
-// system status 探测等）无需逐一改造即可生效。
+// 对策：
+//   1. LookPath 未命中时，回退探测 Docker Desktop 默认安装目录与注册表
+//      Path（见 docker_path_windows.go），找到后把所在目录临时注入进程 PATH。
+//   2. 仍找不到但本机已启用 WSL 且 `wsl docker --version` 成功时，标记使用
+//      WSL 桥接模式；后续 DockerCommand 自动转发为 `wsl docker ...`。
 
 var (
 	dockerResolveOnce sync.Once
 	dockerResolved    string
+	// wslDocker 为 true 时表示当前进程通过 WSL 桥接调用 docker（`wsl docker ...`）
+	wslDocker bool
 )
 
 // ResolveDocker 返回 docker CLI 的可用路径；未找到返回空串。
-// 优先进程 PATH，未命中回退平台相关的常见安装位置。
+// 优先进程 PATH，未命中回退平台相关的常见安装位置；Windows 下仍找不到时
+// 若 `wsl docker` 可用，返回字符串 "wsl" 作为占位，并设置 wslDocker 标志。
 func ResolveDocker() string {
 	if p, err := exec.LookPath("docker"); err == nil {
 		return p
@@ -39,11 +44,18 @@ func ResolveDocker() string {
 			}
 		}
 	}
+	// 兜底：WSL 内已安装 docker，但 Windows PATH 中没有原生客户端
+	if runtime.GOOS == "windows" || runtime.GOOS == "linux" {
+		if cmd := exec.Command("wsl", "docker", "--version"); cmd.Run() == nil {
+			wslDocker = true
+			return "wsl"
+		}
+	}
 	return ""
 }
 
 // EnsureDockerOnPath 解析 docker 并在需要时把其目录注入进程 PATH（幂等）。
-// 返回最终可用的 docker 路径（仍不可用返回空串）。
+// 返回最终可用的 docker 路径（仍不可用返回空串）；使用 WSL 桥接时返回 "wsl"。
 // 注意：只修改当前进程环境，不影响系统配置。
 func EnsureDockerOnPath() string {
 	dockerResolveOnce.Do(func() {
@@ -52,13 +64,21 @@ func EnsureDockerOnPath() string {
 			return
 		}
 		// p 来自回退路径（PATH 中没有）时，注入目录让子进程同样可见
-		if _, err := exec.LookPath("docker"); err != nil {
+		if _, err := exec.LookPath("docker"); err != nil && !wslDocker {
 			dir := filepath.Dir(p)
 			os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 		}
 		dockerResolved = p
 	})
 	return dockerResolved
+}
+
+// DockerCommand 构造一条 docker 命令；在 WSL 桥接模式下实际执行 `wsl docker <args...>`。
+func DockerCommand(ctx context.Context, args ...string) *exec.Cmd {
+	if wslDocker {
+		return exec.CommandContext(ctx, "wsl", append([]string{"docker"}, args...)...)
+	}
+	return exec.CommandContext(ctx, "docker", args...)
 }
 
 // dockerCandidateNames 平台相关的 docker 可执行文件候选名。

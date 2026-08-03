@@ -147,12 +147,20 @@ func (s *ModuleService) RegisterModuleFromPlugin(req *model.ModuleRegisterReques
 }
 
 // marketplaceModuleManifest 内置模块目录中的 module.json 定义。
+// 支持新旧两种字段命名：新格式使用 id/transport/deployment/endpoint，
+// 旧格式使用 module_id/transport_type/url，向后兼容。
 type marketplaceModuleManifest struct {
-	ModuleID        string                 `json:"module_id"`
+	ID              string                 `json:"id"`
+	ModuleID        string                 `json:"module_id"` // 兼容旧格式
 	Name            string                 `json:"name"`
 	Description     string                 `json:"description"`
-	URL             string                 `json:"url"`
-	TransportType   string                 `json:"transport_type"`
+	URL             string                 `json:"url"`       // 兼容旧格式
+	Endpoint        string                 `json:"endpoint"`  // 新格式
+	Transport       string                 `json:"transport"` // 新格式
+	TransportType   string                 `json:"transport_type"` // 兼容旧格式
+	Deployment      string                 `json:"deployment"` // 新格式
+	Source          string                 `json:"source"`    // 新格式
+	DockerComposePath string               `json:"docker_compose_path,omitempty"` // 新格式
 	Capabilities    []string               `json:"capabilities"`
 	MCPServerConfig *model.MCPServerConfig `json:"mcp_server_config,omitempty"`
 	Driver          struct {
@@ -160,6 +168,38 @@ type marketplaceModuleManifest struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
 	} `json:"driver"`
+}
+
+// GetID 获取运行时 ID（优先新格式 id）
+func (m *marketplaceModuleManifest) GetID() string {
+	if m.ID != "" {
+		return m.ID
+	}
+	return m.ModuleID
+}
+
+// GetTransport 获取 transport（优先新格式）
+func (m *marketplaceModuleManifest) GetTransport() string {
+	if m.Transport != "" {
+		return m.Transport
+	}
+	return m.TransportType
+}
+
+// GetEndpoint 获取 endpoint（优先新格式）
+func (m *marketplaceModuleManifest) GetEndpoint() string {
+	if m.Endpoint != "" {
+		return m.Endpoint
+	}
+	return m.URL
+}
+
+// GetDeployment 获取 deployment，默认 docker
+func (m *marketplaceModuleManifest) GetDeployment() string {
+	if m.Deployment != "" {
+		return m.Deployment
+	}
+	return "docker"
 }
 
 // RescanMarketplace 运行时重新扫描 marketplace 目录，根据 module.json
@@ -240,29 +280,40 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 			}
 			continue
 		}
-		if m.ModuleID == "" || m.Driver.ID == "" {
+		moduleID := m.GetID()
+		if moduleID == "" || m.Driver.ID == "" {
 			if logger != nil {
 				logger.Warn("module.json 缺少必填字段", zap.String("path", path))
 			}
 			continue
 		}
 
-		// 确定传输类型，默认 module；mcp / remote_url 需要特殊处理。
+		// 确定传输类型：新格式 transport 优先，旧格式 transport_type 兼容
+		transport := m.GetTransport()
 		transportType := model.ModuleTransportTypeModule
-		if m.TransportType != "" {
-			transportType = model.ModuleTransportType(m.TransportType)
+		switch transport {
+		case "execute":
+			transportType = model.ModuleTransportTypeModule
+		case "mcp_http":
+			transportType = model.ModuleTransportTypeMCP
+		case "raw_http":
+			transportType = model.ModuleTransportTypeRemoteURL
+		case "mcp", "module", "remote_url":
+			// 兼容旧格式
+			transportType = model.ModuleTransportType(transport)
 		}
-		moduleURL := m.URL
+
+		moduleURL := m.GetEndpoint()
 		if transportType == model.ModuleTransportTypeMCP && moduleURL == "" && m.MCPServerConfig != nil {
 			moduleURL = m.MCPServerConfig.URL
 		}
 
 		// 确保模块记录存在；已存在时同步 module.json 的 url/名称/描述/能力
 		//（官方模块以 marketplace 文件为准，兼容旧版本登记的 URL 变更，如 docker 内网名改宿主机端口）
-		existingModule, err := s.GetModule(m.ModuleID)
+		existingModule, err := s.GetModule(moduleID)
 		if err != nil || existingModule == nil {
 			rec := &model.ModuleRecord{
-				ID:            m.ModuleID,
+				ID:            moduleID,
 				Name:          m.Name,
 				Description:   m.Description,
 				URL:           moduleURL,
@@ -274,11 +325,11 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 			rec.SetCapabilities(m.Capabilities)
 			if err := s.RegisterModule(rec); err != nil {
 				if logger != nil {
-					logger.Warn("自动补齐内置模块失败", zap.String("module_id", m.ModuleID), zap.Error(err))
+					logger.Warn("自动补齐内置模块失败", zap.String("module_id", moduleID), zap.Error(err))
 				}
 			} else {
 				if logger != nil {
-					logger.Info("已自动补齐内置模块", zap.String("module_id", m.ModuleID), zap.String("transport_type", string(transportType)))
+					logger.Info("已自动补齐内置模块", zap.String("module_id", moduleID), zap.String("transport_type", string(transportType)))
 				}
 			}
 		} else {
@@ -287,15 +338,15 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 			if existingModule.URL != moduleURL || existingModule.Name != m.Name ||
 				existingModule.Description != m.Description || existingModule.Capabilities != caps.Capabilities || !existingModule.Official {
 				if s.moduleRepo != nil {
-					if err := s.moduleRepo.SyncManifest(m.ModuleID, moduleURL, m.Name, m.Description, caps.Capabilities); err != nil && logger != nil {
-						logger.Warn("同步内置模块清单失败", zap.String("module_id", m.ModuleID), zap.Error(err))
+					if err := s.moduleRepo.SyncManifest(moduleID, moduleURL, m.Name, m.Description, caps.Capabilities); err != nil && logger != nil {
+						logger.Warn("同步内置模块清单失败", zap.String("module_id", moduleID), zap.Error(err))
 					}
 				}
 				// marketplace/ 目录扫描到的均为官方内置模块，回填缺失的 Official 标记
 				if !existingModule.Official {
 					existingModule.Official = true
 					if err := s.moduleRepo.CreateOrUpdate(existingModule); err != nil && logger != nil {
-						logger.Warn("回填内置模块 Official 标记失败", zap.String("module_id", m.ModuleID), zap.Error(err))
+						logger.Warn("回填内置模块 Official 标记失败", zap.String("module_id", moduleID), zap.Error(err))
 					}
 				}
 			}
@@ -309,10 +360,12 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 				Name:          m.Driver.Name,
 				Description:   m.Driver.Description,
 				TransportType: string(transportType),
-				ModuleID:      m.ModuleID,
+				ModuleID:      moduleID,
 			}
 			if transportType == model.ModuleTransportTypeMCP {
-				req.ModuleID = "" // MCP 驱动不绑定 module_id，直接调用 mcp_server_config.url
+				// MCP 驱动绑定 module_id：模块记录负责健康探测（/health），
+				// 驱动记录保留 MCPServerConfig 作为实际 JSON-RPC 调用端点。
+				req.ModuleID = moduleID
 				req.MCPServerConfig = m.MCPServerConfig
 			}
 			if transportType == model.ModuleTransportTypeRemoteURL {
@@ -324,7 +377,7 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 				}
 			} else {
 				if logger != nil {
-					logger.Info("已自动补齐内置驱动", zap.String("driver_id", m.Driver.ID), zap.String("module_id", m.ModuleID), zap.String("transport_type", string(transportType)))
+					logger.Info("已自动补齐内置驱动", zap.String("driver_id", m.Driver.ID), zap.String("module_id", moduleID), zap.String("transport_type", string(transportType)))
 				}
 			}
 		}

@@ -1,10 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -89,7 +89,7 @@ func runModuleCommand(args []string) int {
 			printModuleUsage()
 			return 1
 		}
-		c := exec.Command("docker", dargs...)
+		c := service.DockerCommand(context.Background(), dargs...)
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
 		c.Stdin = os.Stdin

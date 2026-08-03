@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -165,7 +164,7 @@ func composeRun(ctx context.Context, root, name string, timeout time.Duration, a
 	defer cancel()
 	compose := filepath.Join(root, name, "docker-compose.yml")
 	dargs := append([]string{"compose", "-f", compose, "-p", "eleball-claw-" + name}, args...)
-	cmd := exec.CommandContext(ctx, "docker", dargs...)
+	cmd := service.DockerCommand(ctx, dargs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return &composeError{module: name, output: string(out), err: err}
@@ -177,7 +176,7 @@ func composeRun(ctx context.Context, root, name string, timeout time.Duration, a
 func dockerPull(ctx context.Context, name, ref string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", "pull", ref)
+	cmd := service.DockerCommand(ctx, "pull", ref)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return &composeError{module: name, output: string(out), err: err}

@@ -1,0 +1,10 @@
+# MCP Hello 本地编排（claw 预置模块自动上线用）
+# 启动后监听 localhost:8081/mcp，health 端点位于 /health
+services:
+  mcp-hello:
+    build: .
+    image: crpi-2tmk9w177nykk4zb.cn-hangzhou.personal.cr.aliyuncs.com/eleball/mcp-hello:develop
+    container_name: eleball-mcp-hello
+    ports:
+      - "8081:8081"
+    restart: unless-stopped

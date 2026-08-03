@@ -186,20 +186,26 @@ func resolveMarketplaceRoot() string {
 }
 
 // readModuleSKUScope 读 module.json 的 sku_scope。返回 (scope, ok)；无 module.json
-// 或缺 module_id 时 ok=false（视为非官方模块目录，跳过）。
+// 或缺 id/module_id 时 ok=false（视为非官方模块目录，跳过）。
+// 支持新格式 id 与旧格式 module_id。
 func readModuleSKUScope(path string) (string, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", false
 	}
 	var mod struct {
-		ModuleID string `json:"module_id"`
+		ID       string `json:"id"`
+		ModuleID string `json:"module_id"` // 兼容旧格式
 		SKUScope string `json:"sku_scope"`
 	}
 	if err := json.Unmarshal(data, &mod); err != nil {
 		return "", false
 	}
-	if mod.ModuleID == "" {
+	id := mod.ID
+	if id == "" {
+		id = mod.ModuleID
+	}
+	if id == "" {
 		return "", false
 	}
 	return mod.SKUScope, true

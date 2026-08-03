@@ -345,8 +345,11 @@ func (l *AgentToolLoader) ResolveModuleID(manifest *model.ToolManifest) string {
 		return manifest.Metadata["module"]
 	}
 	_, rec, ok := l.resolveDriver(string(manifest.Driver))
-	if ok && rec != nil && rec.TransportType == string(model.ModuleTransportTypeModule) {
-		return rec.ModuleID
+	if ok && rec != nil {
+		switch rec.TransportType {
+		case string(model.ModuleTransportTypeModule), string(model.ModuleTransportTypeMCP):
+			return rec.ModuleID
+		}
 	}
 	return ""
 }
