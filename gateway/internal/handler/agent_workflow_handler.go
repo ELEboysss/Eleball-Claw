@@ -19,7 +19,7 @@ import (
 type AgentWorkflowHandler struct {
 	agentService *service.AgentService
 	// claw：搜索能力下沉到 search-web 模块，注入后 ListSearchProviders 优先转发模块 list_sources
-	moduleRegistry *service.ModuleRegistry
+	skillRuntimeRegistry *service.SkillRuntimeRegistry
 	// C5：slash 命令服务（输入栏命令中心）
 	slashService *service.SlashCommandService
 	// C8：项目记忆文件加载服务（/agent/memory）
@@ -31,10 +31,10 @@ func NewAgentWorkflowHandler(agentService *service.AgentService) *AgentWorkflowH
 	return &AgentWorkflowHandler{agentService: agentService}
 }
 
-// SetModuleRegistry 注入模块注册表（claw 用：search-providers 转发 search-web 模块）。
+// SetSkillRuntimeRegistry 注入统一运行时注册表（claw 用：search-providers 转发 search-web 模块）。
 // 不改构造签名以保持向后兼容；未注入时 ListSearchProviders 回退环境变量。
-func (h *AgentWorkflowHandler) SetModuleRegistry(r *service.ModuleRegistry) {
-	h.moduleRegistry = r
+func (h *AgentWorkflowHandler) SetSkillRuntimeRegistry(r *service.SkillRuntimeRegistry) {
+	h.skillRuntimeRegistry = r
 }
 
 // SetSlashCommandService 注入 slash 命令服务（C5）
@@ -413,7 +413,7 @@ func (h *AgentWorkflowHandler) Compact(c *gin.Context) {
 // claw：搜索能力下沉到 search-web 模块（源配置在模块容器侧），优先转发模块的
 // list_sources 取真实可用源；模块离线或未注入 registry 时回退读 gateway 环境变量。
 func (h *AgentWorkflowHandler) ListSearchProviders(c *gin.Context) {
-	if h.moduleRegistry != nil {
+	if h.skillRuntimeRegistry != nil {
 		if providers, err := h.listSearchWebSources(c); err == nil && len(providers) > 0 {
 			c.JSON(http.StatusOK, gin.H{
 				"code":    0,
@@ -438,7 +438,7 @@ func (h *AgentWorkflowHandler) ListSearchProviders(c *gin.Context) {
 // [{name,label}]（对齐 ListAvailableSearchProviders 契约，前端无需改动）。
 func (h *AgentWorkflowHandler) listSearchWebSources(c *gin.Context) ([]gin.H, error) {
 	userID, _ := h.getUserID(c)
-	result, err := h.moduleRegistry.Execute("search-web", "list_sources", map[string]interface{}{}, userID)
+	result, err := h.skillRuntimeRegistry.Execute("search-web", "list_sources", map[string]interface{}{}, userID)
 	if err != nil {
 		return nil, err
 	}

@@ -102,6 +102,13 @@ func (r *AgentRepo) ListPurchasedByUser(buyerID string) ([]*model.AgentItem, err
 	return items, err
 }
 
+// ListPurchasesByUser 查询某用户的所有购买记录
+func (r *AgentRepo) ListPurchasesByUser(buyerID string) ([]*model.AgentPurchase, error) {
+	var items []*model.AgentPurchase
+	err := r.db.Where("buyer_id = ?", buyerID).Order("created_at DESC").Find(&items).Error
+	return items, err
+}
+
 // Update 更新秘技
 func (r *AgentRepo) Update(agent *model.AgentItem) error {
 	return r.db.Save(agent).Error

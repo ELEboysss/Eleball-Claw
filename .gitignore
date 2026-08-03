@@ -3,6 +3,9 @@ dist/
 data/
 *.exe
 
+# 本地工具缓存（Go 构建缓存、临时目录）
+.tools/
+
 # Python 缓存
 __pycache__/
 *.pyc

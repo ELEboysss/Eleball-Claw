@@ -15,18 +15,29 @@ import (
 
 // AgentMarketService Agent 市场服务
 type AgentMarketService struct {
-	agentRepo       *repository.AgentRepo
-	userRepo        *repository.UserRepo
-	vipService      *VIPService
-	moduleRegistry  *ModuleRegistry
-	moduleService   *ModuleService
-	moduleRepo      *repository.ModuleRepo
-	db                     *gorm.DB
-	agentToolLoader        *AgentToolLoader
+	agentRepo      *repository.AgentRepo
+	userRepo       *repository.UserRepo
+	vipService     *VIPService
+	skillRuntimeRegistry *SkillRuntimeRegistry
+	moduleService        *ModuleService
+	moduleRepo           *repository.ModuleRepo // claw：IsCloudPurchasedAgent 读取旧 modules 表安装来源
+	db                   *gorm.DB
+	agentToolLoader      *AgentToolLoader
 	agentCredentialService *AgentCredentialService
 	// localFreeOnly=true 时仅允许免费 SKU 本地购买（claw：付费秘技统一引导到云端 eleball.cn 购买）。
 	// 云端 cmd/server 不设置，保持原有余额扣费购买行为。
 	localFreeOnly bool
+}
+
+// NewAgentMarketService 创建服务
+func NewAgentMarketService(db *gorm.DB, agentRepo *repository.AgentRepo, userRepo *repository.UserRepo, vipService *VIPService, skillRuntimeRegistry *SkillRuntimeRegistry) *AgentMarketService {
+	return &AgentMarketService{
+		agentRepo:            agentRepo,
+		userRepo:             userRepo,
+		vipService:           vipService,
+		skillRuntimeRegistry: skillRuntimeRegistry,
+		db:                   db,
+	}
 }
 
 // SetLocalFreeOnly 设置是否仅允许免费 SKU 本地购买（claw 本地集市用）。
@@ -34,35 +45,9 @@ func (s *AgentMarketService) SetLocalFreeOnly(b bool) {
 	s.localFreeOnly = b
 }
 
-// NewAgentMarketService 创建服务
-func NewAgentMarketService(db *gorm.DB, agentRepo *repository.AgentRepo, userRepo *repository.UserRepo, vipService *VIPService, moduleRegistry *ModuleRegistry) *AgentMarketService {
-	return &AgentMarketService{
-		agentRepo:      agentRepo,
-		userRepo:       userRepo,
-		vipService:     vipService,
-		moduleRegistry: moduleRegistry,
-		db:             db,
-	}
-}
-
-// SetAgentToolLoader 设置动态工具加载器，用于购买后激活动态工具
-func (s *AgentMarketService) SetAgentToolLoader(loader *AgentToolLoader) {
-	s.agentToolLoader = loader
-}
-
-// SetModuleService 设置模块服务，用于审批时自动创建/更新驱动别名。
-func (s *AgentMarketService) SetModuleService(svc *ModuleService) {
-	s.moduleService = svc
-}
-
-// SetModuleRepo 设置模块仓库（claw 用：判定云端秘技 provenance）。
+// SetModuleRepo 注入旧模块仓库（claw：云端来源 provenance 判定）。
 func (s *AgentMarketService) SetModuleRepo(repo *repository.ModuleRepo) {
 	s.moduleRepo = repo
-}
-
-// SetAgentCredentialService 设置凭证服务，用于列表展示「凭证是否配齐」与激活门控。
-func (s *AgentMarketService) SetAgentCredentialService(svc *AgentCredentialService) {
-	s.agentCredentialService = svc
 }
 
 // IsCloudPurchasedAgent 判定某秘技是否为云端安装来源（provenance）。
@@ -86,6 +71,21 @@ func (s *AgentMarketService) IsCloudPurchasedAgent(agentID string) bool {
 		return false
 	}
 	return rec.InstallSource == "cloud-purchased"
+}
+
+// SetAgentToolLoader 设置动态工具加载器，用于购买后激活动态工具
+func (s *AgentMarketService) SetAgentToolLoader(loader *AgentToolLoader) {
+	s.agentToolLoader = loader
+}
+
+// SetModuleService 设置模块服务，用于审批时自动创建/更新驱动别名。
+func (s *AgentMarketService) SetModuleService(svc *ModuleService) {
+	s.moduleService = svc
+}
+
+// SetAgentCredentialService 设置凭证服务，用于列表展示「凭证是否配齐」与激活门控。
+func (s *AgentMarketService) SetAgentCredentialService(svc *AgentCredentialService) {
+	s.agentCredentialService = svc
 }
 
 // ====== 秘技管理 ======
@@ -212,7 +212,7 @@ func (s *AgentMarketService) checkModuleOnline(item *model.AgentItem) *bool {
 	if driver == "" || driver == string(model.ToolDriverNone) || driver == string(model.ToolDriverBuiltin) {
 		return nil
 	}
-	if s.moduleRegistry == nil {
+	if s.skillRuntimeRegistry == nil {
 		return nil
 	}
 	moduleID := s.resolveModuleID(item)
@@ -221,7 +221,7 @@ func (s *AgentMarketService) checkModuleOnline(item *model.AgentItem) *bool {
 		offline := false
 		return &offline
 	}
-	status := s.moduleRegistry.Check(moduleID)
+	status := s.skillRuntimeRegistry.Check(moduleID)
 	online := status != nil && status.Online
 	return &online
 }
@@ -265,53 +265,26 @@ func (s *AgentMarketService) resolveModuleID(item *model.AgentItem) string {
 // enrichAgents 填充动态评分、激活人数、当前用户激活状态、模块在线状态等运行时字段
 // 返回结果按「当前用户已激活 > 未激活」置顶，再按原排序规则二次排序。
 func (s *AgentMarketService) enrichAgents(userID string, items []*model.AgentItem, sortBy string) []*model.AgentItem {
-	type score struct {
-		index       int
-		ratio       float64
-		activeCount int64
-	}
-	scores := make([]score, 0, len(items))
-
 	for i, item := range items {
 		activeCount, _ := s.agentRepo.CountActiveUsers(item.ID)
 		favoriteCount, _ := s.agentRepo.CountFavorites(item.ID)
 		isActive, _ := s.agentRepo.IsToolActive(userID, item.ID)
+		isFav, _ := s.agentRepo.IsFavorited(userID, item.ID)
 
 		items[i].ActiveCount = activeCount
 		items[i].IsActive = isActive
+		items[i].IsFavorited = isFav
 		items[i].DriverRegistered = s.checkDriverRegistered(item)
 		items[i].ModuleOnline = s.checkModuleOnline(item)
 		items[i].CredentialComplete = s.checkCredentialComplete(userID, item)
 
-		// 动态评分：收藏率横向排名，最低 1 最高 5
-		var ratio float64
+		// 动态评分：收藏率×5，连续值不卡上限。favoriteCount 含未购买/未激活用户收藏，
+		// 可能 > activeCount 导致评分 > 5，符合预期（无最高分限制）。
 		if activeCount > 0 {
-			ratio = float64(favoriteCount) / float64(activeCount)
+			items[i].AvgRating = float64(favoriteCount) / float64(activeCount) * 5
+		} else {
+			items[i].AvgRating = 3.0 // 无激活数据时默认 3 分
 		}
-		scores = append(scores, score{index: i, ratio: ratio, activeCount: activeCount})
-	}
-
-	// 按收藏率降序排名，按 percentile 映射到 1-5
-	sort.Slice(scores, func(i, j int) bool {
-		return scores[i].ratio > scores[j].ratio
-	})
-	for rank, sc := range scores {
-		var rating float64
-		switch {
-		case sc.activeCount == 0:
-			rating = 3.0 // 无激活数据时默认 3 分
-		case rank < len(scores)/5:
-			rating = 5.0
-		case rank < 2*len(scores)/5:
-			rating = 4.0
-		case rank < 3*len(scores)/5:
-			rating = 3.0
-		case rank < 4*len(scores)/5:
-			rating = 2.0
-		default:
-			rating = 1.0
-		}
-		items[sc.index].AvgRating = rating
 	}
 
 	// 已激活秘技始终排在未激活前面；同组内保持原排序规则
@@ -357,6 +330,9 @@ type PurchaseAgentRequest struct {
 	Currency string `json:"currency" binding:"required,oneof=danwan elegant"`
 }
 
+// ErrVIPRequired 下载/获取秘技需 VIP1 及以上（管理员豁免）。handler 据此返回 403/4002。
+var ErrVIPRequired = errors.New("下载秘技需 VIP1 及以上")
+
 // PurchaseAgent 购买秘技
 func (s *AgentMarketService) PurchaseAgent(buyerID string, req PurchaseAgentRequest) error {
 	agent, err := s.agentRepo.GetByID(req.AgentID)
@@ -386,8 +362,28 @@ func (s *AgentMarketService) PurchaseAgent(buyerID string, req PurchaseAgentRequ
 		req.Currency = "danwan"
 	}
 
+	// claw 本地集市：付费秘技统一引导到云端 eleball.cn 购买（本地不计费、无余额体系）
+	if s.localFreeOnly && price > 0 {
+		return errors.New("付费秘技请到云端购买")
+	}
+
+	// VIP 门控：下载/获取秘技需 VIP1 及以上（管理员经 GetEffectiveVIP 自动放行）。
+	// claw 本地免费路径豁免：localFreeOnly 且价格为 0 时不触碰会员体系。
+	if !(s.localFreeOnly && price <= 0) {
+		if s.vipService == nil {
+			return errors.New("会员服务未初始化")
+		}
+		vipStatus, err := s.vipService.GetEffectiveVIP(buyerID)
+		if err != nil {
+			return fmt.Errorf("无法校验会员等级: %w", err)
+		}
+		if vipStatus.Level < 1 {
+			return ErrVIPRequired
+		}
+	}
+
 	if price <= 0 {
-		// 免费秘技直接记录（claw 本地购买路径：不触碰 billing/余额，nil 安全）
+		// 免费秘技直接记录并激活动态工具
 		purchase := &model.AgentPurchase{
 			ID:              uuid.New().String(),
 			AgentID:         req.AgentID,
@@ -400,19 +396,12 @@ func (s *AgentMarketService) PurchaseAgent(buyerID string, req PurchaseAgentRequ
 		if err := s.agentRepo.CreatePurchase(purchase); err != nil {
 			return err
 		}
-		// 对齐付费路径：购买后自动激活动态工具（若该 SKU 携带可执行 manifest）
 		if s.agentToolLoader != nil {
 			_ = s.agentToolLoader.ActivateToolOnPurchase(buyerID, req.AgentID)
 		}
-		// 更新购买计数
 		purchaseCount, _ := s.agentRepo.CountPurchases(req.AgentID)
-		s.agentRepo.UpdateStats(req.AgentID, purchaseCount, agent.AvgRating, agent.FavoriteCount, agent.UseCount+1)
+		_ = s.agentRepo.UpdateStats(req.AgentID, purchaseCount, agent.AvgRating, agent.FavoriteCount, agent.UseCount+1)
 		return nil
-	}
-
-	// claw 本地集市：付费秘技统一引导到云端 eleball.cn 购买（本地不计费、无余额体系）
-	if s.localFreeOnly {
-		return errors.New("付费秘技请到云端购买")
 	}
 
 	// 扣除购买者余额（弹丸从 user.balance，优雅弹丸从 developer_account）
@@ -694,10 +683,10 @@ func (s *AgentMarketService) GetCapabilities(userID string, role string) (*model
 
 	// 集市模块在线状态
 	var modules []*model.ModuleCapability
-	if s.moduleRegistry != nil {
-		for _, st := range s.moduleRegistry.List() {
+	if s.skillRuntimeRegistry != nil {
+		for _, st := range s.skillRuntimeRegistry.List() {
 			modules = append(modules, &model.ModuleCapability{
-				ModuleID: st.ModuleID,
+				ModuleID: st.RuntimeID,
 				Online:   st.Online,
 				Version:  st.Version,
 			})
@@ -891,8 +880,8 @@ func (s *AgentMarketService) GetAgentDependencyStatus(agentID string) (*AgentDep
 				moduleID = s.agentToolLoader.ResolveModuleID(manifest)
 			}
 			status.ModuleID = moduleID
-			if moduleID != "" && s.moduleRegistry != nil {
-				st := s.moduleRegistry.Check(moduleID)
+			if moduleID != "" && s.skillRuntimeRegistry != nil {
+				st := s.skillRuntimeRegistry.Check(moduleID)
 				registered := st != nil
 				status.ModuleRegistered = registered
 				if registered {

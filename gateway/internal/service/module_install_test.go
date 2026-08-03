@@ -26,7 +26,7 @@ func setupCloudInstallTest(t *testing.T) (*ModuleService, *AgentMarketService, *
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, db.AutoMigrate(&model.ModuleRecord{}, &model.DriverRecord{}, &model.AgentItem{}, &model.AgentPurchase{}, &model.AgentUserTool{}))
+	require.NoError(t, db.AutoMigrate(&model.SkillRuntime{}, &model.AgentItem{}, &model.AgentPurchase{}, &model.AgentUserTool{}, &model.ModuleRecord{}, &model.DriverRecord{}))
 
 	moduleRepo := repository.NewModuleRepo(db)
 	driverRepo := repository.NewDriverRepo(db)
@@ -47,22 +47,31 @@ func setupCloudInstallTest(t *testing.T) (*ModuleService, *AgentMarketService, *
 	}))
 	t.Cleanup(server.Close)
 
-	registry := NewModuleRegistry(&config.AgentReachConfig{HealthCheckInterval: time.Hour})
-	registry.SetRepo(moduleRepo)
+	skillRuntimeRepo := repository.NewSkillRuntimeRepo(db)
+	registry := NewSkillRuntimeRegistry(&config.AgentReachConfig{HealthCheckInterval: time.Hour})
+	registry.SetRepo(skillRuntimeRepo)
+	manager := NewSkillRuntimeManager(registry, nil)
 
 	// 预置 official 模块（marketplace 扫描的等价物）
-	require.NoError(t, moduleRepo.CreateOrUpdate(&model.ModuleRecord{
-		ID:            "search-web",
-		Name:          "Search Web",
-		URL:           server.URL,
-		TransportType: model.ModuleTransportTypeModule,
-	}))
-	registry.Register("search-web", server.URL)
+	rt := &model.SkillRuntime{
+		ID:          "search-web",
+		Name:        "Search Web",
+		Endpoint:    server.URL,
+		Transport:   model.SkillRuntimeTransportExecute,
+		Deployment:  model.SkillRuntimeDeploymentDocker,
+		Official:    true,
+		DriverID:    "search-web",
+		Status:      model.SkillRuntimeStatusOffline,
+		Capabilities: "[]",
+	}
+	require.NoError(t, registry.Register(rt))
 
-	moduleSvc := NewModuleService(registry, moduleRepo, driverRepo)
-	moduleSvc.SetAgentRepo(agentRepo)
+	moduleSvc := NewModuleService(registry, manager, skillRuntimeRepo, agentRepo)
+	moduleSvc.SetModuleRepo(moduleRepo)
+	moduleSvc.SetDriverRepo(driverRepo)
 
 	agentSvc := NewAgentMarketService(db, agentRepo, nil, nil, registry)
+	agentSvc.SetLocalFreeOnly(true)
 	agentSvc.SetModuleRepo(moduleRepo)
 
 	return moduleSvc, agentSvc, agentRepo, driverRepo

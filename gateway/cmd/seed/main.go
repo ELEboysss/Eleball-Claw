@@ -72,18 +72,22 @@ func main() {
 		&model.AgentReview{}, &model.AgentFavorite{}, &model.AgentUserTool{},
 		&model.DeveloperAccount{}, &model.WithdrawalRecord{}, &model.ProviderApiKey{},
 		&model.EleAgentModelConfig{}, &model.SystemSetting{}, &model.RechargePackage{},
-		&model.VIPPlan{}, &model.VIPSubscription{}, &model.ModuleRecord{},
-		&model.DriverRecord{}, &model.AgentUserCredential{},
+		&model.VIPPlan{}, &model.VIPSubscription{}, &model.SkillRuntime{},
+		&model.AgentUserCredential{},
 	); err != nil {
 		logger.Fatal("数据库迁移失败", zap.Error(err))
 	}
 
 	agentRepo := repository.NewAgentRepo(db)
+	skillRuntimeRepo := repository.NewSkillRuntimeRepo(db)
+	skillRuntimeRegistry := service.NewSkillRuntimeRegistry(&cfg.AgentReach)
+	skillRuntimeRegistry.SetRepo(skillRuntimeRepo)
+	skillRuntimeManager := service.NewSkillRuntimeManager(skillRuntimeRegistry, logger)
 	moduleRepo := repository.NewModuleRepo(db)
 	driverRepo := repository.NewDriverRepo(db)
-	moduleRegistry := service.NewModuleRegistry(&cfg.AgentReach)
-	moduleSvc := service.NewModuleService(moduleRegistry, moduleRepo, driverRepo)
-	moduleRegistry.SetRepo(moduleRepo)
+	moduleSvc := service.NewModuleService(skillRuntimeRegistry, skillRuntimeManager, skillRuntimeRepo, agentRepo)
+	moduleSvc.SetModuleRepo(moduleRepo)
+	moduleSvc.SetDriverRepo(driverRepo)
 
 	if *onlyModules {
 		if err := seed.BuiltinModules(moduleSvc, logger); err != nil {

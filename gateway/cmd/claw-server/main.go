@@ -144,8 +144,7 @@ func main() {
 		&model.RechargePackage{},
 		&model.VIPPlan{},
 		&model.VIPSubscription{},
-		&model.ModuleRecord{},
-		&model.DriverRecord{},
+		&model.SkillRuntime{},
 		&model.AgentUserCredential{},
 		&model.Assistant{},
 		&model.AssistantItem{},
@@ -268,18 +267,20 @@ func main() {
 	// 各服务 nil 检查后跳过扣费与余额校验（Ele Agent 模型经 BaseURL 转发云端，由云端账户计费）。
 	var billingService *service.BillingService // nil
 
-	// 集市模块注册表（本地预置 + 云端拉取 + 本地自部署，统一去重）
-	moduleRegistry := service.NewModuleRegistry(&cfg.AgentReach)
-	moduleRegistry.SetLogger(logger)
-	moduleRegistry.SetRepo(moduleRepo)
-	moduleRegistry.SetDriverRepo(driverRepo)
-	moduleService := service.NewModuleService(moduleRegistry, moduleRepo, driverRepo)
+	// SkillRuntime 统一运行时（本地预置 + 云端拉取 + 本地自部署，统一去重）
+	skillRuntimeRepo := repository.NewSkillRuntimeRepo(db)
+	skillRuntimeRegistry := service.NewSkillRuntimeRegistry(&cfg.AgentReach)
+	skillRuntimeRegistry.SetLogger(logger)
+	skillRuntimeRegistry.SetRepo(skillRuntimeRepo)
+	skillRuntimeManager := service.NewSkillRuntimeManager(skillRuntimeRegistry, logger)
+	moduleService := service.NewModuleService(skillRuntimeRegistry, skillRuntimeManager, skillRuntimeRepo, agentRepo)
 	// claw 云端秘技安装后落本地 AgentItem/AgentPurchase（激活链路依赖购买记录）
-	moduleService.SetAgentRepo(agentRepo)
+	moduleService.SetModuleRepo(moduleRepo)
+	moduleService.SetDriverRepo(driverRepo)
 
 	// 扫描 marketplace/ 预置官方模块（search-web 等）
 	if err := seed.AutoEnsureMarketplaceModules(moduleService, logger); err != nil {
-		logger.Warn("自动补齐内置模块失败", zap.Error(err))
+		logger.Warn("自动补齐内置 SkillRuntime 失败", zap.Error(err))
 	}
 
 	// 泛化同步本地官方 SKU（module.json sku_scope=claw，如 search-web 免费搜索两变体）
@@ -292,21 +293,30 @@ func main() {
 		logger.Warn("预置秘技制造机失败", zap.Error(err))
 	}
 
-	// 启动模块后台健康探测（每 5 分钟一次）
-	moduleRegistry.Start()
-	defer moduleRegistry.Stop()
+	// 启动 SkillRuntime 后台健康探测（每 5 分钟一次）
+	skillRuntimeRegistry.Start()
+	defer skillRuntimeRegistry.Stop()
 
-	agentService := service.NewAgentMarketService(db, agentRepo, userRepo, vipService, moduleRegistry)
+	agentService := service.NewAgentMarketService(db, agentRepo, userRepo, vipService, skillRuntimeRegistry)
 	// claw 本地购买仅放行免费 SKU；付费秘技引导云端 eleball.cn 购买
 	agentService.SetLocalFreeOnly(true)
+	agentService.SetModuleRepo(moduleRepo)
 
 	// Agent 工作流
 	agentSandbox := service.NewFileSandbox(cfg.Agent.BasePath, cfg.Agent.KnowledgeBase)
 	agentRegistry := service.NewToolRegistry()
 	agentCredentialRepo := repository.NewAgentCredentialRepo(db)
 	agentCredentialService := service.NewAgentCredentialService(agentCredentialRepo, agentRepo)
-	agentRegistry.DriverRegistry().Register(service.NewModuleDriver(moduleRegistry, agentCredentialService))
-	agentRegistry.DriverRegistry().Register(service.NewMCPDriver(agentCredentialService))
+	agentRegistry.DriverRegistry().Register(service.NewModuleDriver(skillRuntimeRegistry, agentCredentialService))
+	agentRegistry.DriverRegistry().Register(service.NewMCPDriver(skillRuntimeRegistry, agentCredentialService))
+	// 按每个 SkillRuntime 的 driver_id 注册别名驱动，支持 SKU manifest 直接以 driver_id 匹配
+	if runtimes, err := skillRuntimeRepo.List(); err == nil {
+		for _, rt := range runtimes {
+			if rt.DriverID != "" {
+				agentRegistry.DriverRegistry().Register(service.NewSkillRuntimeDriver(rt.DriverID, skillRuntimeRegistry, agentCredentialService))
+			}
+		}
+	}
 	agentSchemaBuilder := service.NewToolSchemaBuilder(agentRegistry)
 	agentTrigger := service.NewAgentTrigger()
 
@@ -379,7 +389,7 @@ func main() {
 	agentWorkflowService.SetHookService(hookSvc)
 	// C3：装配 plan 文件目录（ExitPlanMode 落盘 {basePath}/plans/{slug}.md）
 	agentWorkflowService.SetPlansDir(filepath.Join(cfg.Agent.BasePath, "plans"))
-	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry(), moduleRegistry)
+	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry(), nil)
 	agentToolLoader.SetModuleService(moduleService)
 	agentWorkflowService.SetAgentToolLoader(agentToolLoader)
 	agentService.SetAgentToolLoader(agentToolLoader)
@@ -430,7 +440,7 @@ func main() {
 		// C8：注入项目记忆文件加载服务
 		agentWorkflowHandler.SetContextFileService(contextFileService)
 	// claw：search-providers 优先转发 search-web 模块的 list_sources（搜索源配置在模块侧）
-	agentWorkflowHandler.SetModuleRegistry(moduleRegistry)
+	agentWorkflowHandler.SetSkillRuntimeRegistry(skillRuntimeRegistry)
 	agentHandler := handler.NewAgentHandler(agentService)
 	// claw 云端来源秘技激活需 VIP1+
 	agentHandler.SetCloudAccountService(cloudAccountService)
@@ -507,7 +517,7 @@ func main() {
 	defer stopSignals()
 	if cfg.Modules.AutoStart {
 		go func() {
-			startedCh <- autoStartModules(sigCtx, logger, cfg.Modules, moduleRegistry)
+			startedCh <- autoStartModules(sigCtx, logger, cfg.Modules, skillRuntimeRegistry)
 		}()
 	} else {
 		startedCh <- nil

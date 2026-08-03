@@ -16,18 +16,21 @@ import (
 )
 
 // TestModuleService_RescanMarketplace_MCP 验证 marketplace 扫描能识别 transport_type=mcp 的示例模块，
-// 并创建正确的 ModuleRecord 与 DriverRecord（含 MCPServerConfig）。
+// 并创建正确的 SkillRuntime（含 MCPServerConfig）与驱动别名映射。
 func TestModuleService_RescanMarketplace_MCP(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.ModuleRecord{}, &model.DriverRecord{}))
+	require.NoError(t, db.AutoMigrate(&model.SkillRuntime{}))
 
+	skillRuntimeRepo := repository.NewSkillRuntimeRepo(db)
+	registry := NewSkillRuntimeRegistry(&config.AgentReachConfig{})
+	registry.SetRepo(skillRuntimeRepo)
+	manager := NewSkillRuntimeManager(registry, zap.NewNop())
 	moduleRepo := repository.NewModuleRepo(db)
 	driverRepo := repository.NewDriverRepo(db)
-	registry := NewModuleRegistry(&config.AgentReachConfig{})
-	registry.SetRepo(moduleRepo)
-	registry.SetDriverRepo(driverRepo)
-	svc := NewModuleService(registry, moduleRepo, driverRepo)
+	svc := NewModuleService(registry, manager, skillRuntimeRepo, nil)
+	svc.SetModuleRepo(moduleRepo)
+	svc.SetDriverRepo(driverRepo)
 
 	root := t.TempDir()
 	mcpDir := filepath.Join(root, "mcp-hello")
@@ -45,12 +48,16 @@ func TestModuleService_RescanMarketplace_MCP(t *testing.T) {
 
 	require.NoError(t, svc.ensureMarketplaceModules(root, zap.NewNop()))
 
-	mod, err := svc.GetModule("mcp-hello")
+	rt, err := svc.repo.GetByID("mcp-hello")
 	require.NoError(t, err)
-	require.NotNil(t, mod)
-	assert.Equal(t, model.ModuleTransportTypeMCP, mod.TransportType)
-	assert.Equal(t, "http://mcp-hello:8080/mcp", mod.URL)
-	assert.True(t, mod.Official)
+	require.NotNil(t, rt)
+	assert.Equal(t, model.SkillRuntimeTransportMCPHTTP, rt.Transport)
+	assert.Equal(t, "http://mcp-hello:8080", rt.Endpoint)
+	assert.True(t, rt.Official)
+	assert.Equal(t, "mcp_hello", rt.DriverID)
+	cfg := rt.GetMCPServerConfig()
+	require.NotNil(t, cfg)
+	assert.Equal(t, "http://mcp-hello:8080/mcp", cfg.URL)
 
 	drv, err := svc.ResolveDriver("mcp_hello")
 	require.NoError(t, err)

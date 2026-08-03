@@ -136,8 +136,7 @@ func main() {
 		&model.RechargePackage{},
 		&model.VIPPlan{},
 		&model.VIPSubscription{},
-		&model.ModuleRecord{},
-		&model.DriverRecord{},
+		&model.SkillRuntime{},
 		&model.AgentUserCredential{},
 		&model.VisualGenerationTask{},
 		&model.VisualConversation{},
@@ -332,19 +331,28 @@ func main() {
 	adminService := service.NewAdminService(db, userRepo, billingRepo, orderRepo, activityService, vipService)
 	cdkService := service.NewCDKService(cdkRepo, userRepo, billingRepo, vipService)
 	settingService := service.NewSettingService(settingRepo)
-	// 集市模块注册表：发现并调用独立部署的秘技模块（如 agent-reach）
-	moduleRegistry := service.NewModuleRegistry(&cfg.AgentReach)
-	moduleRegistry.SetLogger(logger)
+	// SkillRuntime 统一运行时：替代旧 ModuleRegistry + ModuleService
+	skillRuntimeRepo := repository.NewSkillRuntimeRepo(db)
+	skillRuntimeRegistry := service.NewSkillRuntimeRegistry(&cfg.AgentReach)
+	skillRuntimeRegistry.SetLogger(logger)
+	skillRuntimeRegistry.SetRepo(skillRuntimeRepo)
+
+	// 一次性迁移旧 modules/drivers 表数据到 skill_runtimes；新部署无旧表则自动跳过。
+	if err := skillRuntimeRepo.MigrateFromLegacy(); err != nil {
+		logger.Warn("旧模块数据迁移到 SkillRuntime 失败", zap.Error(err))
+	}
+
+	skillRuntimeManager := service.NewSkillRuntimeManager(skillRuntimeRegistry, logger)
 	moduleRepo := repository.NewModuleRepo(db)
 	driverRepo := repository.NewDriverRepo(db)
-	moduleRegistry.SetRepo(moduleRepo)
-	moduleRegistry.SetDriverRepo(driverRepo)
-	moduleService := service.NewModuleService(moduleRegistry, moduleRepo, driverRepo)
+	moduleService := service.NewModuleService(skillRuntimeRegistry, skillRuntimeManager, skillRuntimeRepo, agentRepo)
+	moduleService.SetModuleRepo(moduleRepo)
+	moduleService.SetDriverRepo(driverRepo)
 
-	// 自动扫描 marketplace/ 目录，根据 module.json 确保官方内置模块记录与驱动别名存在。
+	// 自动扫描 marketplace/ 目录，根据 module.json 确保官方内置 SkillRuntime 存在。
 	// 新增官方内置模块时，只需在 marketplace/ 下新增目录和 module.json，无需改代码。
 	if err := seed.AutoEnsureMarketplaceModules(moduleService, logger); err != nil {
-		logger.Warn("自动补齐内置模块失败", zap.Error(err))
+		logger.Warn("自动补齐内置 SkillRuntime 失败", zap.Error(err))
 	}
 
 	// 泛化同步官方 SKU（module.json sku_scope=cloud，如 agent-reach/firecrawl）：
@@ -363,10 +371,10 @@ func main() {
 		return
 	}
 
-	// 启动模块后台健康探测（每 5 分钟一次），避免高并发请求重复触发探测。
-	moduleRegistry.Start()
+	// 启动 SkillRuntime 后台健康探测（每 5 分钟一次）
+	skillRuntimeRegistry.Start()
 
-	agentService := service.NewAgentMarketService(db, agentRepo, userRepo, vipService, moduleRegistry)
+	agentService := service.NewAgentMarketService(db, agentRepo, userRepo, vipService, skillRuntimeRegistry)
 
 	// Agent 工作流服务
 	agentSandbox := service.NewFileSandbox(cfg.Agent.BasePath, cfg.Agent.KnowledgeBase)
@@ -374,8 +382,17 @@ func main() {
 	// SKU 凭证服务（按用户 + SKU 管理 Cookie / API Key / Token）
 	agentCredentialRepo := repository.NewAgentCredentialRepo(db)
 	agentCredentialService := service.NewAgentCredentialService(agentCredentialRepo, agentRepo)
-	// 注册通用集市模块驱动（firecrawl / agent-reach 等均通过此驱动调用）
-	agentRegistry.DriverRegistry().Register(service.NewModuleDriver(moduleRegistry, agentCredentialService))
+	// 注册通用运行时驱动（module/mcp 别名）
+	agentRegistry.DriverRegistry().Register(service.NewModuleDriver(skillRuntimeRegistry, agentCredentialService))
+	agentRegistry.DriverRegistry().Register(service.NewMCPDriver(skillRuntimeRegistry, agentCredentialService))
+	// 按每个 SkillRuntime 的 driver_id 注册别名驱动，支持 SKU manifest 直接以 driver_id 匹配
+	if runtimes, err := skillRuntimeRepo.List(); err == nil {
+		for _, rt := range runtimes {
+			if rt.DriverID != "" {
+				agentRegistry.DriverRegistry().Register(service.NewSkillRuntimeDriver(rt.DriverID, skillRuntimeRegistry, agentCredentialService))
+			}
+		}
+	}
 	agentSchemaBuilder := service.NewToolSchemaBuilder(agentRegistry)
 	agentTrigger := service.NewAgentTrigger()
 
@@ -415,11 +432,12 @@ func main() {
 	agentWorkflowService.SetHookService(hookSvc)
 	agentCompactor.SetHookService(hookSvc)
 	// 动态工具加载器：将用户购买的集市 SKU 注入 Agent 工作流
-	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry(), moduleRegistry)
+	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry(), nil)
 	agentToolLoader.SetModuleService(moduleService)
 	agentWorkflowService.SetAgentToolLoader(agentToolLoader)
 	agentService.SetAgentToolLoader(agentToolLoader)
 	agentService.SetModuleService(moduleService)
+	agentService.SetModuleRepo(moduleRepo)
 
 	// 初始化版本发布服务
 	releaseRootPath := cfg.Release.RootPath
@@ -471,7 +489,8 @@ func main() {
 	r := router.NewRouter(cfg, logger, jwtUtil, authHandler, chatHandler, billingHandler, syncHandler, paymentHandler, adminHandler, adminKeyHandler, adminEleAgentModelHandler, adminSettingHandler, publicSettingHandler, agentHandler, withdrawalHandler, eleAgentHandler, rechargePackageHandler, cdkHandler, releaseHandler, sttHandler, conversationHandler, moduleHandler, agentWorkflowHandler, vipHandler, agentCredentialHandler, visualHandler)
 
 	// 11. 启动服务
-	defer moduleRegistry.Stop()
+	defer skillRuntimeManager.StopAll()
+	defer skillRuntimeRegistry.Stop()
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	logger.Info("Eleball Gateway 启动", zap.String("addr", addr), zap.String("mode", cfg.Server.Mode))
 	if err := r.Run(addr); err != nil {

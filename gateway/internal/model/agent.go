@@ -66,6 +66,7 @@ type AgentItem struct {
 	UpdatedAt     time.Time   `json:"updated_at"`
 	// 以下字段不在数据库中，由列表接口根据当前用户动态填充
 	IsActive         bool  `gorm:"-" json:"is_active"`
+	IsFavorited      bool  `gorm:"-" json:"is_favorited"`
 	ActiveCount      int64 `gorm:"-" json:"active_count"`
 	DriverRegistered   bool  `gorm:"-" json:"driver_registered"`   // 是否已注册对应驱动别名（仅对非内置驱动有效）
 	CredentialComplete bool  `gorm:"-" json:"credential_complete"` // 当前用户是否已配齐该 SKU 声明的必填凭证（缺则不可激活）

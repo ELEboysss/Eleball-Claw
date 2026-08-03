@@ -163,6 +163,8 @@ type AgentReachConfig struct {
 	HealthCheckInterval time.Duration `mapstructure:"health_check_interval"`
 	// ProbeInterval 后台主动探测周期，默认 5 分钟；0 表示关闭后台探测
 	ProbeInterval time.Duration `mapstructure:"probe_interval"`
+	// ProbeOnRequest 是否在每个请求时触发实时健康探测（命中缓存则跳过）
+	ProbeOnRequest bool `mapstructure:"probe_on_request"`
 	// Proxy 代理地址，用于受限网络（如 http://user:pass@ip:port）
 	Proxy string `mapstructure:"proxy"`
 }

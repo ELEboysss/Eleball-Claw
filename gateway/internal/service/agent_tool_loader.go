@@ -17,16 +17,14 @@ import (
 type AgentToolLoader struct {
 	agentRepo      *repository.AgentRepo
 	driverRegistry *ToolDriverRegistry
-	moduleRegistry *ModuleRegistry
 	moduleService  *ModuleService
 }
 
 // NewAgentToolLoader 创建动态工具加载器
-func NewAgentToolLoader(agentRepo *repository.AgentRepo, driverRegistry *ToolDriverRegistry, moduleRegistry *ModuleRegistry) *AgentToolLoader {
+func NewAgentToolLoader(agentRepo *repository.AgentRepo, driverRegistry *ToolDriverRegistry, moduleRegistry *SkillRuntimeRegistry) *AgentToolLoader {
 	return &AgentToolLoader{
 		agentRepo:      agentRepo,
 		driverRegistry: driverRegistry,
-		moduleRegistry: moduleRegistry,
 	}
 }
 
@@ -65,11 +63,11 @@ func (l *AgentToolLoader) buildTools(items []*model.AgentItem) []*Tool {
 			continue
 		}
 		// 若该秘技声明了依赖模块，仅当模块在线时才载入工具
-		if l.moduleRegistry != nil {
+		if l.moduleService != nil {
 			manifest, _ := item.Manifest()
 			moduleID := l.ResolveModuleID(manifest)
 			if moduleID != "" {
-				status := l.moduleRegistry.Check(moduleID)
+				status := l.moduleService.CheckRuntime(moduleID)
 				if status == nil || !status.Online {
 					// 模块离线：跳过该工具，不暴露给大模型
 					continue
