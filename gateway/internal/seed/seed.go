@@ -58,7 +58,7 @@ func AutoEnsureMarketplaceModules(svc *service.ModuleService, logger *zap.Logger
 // 只需在 marketplace/<mod>/ 下放 module.json（含 sku_scope）+ skus/*.json，无需改 Go。
 //
 // side 决定收录哪些模块（按 module.json 的 sku_scope）：
-//   - "cloud": 收 sku_scope 为 "" / "cloud" / "both"（云端对外提供的官方 SKU，如 agent-reach/firecrawl）
+//   - "cloud": 收 sku_scope 为 "" / "cloud" / "both"（云端对外提供的官方 SKU，如 agent-reach/mcp-hello）
 //   - "claw":  收 sku_scope 为 "claw" / "both"（claw 本地官方 SKU，如 search-web）
 //
 // AgentItem.ID 约定 "{module}-{sku_file}"（与历史预置一致，不破坏已购记录）。

@@ -9,13 +9,22 @@ import (
 
 // AgentCredentialService 管理 SKU 凭证
 type AgentCredentialService struct {
-	repo     *repository.AgentCredentialRepo
+	repo      *repository.AgentCredentialRepo
 	agentRepo *repository.AgentRepo
+	// onModuleCredChange 模块级凭证变更钩子（stdio 运行时需重 spawn 注入新 env）。
+	// claw 在 main.go 注册为 manager.RespawnByDriver；cloud 不注册（stdio 非主推）。
+	onModuleCredChange func(driverID, userID string) error
 }
 
 // NewAgentCredentialService 创建凭证服务
 func NewAgentCredentialService(repo *repository.AgentCredentialRepo, agentRepo *repository.AgentRepo) *AgentCredentialService {
 	return &AgentCredentialService{repo: repo, agentRepo: agentRepo}
+}
+
+// SetModuleCredentialChangeHook 注册模块级凭证变更钩子。
+// 保存 module 桶凭证成功后异步触发，用于重启 stdio 进程以注入新 env。
+func (s *AgentCredentialService) SetModuleCredentialChangeHook(fn func(driverID, userID string) error) {
+	s.onModuleCredChange = fn
 }
 
 // GetManifest 返回 SKU 的 manifest，便于前端按 credentials 渲染表单
@@ -39,6 +48,31 @@ func (s *AgentCredentialService) bucketFor(def model.CredentialDef, manifest *mo
 // loadBucketValues 读取某桶的全部凭证为 map[key]value
 func (s *AgentCredentialService) loadBucketValues(userID, bucket string) (map[string]string, error) {
 	stored, err := s.repo.ListByUserAgent(userID, bucket)
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[string]string, len(stored))
+	for _, c := range stored {
+		m[c.Key] = c.Value
+	}
+	return m, nil
+}
+
+// LoadModuleBucket 读取某用户在模块级桶 module:<driverID> 的凭证（stdio spawn 注入 env 用）。
+func (s *AgentCredentialService) LoadModuleBucket(userID, driverID string) (map[string]string, error) {
+	if userID == "" || driverID == "" {
+		return nil, nil
+	}
+	return s.loadBucketValues(userID, "module:"+driverID)
+}
+
+// LoadModuleBucketAnyUser 读取模块级桶 module:<driverID> 下任一用户的凭证（合并）。
+// 用于 stdio autostart：进程启动时尚无请求用户，claw 单用户取其已配置的模块凭证注入 env。
+func (s *AgentCredentialService) LoadModuleBucketAnyUser(driverID string) (map[string]string, error) {
+	if driverID == "" {
+		return nil, nil
+	}
+	stored, err := s.repo.ListByBucket("module:" + driverID)
 	if err != nil {
 		return nil, err
 	}
@@ -97,12 +131,16 @@ func (s *AgentCredentialService) SaveForUserAgent(userID, agentID string, values
 		return fmt.Errorf("SKU %s 没有 manifest", agentID)
 	}
 
+	touchedModuleDriver := ""
 	for key, value := range values {
 		def, ok := manifest.Credentials[key]
 		if !ok {
 			continue
 		}
 		bucket := s.bucketFor(def, manifest, agentID)
+		if def.Scope == model.CredentialScopeModule && manifest.Driver != "" {
+			touchedModuleDriver = string(manifest.Driver)
+		}
 		if value == "" {
 			if def.Required {
 				return fmt.Errorf("%s 为必填凭证", key)
@@ -118,6 +156,13 @@ func (s *AgentCredentialService) SaveForUserAgent(userID, agentID string, values
 		}); err != nil {
 			return err
 		}
+	}
+	// 模块级凭证变更 -> 异步重启 stdio 进程注入新 env（stdio 长驻进程无法 per-call 注入）
+	if touchedModuleDriver != "" && s.onModuleCredChange != nil {
+		driver, uid := touchedModuleDriver, userID
+		go func() {
+			_ = s.onModuleCredChange(driver, uid)
+		}()
 	}
 	return nil
 }

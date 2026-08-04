@@ -9,6 +9,8 @@ import AgentMarket from './pages/AgentMarket'
 import VisualStudio from './pages/VisualStudio'
 import ClawGuide from './pages/ClawGuide'
 import TeamDetail from './pages/TeamDetail'
+import ModuleGenerator from './pages/ModuleGenerator'
+import MCPInstall from './pages/MCPInstall'
 
 function App() {
   const location = useLocation()
@@ -29,6 +31,8 @@ function App() {
           <Route path="/recharge" element={<Recharge />} />
           <Route path="/models" element={<Models />} />
           <Route path="/agents" element={<AgentMarket />} />
+          <Route path="/module-generator" element={<ModuleGenerator />} />
+          <Route path="/mcp-install" element={<MCPInstall />} />
           <Route path="/visual" element={<VisualStudio />} />
           <Route path="/video" element={<Navigate to="/visual?tab=video" replace />} />
           <Route path="/claw-guide" element={<ClawGuide />} />

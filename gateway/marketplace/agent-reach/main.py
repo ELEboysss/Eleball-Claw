@@ -3,11 +3,15 @@ Agent-Reach Marketplace Module
 
 Eleball 集市技能模块标准接口：
 - GET  /health           健康检查与能力声明
-- POST /execute          执行指定 action
+- POST /execute          执行指定 action（execute 传输，凭证经 params.credentials 注入）
+- POST /mcp              MCP Streamable HTTP JSON-RPC（mcp_http 传输，凭证经请求头注入）
+- POST /                 同 /mcp（网关 mcp_http 经 mcpModuleBaseURL 把端点收敛为根路径）
 
-Cookie / API Key 等用户凭证由网关根据 SKU manifest 的 credentials 声明注入到
-params.credentials 中。模块按用户隔离存储在 /data/cookies/{user_id}/，
-通过为子进程设置 HOME 实现。
+凭证来源随传输协议不同：
+- execute：网关把 SKU manifest 声明的凭证注入 params.credentials（多用户按 user_id 隔离 cookie）。
+- mcp_http：网关把 module.json mcp_server_config.headers 中的 ${credentials.KEY} 模板
+  替换为用户配置的凭证值后作为 HTTP 请求头注入；模块从请求头读取并写入 cookie 目录。
+  claw 单用户场景使用固定 user_id（AGENT_REACH_USER_ID，默认 claw）；多用户云端走 execute 传输。
 """
 
 import json
@@ -19,7 +23,8 @@ from typing import Any
 
 import requests
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 app = FastAPI(title="Eleball Agent-Reach Module")
@@ -27,7 +32,7 @@ app = FastAPI(title="Eleball Agent-Reach Module")
 MODULE_ID = "agent-reach"
 VERSION = "1.0.0"
 
-# 模块支持的能力清单（与 ToolManifest actions 对应）
+# 模块支持的能力清单（与 ToolManifest actions / MCP 工具名对应）
 CAPABILITIES = [
     "web_read",
     "search",
@@ -44,6 +49,126 @@ CAPABILITIES = [
 COOKIE_PLATFORMS = {"twitter", "reddit", "xiaohongshu", "bilibili", "youtube"}
 
 DATA_ROOT = Path(os.environ.get("AGENT_REACH_DATA_ROOT", "/data/cookies"))
+
+# mcp_http 传输下 claw 单用户的固定 user_id（cookie 隔离目录）。
+# 网关 mcp_http 不转发 user_id，claw 单用户故用固定值；多用户云端走 execute 传输（/execute 带 user_id）。
+MCP_USER_ID = os.environ.get("AGENT_REACH_USER_ID", "claw")
+
+# mcp_http 凭证请求头 -> 内部凭证 key 的映射（与 module.json mcp_server_config.headers 对应）。
+# 网关把 ${credentials.KEY} 替换为凭证值后以这些头名注入；空头值视为未配置，跳过。
+CREDENTIAL_HEADERS = {
+    "X-Twitter-Cookie": "twitter_cookie",
+    "X-Reddit-Cookie": "reddit_cookie",
+    "X-Xiaohongshu-Cookie": "xiaohongshu_cookie",
+    "X-Bilibili-Cookie": "bilibili_cookie",
+    "X-YouTube-Cookie": "youtube_cookie",
+    "X-Github-Token": "github_token",
+    "X-Exa-Api-Key": "exa_api_key",
+}
+
+# MCP 工具清单（9 个，name 即 action，与 CAPABILITIES 对应）。
+# inputSchema 透传给网关 DeriveSKUs 合成 SKU 的 parameters。
+MCP_TOOLS = [
+    {
+        "name": "web_read",
+        "description": "读取任意网页正文（经 r.jina.ai 渲染，适合公众号/新闻/文档）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "网页 URL 或域名"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "search",
+        "description": "全网语义搜索（默认 Exa，需 exa_api_key）；platform=bilibili 时走B站视频搜索",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "搜索关键词"},
+                "limit": {"type": "integer", "description": "返回条数", "default": 5},
+                "platform": {"type": "string", "enum": ["bilibili"], "description": "可选，指定 bilibili 走B站搜索"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "youtube_subtitles",
+        "description": "提取 YouTube 视频字幕（en/zh-CN/zh-TW/ja）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "YouTube 视频 URL"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "bilibili_search",
+        "description": "搜索B站视频",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "搜索关键词"},
+                "limit": {"type": "integer", "description": "返回条数", "default": 5},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "github_repo",
+        "description": "查看 GitHub 仓库信息（名称/描述/星数/语言/默认分支）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "仓库名 owner/repo"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "github_search",
+        "description": "按星数搜索 GitHub 仓库",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "搜索关键词"},
+                "limit": {"type": "integer", "description": "返回条数", "default": 5},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "rss_read",
+        "description": "读取 RSS/Atom 订阅源（返回最近 20 条标题/链接/摘要）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "RSS/Atom 订阅源 URL"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "social_search",
+        "description": "搜索社媒内容（Twitter/小红书/Reddit/B站）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "搜索关键词"},
+                "social_platform": {"type": "string", "enum": ["twitter", "xiaohongshu", "reddit", "bilibili"], "description": "社交平台"},
+                "limit": {"type": "integer", "description": "返回条数", "default": 5},
+            },
+            "required": ["query", "social_platform"],
+        },
+    },
+    {
+        "name": "social_read",
+        "description": "读取社媒帖子详情（Twitter/小红书/Reddit/B站）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "帖子链接或关键词"},
+                "social_platform": {"type": "string", "enum": ["twitter", "xiaohongshu", "reddit", "bilibili"], "description": "社交平台"},
+                "limit": {"type": "integer", "description": "返回条数", "default": 5},
+            },
+            "required": ["query", "social_platform"],
+        },
+    },
+]
 
 
 class ExecuteRequest(BaseModel):
@@ -288,7 +413,7 @@ def do_search(query: str, limit: int, exa_key: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 标准模块接口
+# 标准模块接口（execute 传输）
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
@@ -353,6 +478,105 @@ def _normalize_credentials(credentials: dict[str, Any]) -> dict[str, str]:
         if platform in COOKIE_PLATFORMS:
             result[platform] = value
     return result
+
+
+# ---------------------------------------------------------------------------
+# MCP Streamable HTTP 接口（mcp_http 传输，claw）
+# 凭证经网关 mcp_server_config.headers 模板（${credentials.KEY}）注入为请求头，
+# 模块从请求头读取后复用 /execute 的 save_cookies/build_command/run/do_search 逻辑。
+# ---------------------------------------------------------------------------
+
+def _mcp_result(req_id: Any, result: dict) -> JSONResponse:
+    return JSONResponse({"jsonrpc": "2.0", "id": req_id, "result": result})
+
+
+def _mcp_error(req_id: Any, code: int, message: str) -> JSONResponse:
+    return JSONResponse({"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}})
+
+
+def _credentials_from_headers(request: Request) -> dict[str, str]:
+    """从 mcp_http 请求头读取凭证（网关经 mcp_server_config.headers 模板注入）。空头值视为未配置，跳过。"""
+    creds: dict[str, str] = {}
+    for header, key in CREDENTIAL_HEADERS.items():
+        value = request.headers.get(header, "")
+        if value:
+            creds[key] = value
+    return creds
+
+
+def _result_to_mcp(req_id: Any, result: dict) -> JSONResponse:
+    """把 execute 风格的 {content,error,...} 结果转为 MCP tools/call 响应。"""
+    if result.get("error"):
+        return _mcp_result(req_id, {"isError": True, "content": [{"type": "text", "text": str(result["error"])}]})
+    return _mcp_result(req_id, {"content": [{"type": "text", "text": str(result.get("content", ""))}]})
+
+
+def _handle_tool_call(req_id: Any, name: str, arguments: dict, request: Request) -> JSONResponse:
+    """执行 MCP tools/call：从请求头取凭证 -> save_cookies -> build_command -> run/do_search。"""
+    if name not in CAPABILITIES:
+        return _mcp_result(req_id, {"isError": True, "content": [{"type": "text", "text": f"未知工具: {name}"}]})
+
+    credentials = _credentials_from_headers(request)
+    cookies = _normalize_credentials(credentials)
+    if cookies:
+        save_cookies(MCP_USER_ID, cookies)
+    github_token = credentials.get("github_token") or credentials.get("gh_token") or ""
+
+    params = dict(arguments or {})
+    try:
+        cmd = build_command(name, params, MCP_USER_ID)
+    except ValueError as e:
+        return _mcp_result(req_id, {"isError": True, "content": [{"type": "text", "text": str(e)}]})
+
+    # search 默认走 exa HTTP API（cmd is None），需 exa_api_key 凭证
+    if cmd is None:
+        exa_key = credentials.get("exa_api_key") or ""
+        result = do_search(
+            query=str(params.get("query", "")),
+            limit=int(params.get("limit", 5) or 5),
+            exa_key=exa_key,
+        )
+        return _result_to_mcp(req_id, result)
+
+    timeout = 120 if name in ("youtube_subtitles", "social_search", "social_read") else 60
+    result = run(cmd, MCP_USER_ID, timeout, github_token=github_token)
+    return _result_to_mcp(req_id, result)
+
+
+async def mcp_rpc(request: Request) -> JSONResponse:
+    """MCP Streamable HTTP JSON-RPC 入口（initialize / notifications/initialized / tools/list / tools/call）。"""
+    try:
+        body = await request.json()
+    except Exception as e:
+        return _mcp_error(None, -32700, f"Parse error: {e}")
+
+    req_id = body.get("id")
+    method = body.get("method", "")
+    params = body.get("params", {}) or {}
+
+    if method == "initialize":
+        return _mcp_result(req_id, {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": MODULE_ID, "version": VERSION},
+        })
+
+    if method == "notifications/initialized":
+        # 通知无 id；返回空 result 以满足网关 do() 的 JSON 解码
+        return _mcp_result(req_id, {})
+
+    if method == "tools/list":
+        return _mcp_result(req_id, {"tools": MCP_TOOLS})
+
+    if method == "tools/call":
+        return _handle_tool_call(req_id, params.get("name", ""), params.get("arguments", {}), request)
+
+    return _mcp_error(req_id, -32601, f"Method not found: {method}")
+
+
+# 网关 mcp_http 经 mcpModuleBaseURL 把端点收敛为根路径，故根路径与 /mcp 均挂同一处理函数。
+app.add_api_route("/mcp", mcp_rpc, methods=["POST"])
+app.add_api_route("/", mcp_rpc, methods=["POST"])
 
 
 if __name__ == "__main__":

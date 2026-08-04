@@ -38,6 +38,14 @@ func (r *AgentCredentialRepo) ListByUserAgent(userID, agentID string) ([]*model.
 	return creds, err
 }
 
+// ListByBucket 返回某桶（agent_id）下所有用户的凭证（不限 user_id）。
+// 用于 stdio 模块 autostart 场景：进程启动时尚无请求用户，取模块桶任一用户（claw 单用户）的凭证注入 env。
+func (r *AgentCredentialRepo) ListByBucket(bucket string) ([]*model.AgentUserCredential, error) {
+	var creds []*model.AgentUserCredential
+	err := r.db.Where("agent_id = ?", bucket).Find(&creds).Error
+	return creds, err
+}
+
 // Save 保存或更新凭证
 func (r *AgentCredentialRepo) Save(cred *model.AgentUserCredential) error {
 	if cred.ID == "" {

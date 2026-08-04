@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/eleball/gateway/internal/config"
+	"github.com/eleball/gateway/internal/model"
+	"github.com/eleball/gateway/internal/repository"
 	"github.com/eleball/gateway/internal/service"
 	"go.uber.org/zap"
 )
@@ -192,4 +195,76 @@ type composeError struct {
 
 func (e *composeError) Error() string {
 	return e.err.Error() + ": " + e.output
+}
+
+// autoStartProcessRuntimes 后台启动所有 deployment=process 的运行时（如 stdio MCP）。
+// 无 docker 依赖：直接经 SkillRuntimeManager spawn 本地子进程，由 supervisor 探活转在线。
+// docker 缺失或单模块失败均只告警不阻断。返回成功启动的 runtime id 列表（供日志/调试）。
+func autoStartProcessRuntimes(ctx context.Context, logger *zap.Logger, repo *repository.SkillRuntimeRepo, manager *service.SkillRuntimeManager) []string {
+	if repo == nil || manager == nil {
+		return nil
+	}
+	runtimes, err := repo.List()
+	if err != nil {
+		logger.Warn("列出 SkillRuntime 失败，跳过 process 运行时自动启动", zap.Error(err))
+		return nil
+	}
+	var started []string
+	for _, rt := range runtimes {
+		if ctx.Err() != nil {
+			break
+		}
+		if rt.Deployment != model.SkillRuntimeDeploymentProcess {
+			continue
+		}
+		if rt.Status == model.SkillRuntimeStatusDisabled {
+			continue
+		}
+		if err := manager.Start(rt.ID); err != nil {
+			logger.Warn("process 运行时自动启动失败（网关继续运行）",
+				zap.String("runtime_id", rt.ID), zap.Error(err))
+			continue
+		}
+		started = append(started, rt.ID)
+		logger.Info("process 运行时已启动，等待探活转在线", zap.String("runtime_id", rt.ID))
+	}
+	return started
+}
+
+// buildProcessSandboxConfig 把配置转换为 SkillRuntimeManager 沙箱配置，展开 ~ 与解析超时。
+func buildProcessSandboxConfig(cfg config.ProcessSandboxConfig) *service.ProcessSandboxConfig {
+	timeout, err := time.ParseDuration(cfg.Timeout)
+	if err != nil || timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	maxProc := cfg.MaxProcesses
+	if maxProc <= 0 {
+		maxProc = 10
+	}
+	workDirs := make([]string, 0, len(cfg.AllowedWorkDirs))
+	for _, d := range cfg.AllowedWorkDirs {
+		workDirs = append(workDirs, expandHome(d))
+	}
+	return &service.ProcessSandboxConfig{
+		AllowedWorkDirs: workDirs,
+		AllowedEnvKeys:  cfg.AllowedEnvKeys,
+		MaxProcesses:    maxProc,
+		Timeout:         timeout,
+	}
+}
+
+// expandHome 展开路径前缀的 ~ 为用户 home 目录
+func expandHome(p string) string {
+	if p == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+		return p
+	}
+	if strings.HasPrefix(p, "~"+string(os.PathSeparator)) || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, p[2:])
+		}
+	}
+	return p
 }

@@ -1,0 +1,26 @@
+{
+  "$schema": "../../../../specs/tool-manifest-schema.json",
+  "id": "com.eleball.tools.mcp_stdio_echo.echo",
+  "name": "MCP stdio Echo",
+  "description": "本地 stdio MCP 示例工具：回显输入内容，用于验证子进程 JSON-RPC 全链路。",
+  "driver": "mcp_stdio_echo",
+  "runtime_type": "remote",
+  "category": "示例",
+  "level": 1,
+  "price_danwan": 0,
+  "permissions": ["network"],
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "message": {
+        "type": "string",
+        "description": "任意内容"
+      }
+    },
+    "required": ["message"]
+  },
+  "actions": [
+    { "name": "echo", "description": "回显输入内容" }
+  ],
+  "timeout_seconds": 30
+}

@@ -78,6 +78,8 @@ function createClient(baseURL, { timeout = 15000 } = {}) {
         // 透传业务错误码（如 4002=VIP 门禁），页面可据此做引导文案
         const bizErr = new Error(body.message || '请求失败')
         bizErr.code = body.code
+        // 透传结构化错误数据（如 D3 interpreter_missing 的 {error_code,interpreter,hint}），页面可据此渲染安装引导
+        bizErr.data = body.data
         return Promise.reject(bizErr)
       }
       return body
@@ -116,6 +118,7 @@ function createClient(baseURL, { timeout = 15000 } = {}) {
       // 同样透传业务错误码（HTTP 4xx/5xx 场景，如 VIP 门禁 403+4002）
       const httpErr = new Error(friendlyMessage)
       httpErr.code = error.response?.data?.code
+      httpErr.data = error.response?.data?.data
       return Promise.reject(httpErr)
     }
   )
@@ -204,6 +207,27 @@ export const publicSettingApi = {
 export const systemApi = {
   // -> { docker_available, docker_version, compose_available, modules_auto_start, modules_auto_stop }
   status: () => client.get('/claw-console/system/status')
+}
+
+// ====== 模块生成器 API（本地 claw：阶段 F1，造秘技页消费）======
+// 引导式生成用户 stdio MCP 模块：探测候选 server 工具 -> 一键写 module.json+main.py -> rescan -> autostart -> DeriveSKUs。
+export const moduleGeneratorApi = {
+  // 探测候选 stdio/http MCP server -> { tools: [{name,description,inputSchema}] }
+  // 解释器缺失时 err.code=2002 + err.data={error_code:'interpreter_missing',interpreter,hint}（D3）
+  probe: (body) => client.post('/claw-console/mcp/probe', body, { timeout: 35000 }),
+  // 一键生成用户 stdio 模块 -> { module_id, module_dir, tools }
+  generate: (body) => client.post('/claw-console/mcp/generate', body, { timeout: 35000 }),
+  // F1 收尾：AI 起草 main.py 草稿 -> { main_py }（能力描述 + 凭证声明 -> 对话模型生成 stdio MCP 脚本）
+  draftMain: (body) => client.post('/claw-console/mcp/draft-main', body, { timeout: 90000 }),
+  // F2：直接调用模块工具（绕过 LLM）-> 原始 tools/call 结果（造秘技页验证生成模块可调用）
+  testCall: (moduleId, body) => client.post(`/claw-console/modules/${moduleId}/test-call`, body, { timeout: 60000 }),
+  // G3：动态安装远端 MCP server（Smithery 式）-> { runtime_id, driver_id, transport, tools, sku_count }
+  // 入参 = probe 字段（stdio: command/args/env/work_dir；http: endpoint/headers）+ name + description。
+  // 后端先探测校验再建 source=mcp_remote 的 SkillRuntime 并派生 SKU。
+  install: (body) => client.post('/claw-console/mcp/install', body, { timeout: 35000 }),
+  // H1：安装托管解释器（python-build-standalone，SHA-256 校验）-> { interpreter, path, version, source, reused }
+  // 解释器缺失横幅「自动安装」按钮调用；系统已有则直接返回（source=system）。下载 ~30MB，超时放宽到 5 分钟。
+  installInterpreter: (body) => client.post('/claw-console/tools/install-interpreter', body, { timeout: 300000 })
 }
 
 // ====== 工作目录 API（本地 claw：AR-06，DirectoryPicker 消费）======

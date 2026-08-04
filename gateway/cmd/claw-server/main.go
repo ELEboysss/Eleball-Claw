@@ -57,10 +57,13 @@ func getGitSHA() string {
 }
 
 func main() {
-	// 子命令：module（模块管理，不启动网关）；serve 默认（剥离 serve 让 flag 正常解析）。
+	// 子命令：module（模块管理，不启动网关）；setup-python（预装托管解释器，不启动网关）；serve 默认（剥离 serve 让 flag 正常解析）。
 	// 兼容无 serve 直接 --port（eleball-claw --port=8090）。
 	if len(os.Args) > 1 && os.Args[1] == "module" {
 		os.Exit(runModuleCommand(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && (os.Args[1] == "setup-python" || os.Args[1] == "setup") {
+		os.Exit(runSetupPython(os.Args[2:]))
 	}
 	if len(os.Args) > 1 && os.Args[1] == "serve" {
 		os.Args = append(os.Args[:1], os.Args[2:]...)
@@ -273,10 +276,24 @@ func main() {
 	skillRuntimeRegistry.SetLogger(logger)
 	skillRuntimeRegistry.SetRepo(skillRuntimeRepo)
 	skillRuntimeManager := service.NewSkillRuntimeManager(skillRuntimeRegistry, logger)
+	// stdio MCP 协议实例由 Registry 与 Manager 共享：Manager spawn 子进程后注册会话，
+	// Registry 经同一实例调用 Execute/ListTools。claw 本地 stdio MCP 全链路就绪。
+	mcpStdioProtocol := service.NewMCPStdioProtocol(logger)
+	skillRuntimeRegistry.SetMCPStdioProtocol(mcpStdioProtocol)
+	skillRuntimeManager.SetMCPStdioProtocol(mcpStdioProtocol)
+	// process 沙箱配置（stdio MCP / 本地脚本的工作目录、环境变量白名单）
+	skillRuntimeManager.SetSandboxConfig(buildProcessSandboxConfig(cfg.Modules.ProcessSandbox))
 	moduleService := service.NewModuleService(skillRuntimeRegistry, skillRuntimeManager, skillRuntimeRepo, agentRepo)
+	// auto SKU 派生：stdio（Manager supervisor 探活）与 mcp_http（Registry 探活）成功后，
+	// 为 auto_sku 运行时据 tools/list 自动合成可购买 SKU，免手写 marketplace/<mod>/skus/*.json。
+	skillRuntimeSKUService := service.NewSkillRuntimeSKUService(agentRepo, logger)
+	skillRuntimeManager.SetSKUService(skillRuntimeSKUService)
+	skillRuntimeRegistry.SetSKUService(skillRuntimeSKUService)
 	// claw 云端秘技安装后落本地 AgentItem/AgentPurchase（激活链路依赖购买记录）
 	moduleService.SetModuleRepo(moduleRepo)
 	moduleService.SetDriverRepo(driverRepo)
+	// F1 收尾：skill-maker AI 起草 main.py 注入对话服务（能力描述 -> 对话模型生成 stdio MCP 脚本）
+	moduleService.SetChatProxyService(chatService)
 
 	// 扫描 marketplace/ 预置官方模块（search-web 等）
 	if err := seed.AutoEnsureMarketplaceModules(moduleService, logger); err != nil {
@@ -296,6 +313,8 @@ func main() {
 	// 启动 SkillRuntime 后台健康探测（每 5 分钟一次）
 	skillRuntimeRegistry.Start()
 	defer skillRuntimeRegistry.Stop()
+	// 退出时停止所有 process 部署运行时（stdio MCP 子进程等）
+	defer skillRuntimeManager.StopAll()
 
 	agentService := service.NewAgentMarketService(db, agentRepo, userRepo, vipService, skillRuntimeRegistry)
 	// claw 本地购买仅放行免费 SKU；付费秘技引导云端 eleball.cn 购买
@@ -307,6 +326,9 @@ func main() {
 	agentRegistry := service.NewToolRegistry()
 	agentCredentialRepo := repository.NewAgentCredentialRepo(db)
 	agentCredentialService := service.NewAgentCredentialService(agentCredentialRepo, agentRepo)
+	// stdio spawn 注入 module 级凭证到 env；凭证变更自动重 spawn（claw 单用户，stdio 长驻进程无法 per-call 注入）
+	skillRuntimeManager.SetCredentialService(agentCredentialService)
+	agentCredentialService.SetModuleCredentialChangeHook(skillRuntimeManager.RespawnByDriver)
 	agentRegistry.DriverRegistry().Register(service.NewModuleDriver(skillRuntimeRegistry, agentCredentialService))
 	agentRegistry.DriverRegistry().Register(service.NewMCPDriver(skillRuntimeRegistry, agentCredentialService))
 	// 按每个 SkillRuntime 的 driver_id 注册别名驱动，支持 SKU manifest 直接以 driver_id 匹配
@@ -406,9 +428,9 @@ func main() {
 	agentWorkflowService.SetAssistantService(assistantService)
 	// 组共享记忆服务（Agent Team P2）：执行前检索注入 + 执行后异步提取
 	agentWorkflowService.SetTeamMemoryService(teamMemoryService)
-		// C8：项目记忆文件加载服务（CLAUDE.md / AGENTS.md 自动注入 system prompt）
-		contextFileService := service.NewContextFileService(cfg.Agent.ContextFiles)
-		agentWorkflowService.SetContextFileService(contextFileService)
+	// C8：项目记忆文件加载服务（CLAUDE.md / AGENTS.md 自动注入 system prompt）
+	contextFileService := service.NewContextFileService(cfg.Agent.ContextFiles)
+	agentWorkflowService.SetContextFileService(contextFileService)
 	// 云端账户/VIP 缓存（claw 仅从云端取 VIP 一项用于门控）
 	cloudAccountService := service.NewCloudAccountService(cfg.Server.EleagentBaseURL)
 
@@ -437,8 +459,8 @@ func main() {
 	agentWorkflowHandler := handler.NewAgentWorkflowHandler(agentWorkflowService)
 	// C5：注入 slash 命令服务
 	agentWorkflowHandler.SetSlashCommandService(slashCommandService)
-		// C8：注入项目记忆文件加载服务
-		agentWorkflowHandler.SetContextFileService(contextFileService)
+	// C8：注入项目记忆文件加载服务
+	agentWorkflowHandler.SetContextFileService(contextFileService)
 	// claw：search-providers 优先转发 search-web 模块的 list_sources（搜索源配置在模块侧）
 	agentWorkflowHandler.SetSkillRuntimeRegistry(skillRuntimeRegistry)
 	agentHandler := handler.NewAgentHandler(agentService)
@@ -451,6 +473,13 @@ func main() {
 	adminSettingHandler := handler.NewAdminSettingHandler(settingService)
 	releaseHandler := handler.NewReleaseHandler(releaseService, logger)
 	clawConsoleHandler := handler.NewClawConsoleHandler(db)
+	// C9 二期：注入 stdio MCP 协议与 process 沙箱白名单，供 /v1/claw-console/mcp/probe 探测
+	clawConsoleHandler.SetMCPStdioProtocol(mcpStdioProtocol)
+	clawConsoleHandler.SetProcessSandboxWorkDirs(buildProcessSandboxConfig(cfg.Modules.ProcessSandbox).AllowedWorkDirs)
+	// E3：注入模块服务，供 /v1/claw-console/mcp/generate 写模块 + rescan + autostart
+	clawConsoleHandler.SetModuleService(moduleService)
+	// H1：注入托管解释器引导器，供 /v1/claw-console/tools/install-interpreter 下载 python-build-standalone
+	clawConsoleHandler.SetInterpreterBootstrap(service.NewInterpreterBootstrap(logger))
 	clawCwdHandler := handler.NewClawCwdHandler()
 	clawFilesHandler := handler.NewClawFilesHandler(agentSandbox)
 	clawWorktreeHandler := handler.NewClawWorktreeHandler(service.NewWorktreeService())
@@ -518,6 +547,8 @@ func main() {
 	if cfg.Modules.AutoStart {
 		go func() {
 			startedCh <- autoStartModules(sigCtx, logger, cfg.Modules, skillRuntimeRegistry)
+			// 同时启动 process 部署运行时（stdio MCP 等，无 docker 依赖；退出时由 manager.StopAll 统一停止）
+			autoStartProcessRuntimes(sigCtx, logger, skillRuntimeRepo, skillRuntimeManager)
 		}()
 	} else {
 		startedCh <- nil

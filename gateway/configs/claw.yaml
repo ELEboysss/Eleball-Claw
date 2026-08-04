@@ -92,6 +92,26 @@ modules:
   # 上线策略（env MODULES_PULL_POLICY）：
   #   pull_first（默认）先 docker pull，失败回退本地构建；build_only 仅本地构建；pull_only 仅拉镜像、失败不回退
   pull_policy: pull_first
+  # 本地子进程（process deployment，如 stdio MCP）沙箱配置，详见 docs/claw-process-runtime.md
+  # 无 docker 时 claw 可经 process 模式运行官方/用户脚本与 stdio MCP server
+  process_sandbox:
+    # 允许的工作目录前缀（marketplace home 与用户工作目录；~ 由 claw 启动时展开）
+    allowed_work_dirs:
+      - "~/.eleball-claw/marketplace"
+      - "~/.eleball-claw/workspace"
+    # 允许透传给子进程的环境变量白名单（防止泄露云凭证）
+    allowed_env_keys:
+      - "PATH"
+      - "HOME"
+      - "USERPROFILE"
+      - "USER"
+      - "LANG"
+      - "PYTHONPATH"
+      - "NODE_PATH"
+    # 最大并发子进程数
+    max_processes: 10
+    # 启动超时
+    timeout: 30s
 
 admin:
   enabled: false

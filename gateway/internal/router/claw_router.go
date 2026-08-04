@@ -233,6 +233,8 @@ func NewClawRouter(
 				console.POST("/modules", moduleHandler.RegisterModule)
 				console.DELETE("/modules/:id", moduleHandler.UnregisterModule)
 				console.POST("/modules/:id/refresh", moduleHandler.RefreshModule)
+				// F2：直接调用模块工具（绕过 LLM），造秘技页验证生成模块可调用
+				console.POST("/modules/:id/test-call", clawConsoleHandler.TestCall)
 				console.POST("/modules/rescan", moduleHandler.RescanMarketplace)
 				// P4：安装云端已购模块到本地（拉镜像+签名校验+激活）
 				console.POST("/modules/install", moduleHandler.InstallModule)
@@ -243,6 +245,22 @@ func NewClawRouter(
 				console.GET("/drivers", moduleHandler.ListDrivers)
 				console.POST("/drivers", moduleHandler.RegisterDriver)
 				console.DELETE("/drivers/:id", moduleHandler.UnregisterDriver)
+
+				// C9 二期：MCP server 一次性探测（initialize + tools/list -> tool schemas），
+				// 供 skill-maker 自动生成 module.json + N SKU。stdio 临时 spawn，http 直接探测。
+				console.POST("/mcp/probe", clawConsoleHandler.ProbeMCP)
+
+				// E3：一键生成用户 stdio MCP 模块（probe -> 写 module.json+main.py -> rescan -> autostart -> DeriveSKUs）
+				console.POST("/mcp/generate", clawConsoleHandler.GenerateModule)
+
+				// G3：动态安装远端 MCP server（Smithery 式，probe -> 建 source=mcp_remote runtime -> DeriveSKUs）
+				console.POST("/mcp/install", clawConsoleHandler.InstallMCP)
+
+				// F1 收尾：skill-maker AI 起草 main.py 草稿（能力描述 + 凭证声明 -> 对话模型生成 stdio MCP 脚本）
+				console.POST("/mcp/draft-main", clawConsoleHandler.DraftMainPy)
+
+				// H1：安装托管解释器（python-build-standalone，SHA-256 校验）。interpreter_missing 横幅「自动安装」按钮调用。
+				console.POST("/tools/install-interpreter", clawConsoleHandler.InstallInterpreter)
 
 				// 本地模型配置（BYOK 增删改 + Ele Agent 云端代理接入，复用云端管理端 handler）
 				console.GET("/eleagent/models", adminEleAgentModelHandler.ListConfigs)

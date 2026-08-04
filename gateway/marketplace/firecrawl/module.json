@@ -1,17 +1,29 @@
 {
   "id": "firecrawl",
   "name": "Firecrawl 网页抓取",
-  "description": "网页抓取、批量爬取、结构化数据提取",
+  "description": "网页抓取、批量爬取、结构化数据提取。本地 stdio MCP 进程，调用 Firecrawl API（须配 API Key）。",
   "source": "marketplace",
-  "transport": "execute",
-  "deployment": "docker",
-  "endpoint": "http://localhost:8093",
-  "docker_compose_path": "marketplace/firecrawl/docker-compose.yml",
-  "capabilities": [
-    "scrape",
-    "crawl",
-    "extract"
-  ],
+  "transport": "mcp_stdio",
+  "deployment": "process",
+  "command": "python",
+  "args": ["main.py"],
+  "sku_scope": "claw",
+  "auto_sku": true,
+  "env": {
+    "FIRECRAWL_API_KEY": "${credentials.firecrawl_api_key}",
+    "FIRECRAWL_BASE_URL": "https://api.firecrawl.dev"
+  },
+  "credentials": {
+    "firecrawl_api_key": {
+      "type": "api_key",
+      "label": "Firecrawl API Key",
+      "description": "用于调用 Firecrawl Cloud API，可从 https://firecrawl.dev 获取。",
+      "placeholder": "fc-...",
+      "required": true,
+      "scope": "module"
+    }
+  },
+  "capabilities": ["scrape", "crawl", "extract"],
   "driver": {
     "driver_id": "firecrawl",
     "name": "Firecrawl 网页抓取",

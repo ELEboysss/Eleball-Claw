@@ -39,6 +39,21 @@ type ModulesConfig struct {
 	ImageTag string `mapstructure:"image_tag"`
 	// PullPolicy 上线策略：pull_first（拉镜像优先、构建兜底）/ build_only（仅本地构建）/ pull_only（仅拉镜像）
 	PullPolicy string `mapstructure:"pull_policy"`
+	// ProcessSandbox 本地子进程（process deployment，如 stdio MCP）沙箱配置
+	ProcessSandbox ProcessSandboxConfig `mapstructure:"process_sandbox"`
+}
+
+// ProcessSandboxConfig 本地子进程沙箱配置（process deployment 专用）。
+// 限制 stdio MCP / 本地脚本的工作目录、环境变量与并发数，详见 docs/claw-process-runtime.md。
+type ProcessSandboxConfig struct {
+	// AllowedWorkDirs 允许的工作目录前缀（marketplace home、用户工作目录等）
+	AllowedWorkDirs []string `mapstructure:"allowed_work_dirs"`
+	// AllowedEnvKeys 允许透传给子进程的环境变量白名单
+	AllowedEnvKeys []string `mapstructure:"allowed_env_keys"`
+	// MaxProcesses 最大并发子进程数
+	MaxProcesses int `mapstructure:"max_processes"`
+	// Timeout 启动超时
+	Timeout string `mapstructure:"timeout"`
 }
 
 // MailConfig 邮件发送配置（用于邮箱验证码登录 OTP 发送）。

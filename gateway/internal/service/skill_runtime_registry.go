@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,7 +42,9 @@ type SkillRuntimeRegistry struct {
 	stopCh        chan struct{}
 	startOnce     sync.Once
 	probeInterval time.Duration
-	mcpHTTP       *MCPHTTPProtocol // 用于 MCP 探活
+	mcpHTTP       *MCPHTTPProtocol        // 用于 MCP HTTP 探活
+	mcpStdio      *MCPStdioProtocol       // 用于 MCP stdio 探活与调用（与 Manager 共享）
+	skuService    *SkillRuntimeSKUService // auto_sku 运行时探活成功后自动派生 SKU
 }
 
 // NewSkillRuntimeRegistry 创建运行时注册表
@@ -76,6 +79,21 @@ func (r *SkillRuntimeRegistry) SetLogger(logger *zap.Logger) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.logger = logger
+}
+
+// SetMCPStdioProtocol 注入共享的 stdio MCP 协议实例（与 SkillRuntimeManager 共享）。
+func (r *SkillRuntimeRegistry) SetMCPStdioProtocol(p *MCPStdioProtocol) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.mcpStdio = p
+}
+
+// SetSKUService 注入自动 SKU 派生服务。mcp_http 探活成功并拿到 tools/list 后，
+// 为 auto_sku 运行时调用 DeriveSKUs 合成/同步可购买 SKU（与 Manager 的 stdio 探活共用同一实例）。
+func (r *SkillRuntimeRegistry) SetSKUService(svc *SkillRuntimeSKUService) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.skuService = svc
 }
 
 // SetRepo 设置持久化仓库并加载已有运行时
@@ -274,16 +292,19 @@ func (r *SkillRuntimeRegistry) Endpoint(runtimeID string) string {
 	return rt.Endpoint
 }
 
-// Execute 调用运行时执行指定 action（兼容 execute/raw_http）
+// Execute 调用运行时执行指定 action（兼容 execute/raw_http/mcp_http/mcp_stdio）
 func (r *SkillRuntimeRegistry) Execute(runtimeID, action string, params map[string]interface{}, userID string) (map[string]interface{}, error) {
-	endpoint := r.Endpoint(runtimeID)
-	if endpoint == "" {
-		return nil, errors.New("runtime 未注册或 endpoint 为空")
-	}
-
 	rt := r.Get(runtimeID)
 	if rt == nil {
 		return nil, errors.New("runtime 记录不存在")
+	}
+	// stdio 经子进程会话通信，不需要 HTTP endpoint；其余 transport 必须有 endpoint
+	endpoint := ""
+	if rt.Transport != model.SkillRuntimeTransportMCPStdio {
+		endpoint = r.Endpoint(runtimeID)
+		if endpoint == "" {
+			return nil, errors.New("runtime 未注册或 endpoint 为空")
+		}
 	}
 
 	switch rt.Transport {
@@ -293,6 +314,8 @@ func (r *SkillRuntimeRegistry) Execute(runtimeID, action string, params map[stri
 		return r.rawHTTPProtocol(endpoint, action, params, userID)
 	case model.SkillRuntimeTransportMCPHTTP:
 		return r.mcpHTTPProtocol(rt, action, params, userID)
+	case model.SkillRuntimeTransportMCPStdio:
+		return r.mcpStdioProtocol(rt, action, params, userID)
 	default:
 		return nil, fmt.Errorf("不支持的 transport: %s", rt.Transport)
 	}
@@ -373,6 +396,16 @@ func (r *SkillRuntimeRegistry) mcpHTTPProtocol(rt *model.SkillRuntime, action st
 	return r.mcpHTTP.Execute(rt.Endpoint, action, params, headers)
 }
 
+func (r *SkillRuntimeRegistry) mcpStdioProtocol(rt *model.SkillRuntime, action string, params map[string]interface{}, userID string) (map[string]interface{}, error) {
+	if r.mcpStdio == nil {
+		return nil, errors.New("MCP stdio 协议未初始化")
+	}
+	if !r.mcpStdio.IsRegistered(rt.ID) {
+		return nil, fmt.Errorf("stdio MCP 会话未注册: %s", rt.ID)
+	}
+	return r.mcpStdio.Execute(rt.ID, action, params)
+}
+
 // probe 根据 transport 类型探测运行时健康状态
 func (r *SkillRuntimeRegistry) probe(runtimeID string) *SkillRuntimeStatusSnapshot {
 	rt := r.Get(runtimeID)
@@ -386,11 +419,7 @@ func (r *SkillRuntimeRegistry) probe(runtimeID string) *SkillRuntimeStatusSnapsh
 	case model.SkillRuntimeTransportMCPHTTP:
 		return r.probeMCPHTTP(runtimeID)
 	case model.SkillRuntimeTransportMCPStdio:
-		// stdio 探活由 supervisor 管理，这里返回当前状态
-		r.mu.RLock()
-		st := r.statuses[runtimeID]
-		r.mu.RUnlock()
-		return st
+		return r.probeMCPStdio(runtimeID)
 	default:
 		return r.setStatus(runtimeID, false, "", nil, fmt.Sprintf("不支持的 transport: %s", rt.Transport))
 	}
@@ -442,19 +471,42 @@ func (r *SkillRuntimeRegistry) probeHTTP(runtimeID string) *SkillRuntimeStatusSn
 	return r.setStatus(runtimeID, online, payload.Version, payload.Capabilities, "")
 }
 
+// probeHeaders 提取运行时 MCPServerConfig 中的字面量请求头供探活使用。
+// 跳过含 ${credentials.KEY} 模板的头（探活无凭证上下文，无法解析）；
+// 字面量头（如 G3 动态安装的远端 MCP 鉴权头）原样发送，使需鉴权的远端 MCP
+// 也能通过 tools/list 健康探测。模板头模块（如 agent-reach）tools/list 本就不鉴权，跳过无影响。
+func probeHeaders(rt *model.SkillRuntime) map[string]string {
+	cfg := rt.GetMCPServerConfig()
+	if cfg == nil || len(cfg.Headers) == 0 {
+		return nil
+	}
+	headers := make(map[string]string)
+	for k, v := range cfg.Headers {
+		if strings.Contains(v, "${credentials.") {
+			continue
+		}
+		headers[k] = v
+	}
+	if len(headers) == 0 {
+		return nil
+	}
+	return headers
+}
+
 func (r *SkillRuntimeRegistry) probeMCPHTTP(runtimeID string) *SkillRuntimeStatusSnapshot {
 	rt := r.Get(runtimeID)
 	if rt == nil {
 		return r.setStatus(runtimeID, false, "", nil, "runtime 记录不存在")
 	}
 
-	// MCP 探活使用 tools/list 而不是 /health
+	// MCP 探活使用 tools/list 而不是 /health；发送字面量请求头（G3 远端 MCP 鉴权）
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	tools, err := r.mcpHTTP.ListTools(ctx, rt.Endpoint, nil)
+	tools, err := r.mcpHTTP.ListTools(ctx, rt.Endpoint, probeHeaders(rt))
 	if err != nil {
 		return r.setStatus(runtimeID, false, "", nil, err.Error())
 	}
+	tools = FilterTools(rt, tools) // G2：按 allowed/disallowed 过滤，caps 与 DeriveSKUs 均只见允许的工具
 
 	caps := make([]string, 0, len(tools))
 	for _, t := range tools {
@@ -468,7 +520,70 @@ func (r *SkillRuntimeRegistry) probeMCPHTTP(runtimeID string) *SkillRuntimeStatu
 			zap.Int("tools_count", len(tools)),
 		)
 	}
+	// auto_sku 运行时：探活成功且拿到工具列表 -> 自动派生/同步 SKU
+	if r.skuService != nil {
+		r.skuService.DeriveSKUs(rt, tools)
+	}
 	return r.setStatus(runtimeID, true, rt.Version, caps, "")
+}
+
+func (r *SkillRuntimeRegistry) probeMCPStdio(runtimeID string) *SkillRuntimeStatusSnapshot {
+	rt := r.Get(runtimeID)
+	if rt == nil {
+		return r.setStatus(runtimeID, false, "", nil, "runtime 记录不存在")
+	}
+	// 无 stdio 会话（未 autostart 或已断开）时返回当前缓存态，避免误报
+	if r.mcpStdio == nil || !r.mcpStdio.IsRegistered(runtimeID) {
+		r.mu.RLock()
+		st := r.statuses[runtimeID]
+		r.mu.RUnlock()
+		if st == nil {
+			return r.setStatus(runtimeID, false, "", nil, "stdio 会话未注册")
+		}
+		return st
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tools, err := r.mcpStdio.ListTools(ctx, runtimeID)
+	if err != nil {
+		return r.setStatus(runtimeID, false, "", nil, err.Error())
+	}
+	caps := make([]string, 0, len(tools))
+	for _, t := range tools {
+		caps = append(caps, t.Name)
+	}
+	if r.logger != nil {
+		r.logger.Info("MCP stdio 运行时健康探测完成",
+			zap.String("runtime_id", runtimeID),
+			zap.Int("tools_count", len(tools)),
+		)
+	}
+	return r.setStatus(runtimeID, true, rt.Version, caps, "")
+}
+
+// SetRuntimeStatus 供 SkillRuntimeManager supervisor 更新 stdio 运行时状态
+//（starting/online/offline/error）。同时刷新请求级缓存与异步持久化。
+func (r *SkillRuntimeRegistry) SetRuntimeStatus(runtimeID string, status model.SkillRuntimeStatus, caps []string, errMsg string) {
+	rt := r.Get(runtimeID)
+	version := ""
+	if rt != nil {
+		version = rt.Version
+		rt.Status = status
+	}
+	online := status == model.SkillRuntimeStatusOnline
+	r.setStatus(runtimeID, online, version, caps, errMsg)
+
+	// starting/error 状态 setStatus 不会落库（它只持久化 online/offline），单独补一次
+	if r.runtimeRepo != nil && (status == model.SkillRuntimeStatusStarting || status == model.SkillRuntimeStatusError) {
+		now := time.Now()
+		rec := &model.SkillRuntime{
+			ID:        runtimeID,
+			Status:    status,
+			UpdatedAt: now,
+		}
+		rec.SetCapabilities(caps)
+		_ = r.runtimeRepo.UpdateStatus(rec)
+	}
 }
 
 func (r *SkillRuntimeRegistry) setStatus(runtimeID string, online bool, version string, caps []string, errMsg string) *SkillRuntimeStatusSnapshot {

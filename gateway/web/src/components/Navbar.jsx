@@ -14,6 +14,7 @@ const navLinks = [
   { label: '视觉', href: '/visual' },
   { label: '模型', href: '/models' },
   { label: '技能', href: '/agents' },
+  { label: '造秘技', href: '/module-generator' },
   { label: 'Claw 指南', href: '/claw-guide' },
 ]
 

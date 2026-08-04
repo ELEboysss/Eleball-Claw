@@ -357,3 +357,14 @@ func (r *AgentRepo) SetToolActive(userID, agentID, toolName string, active bool)
 	}
 	return err
 }
+
+// ListByModuleSKUs 查询 ID 以 "<moduleID>-" 为前缀的 SKU。
+// 自动派生 SKU 的 ID 约定为 "<runtimeID>-<toolName>"，本方法据此粗筛某模块的全部 SKU，
+// 供 SkillRuntimeSKUService 计算 diff（新增工具->建 SKU，消失工具->下架）。
+// 注意：仅按前缀粗筛，可能命中间同名前缀的其他模块 SKU；调用方须再据 manifest 的
+// auto_sku_module 标记精确判定归属，避免误伤手写 SKU。
+func (r *AgentRepo) ListByModuleSKUs(moduleID string) ([]*model.AgentItem, error) {
+	var items []*model.AgentItem
+	err := r.db.Where("id LIKE ?", moduleID+"-%").Find(&items).Error
+	return items, err
+}

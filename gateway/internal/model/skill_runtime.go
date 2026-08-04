@@ -76,10 +76,22 @@ type SkillRuntime struct {
 	Version        string                 `json:"version"`
 	AuthToken      string                 `json:"auth_token,omitempty"`
 	Official       bool                   `gorm:"default:false" json:"official"`
+	// AutoSKU 是否据 tools/list 自动派生可购买 SKU（默认 false，保护手写 SKU 模块）。
+	// 为 true 时，supervisor/探活成功后由 SkillRuntimeSKUService 合成并同步 AgentItem+ToolManifest，
+	// 免去在 marketplace/<mod>/skus/ 下手写 SKU 文件。stdio 模块凭证须 scope=module。
+	AutoSKU        bool                   `gorm:"default:false" json:"auto_sku,omitempty"`
 	// DriverID 该运行时对外暴露的驱动别名，SKU manifest 的 driver 字段与此对应。
 	DriverID       string                 `gorm:"index:idx_skill_runtime_driver_id" json:"driver_id,omitempty"`
 	// MCPServerConfig MCP HTTP 服务器配置（JSON），transport=mcp_http 时必填。
 	MCPServerConfig string                `json:"mcp_server_config,omitempty"`
+	// Credentials 凭证声明（JSON map[string]CredentialDef）。auto_sku 模块从 module.json 透传，
+	// 派生 SKU 时复制进 ToolManifest.Credentials 供 web 提示用户填写；env 模板 ${credentials.KEY} 引用同名 key。
+	Credentials     string                `json:"credentials,omitempty"`
+	// AllowedTools / DisallowedTools 工具白/黑名单（JSON []string，工具名）。
+	// allowed_tools 非空时仅保留白名单内工具；disallowed_tools 始终排除（黑名单优先）。
+	// 探活时过滤 tools/list，DeriveSKUs 只为允许的工具出 SKU（G2，对标 openhuman apply_safety_filter）。
+	AllowedTools    string                `json:"allowed_tools,omitempty"`
+	DisallowedTools string                `json:"disallowed_tools,omitempty"`
 	Status         SkillRuntimeStatus     `gorm:"default:offline" json:"status"`
 	LastHeartbeat  *time.Time             `json:"last_heartbeat,omitempty"`
 	CreatedAt      time.Time              `json:"created_at"`
@@ -164,6 +176,66 @@ func (r *SkillRuntime) SetMCPServerConfig(cfg *MCPServerConfig) {
 	}
 	b, _ := json.Marshal(cfg)
 	r.MCPServerConfig = string(b)
+}
+
+// CredentialsMap 解析 credentials 声明 JSON
+func (r *SkillRuntime) CredentialsMap() map[string]CredentialDef {
+	if r.Credentials == "" {
+		return nil
+	}
+	var creds map[string]CredentialDef
+	_ = json.Unmarshal([]byte(r.Credentials), &creds)
+	return creds
+}
+
+// AllowedToolsList 解析 allowed_tools 白名单 JSON
+func (r *SkillRuntime) AllowedToolsList() []string {
+	if r.AllowedTools == "" {
+		return nil
+	}
+	var names []string
+	_ = json.Unmarshal([]byte(r.AllowedTools), &names)
+	return names
+}
+
+// SetAllowedTools 序列化 allowed_tools 白名单
+func (r *SkillRuntime) SetAllowedTools(names []string) {
+	if len(names) == 0 {
+		r.AllowedTools = ""
+		return
+	}
+	b, _ := json.Marshal(names)
+	r.AllowedTools = string(b)
+}
+
+// DisallowedToolsList 解析 disallowed_tools 黑名单 JSON
+func (r *SkillRuntime) DisallowedToolsList() []string {
+	if r.DisallowedTools == "" {
+		return nil
+	}
+	var names []string
+	_ = json.Unmarshal([]byte(r.DisallowedTools), &names)
+	return names
+}
+
+// SetDisallowedTools 序列化 disallowed_tools 黑名单
+func (r *SkillRuntime) SetDisallowedTools(names []string) {
+	if len(names) == 0 {
+		r.DisallowedTools = ""
+		return
+	}
+	b, _ := json.Marshal(names)
+	r.DisallowedTools = string(b)
+}
+
+// SetCredentials 序列化 credentials 声明
+func (r *SkillRuntime) SetCredentials(creds map[string]CredentialDef) {
+	if len(creds) == 0 {
+		r.Credentials = ""
+		return
+	}
+	b, _ := json.Marshal(creds)
+	r.Credentials = string(b)
 }
 
 // IsMCP 是否 MCP transport

@@ -84,7 +84,8 @@ func TestSyncClawOfficialSKUs(t *testing.T) {
 	require.NoError(t, SyncOfficialSKUs(repo, "claw", logger))
 	total, err := repo.Count()
 	require.NoError(t, err)
-	assert.Equal(t, int64(3), total)
+	// search-web（百度/必应）+ mcp-hello + mcp-stdio-echo（echo/ping）= 5
+	assert.Equal(t, int64(5), total)
 }
 
 // TestSkillMakerSKU 预置官方 Prompt 型秘技「秘技制造机」：SystemPrompt 非空、ManifestJSON 空，

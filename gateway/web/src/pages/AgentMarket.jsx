@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams, Link } from 'react-router-dom'
 import useSEO from '../hooks/useSEO'
 import { useAuth } from '../context/AuthContext'
 import { agentMarketApi, billingApi, clawMarketApi } from '../api/client'
@@ -22,7 +22,8 @@ import {
   Cloud,
   CloudOff,
   CloudDownload,
-  AlertCircle
+  AlertCircle,
+  Wand2
 } from 'lucide-react'
 import LoginModal from '../components/LoginModal'
 import DockerMissingBanner from '../components/DockerMissingBanner'
@@ -402,6 +403,12 @@ export default function AgentMarket() {
               ? '助手是已激活秘技的命名组合，在对话页绑定后仅载入组合内的工具'
               : 'agent模式下可使用的skills及MCP工具'}
         </p>
+        <Link
+          to="/module-generator"
+          className="inline-flex items-center gap-1.5 mt-3 text-xs font-medium text-eleball-primary hover:underline"
+        >
+          <Wand2 className="w-3.5 h-3.5" /> 自己造一个秘技 →
+        </Link>
       </div>
 
       {/* Docker 缺失引导横幅：未安装 Docker 时提示安装指引，可关闭（存 localStorage） */}

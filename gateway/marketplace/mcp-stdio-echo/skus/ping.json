@@ -1,0 +1,20 @@
+{
+  "$schema": "../../../../specs/tool-manifest-schema.json",
+  "id": "com.eleball.tools.mcp_stdio_echo.ping",
+  "name": "MCP stdio Ping",
+  "description": "本地 stdio MCP 示例工具：返回 pong，用于验证 stdio 探活链路。",
+  "driver": "mcp_stdio_echo",
+  "runtime_type": "remote",
+  "category": "示例",
+  "level": 1,
+  "price_danwan": 0,
+  "permissions": ["network"],
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "actions": [
+    { "name": "ping", "description": "返回 pong" }
+  ],
+  "timeout_seconds": 30
+}

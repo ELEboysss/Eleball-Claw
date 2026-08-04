@@ -355,7 +355,7 @@ func main() {
 		logger.Warn("自动补齐内置 SkillRuntime 失败", zap.Error(err))
 	}
 
-	// 泛化同步官方 SKU（module.json sku_scope=cloud，如 agent-reach/firecrawl）：
+	// 泛化同步官方 SKU（module.json sku_scope=cloud，如 agent-reach/mcp-hello）：
 	// 启动即按 marketplace/<mod>/skus/*.json 同步 manifest（含 credentials/price），
 	// 不再依赖 --seed。已存在且 manifest 一致则跳过，保留 rating/counts 等统计。
 	if err := seed.SyncOfficialSKUs(agentRepo, "cloud", logger); err != nil {

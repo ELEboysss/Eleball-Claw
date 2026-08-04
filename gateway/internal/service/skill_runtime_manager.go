@@ -17,20 +17,25 @@ import (
 // SkillRuntimeManager 管理运行时生命周期（启动/停止/监控）
 // 按 deployment 类型分发到不同的启动器。
 type SkillRuntimeManager struct {
-	registry  *SkillRuntimeRegistry
-	logger    *zap.Logger
-	mu        sync.Mutex
-	processes map[string]*exec.Cmd      // runtime_id -> process
-	stopping  map[string]bool            // runtime_id -> 是否正在停止
-	sandboxCfg *ProcessSandboxConfig     // process 沙箱配置
+	registry     *SkillRuntimeRegistry
+	logger       *zap.Logger
+	mu           sync.Mutex
+	processes    map[string]*exec.Cmd     // runtime_id -> process
+	stopping     map[string]bool          // runtime_id -> 是否正在停止
+	sandboxCfg   *ProcessSandboxConfig    // process 沙箱配置
+	mcpStdio     *MCPStdioProtocol        // stdio MCP 会话池（与 Registry 共享同一实例）
+	skuService   *SkillRuntimeSKUService  // auto_sku 运行时探活成功后自动派生 SKU
+	credService  *AgentCredentialService  // stdio spawn 时注入 module 级凭证到 env
+	spawnUserIDs sync.Map                 // runtime_id -> userID（stdio spawn 注入凭证用的用户；空=autostart）
+	stopChans    map[string]chan struct{} // runtime_id -> supervisor 退出信号
 }
 
 // ProcessSandboxConfig 本地子进程沙箱配置
 type ProcessSandboxConfig struct {
-	AllowedWorkDirs []string          // 允许的工作目录前缀
-	AllowedEnvKeys  []string          // 允许的环境变量白名单
-	MaxProcesses    int               // 最大并发进程数
-	Timeout         time.Duration     // 启动超时
+	AllowedWorkDirs []string      // 允许的工作目录前缀
+	AllowedEnvKeys  []string      // 允许的环境变量白名单
+	MaxProcesses    int           // 最大并发进程数
+	Timeout         time.Duration // 启动超时
 }
 
 // NewSkillRuntimeManager 创建运行时管理器
@@ -40,6 +45,7 @@ func NewSkillRuntimeManager(registry *SkillRuntimeRegistry, logger *zap.Logger) 
 		logger:    logger,
 		processes: make(map[string]*exec.Cmd),
 		stopping:  make(map[string]bool),
+		stopChans: make(map[string]chan struct{}),
 		sandboxCfg: &ProcessSandboxConfig{
 			MaxProcesses: 10,
 			Timeout:      30 * time.Second,
@@ -52,6 +58,29 @@ func (m *SkillRuntimeManager) SetSandboxConfig(cfg *ProcessSandboxConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sandboxCfg = cfg
+}
+
+// SetMCPStdioProtocol 注入共享的 stdio MCP 协议实例（与 SkillRuntimeRegistry 共享同一实例）。
+// 未注入时 mcp_stdio 运行时无法启动会话与调用。
+func (m *SkillRuntimeManager) SetMCPStdioProtocol(p *MCPStdioProtocol) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mcpStdio = p
+}
+
+// SetSKUService 注入自动 SKU 派生服务。stdio supervisor 探活成功并拿到 tools/list 后，
+// 为 auto_sku 运行时调用 DeriveSKUs 合成/同步可购买 SKU（与 Registry 的 mcp_http 探活共用同一实例）。
+func (m *SkillRuntimeManager) SetSKUService(svc *SkillRuntimeSKUService) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.skuService = svc
+}
+
+// SetCredentialService 注入凭证服务。stdio spawn 时据此把 module 级凭证替换进 env 模板（${credentials.KEY}）。
+func (m *SkillRuntimeManager) SetCredentialService(svc *AgentCredentialService) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.credService = svc
 }
 
 // Start 启动运行时（按 deployment 分发）
@@ -122,6 +151,59 @@ func (m *SkillRuntimeManager) StopAll() {
 	for _, id := range ids {
 		_ = m.Stop(id)
 	}
+}
+
+// RespawnByDriver 按 driverID 重启 stdio process 运行时并注入指定用户的模块级凭证。
+// 用于模块级凭证变更后让 stdio 长驻进程拿到新 env（stdio 无法 per-call 注入）。
+// 非 process/stdio 运行时或未注册时安全跳过。返回 Start 的错误（Stop 错误忽略）。
+func (m *SkillRuntimeManager) RespawnByDriver(driverID, userID string) error {
+	if driverID == "" {
+		return nil
+	}
+	rt := m.registry.GetByDriverID(driverID)
+	if rt == nil {
+		return nil
+	}
+	if rt.Deployment != model.SkillRuntimeDeploymentProcess || rt.Transport != model.SkillRuntimeTransportMCPStdio {
+		return nil // 仅 stdio process 需重 spawn 注入 env
+	}
+	m.spawnUserIDs.Store(rt.ID, userID)
+	_ = m.Stop(rt.ID) // 停止旧进程（含 supervisor），忽略未运行等错误
+	return m.Start(rt.ID)
+}
+
+// buildStdioEnv 构建 stdio 子进程环境变量：os.Environ() + 模块 env（${credentials.KEY} 模板替换）。
+// 模块 env 为空时返回 nil（子进程继承父进程全部环境）。
+func (m *SkillRuntimeManager) buildStdioEnv(rt *model.SkillRuntime) []string {
+	moduleEnv := rt.EnvMap()
+	if len(moduleEnv) == 0 {
+		return nil
+	}
+	creds := m.loadStdioCredentials(rt)
+	env := os.Environ()
+	for k, v := range moduleEnv {
+		env = append(env, fmt.Sprintf("%s=%s", k, substituteCredentialPlaceholders(v, creds)))
+	}
+	return env
+}
+
+// loadStdioCredentials 读取 stdio 模块的 module 级凭证，用于 env 模板替换。
+// 优先用 spawnUserIDs 记录的用户（RespawnByDriver 设置）；为空时取模块桶任一用户（claw autostart）。
+func (m *SkillRuntimeManager) loadStdioCredentials(rt *model.SkillRuntime) map[string]string {
+	if m.credService == nil || rt.DriverID == "" {
+		return nil
+	}
+	v, _ := m.spawnUserIDs.Load(rt.ID)
+	userID, _ := v.(string)
+	if userID != "" {
+		if creds, err := m.credService.LoadModuleBucket(userID, rt.DriverID); err == nil {
+			return creds
+		}
+	}
+	if creds, err := m.credService.LoadModuleBucketAnyUser(rt.DriverID); err == nil {
+		return creds
+	}
+	return nil
 }
 
 // startDocker 启动 Docker 运行时
@@ -232,35 +314,25 @@ func (m *SkillRuntimeManager) startProcess(rt *model.SkillRuntime) error {
 
 	// 设置 stdio（对于 mcp_stdio transport）
 	if rt.Transport == model.SkillRuntimeTransportMCPStdio {
-		stdin, err := cmd.StdinPipe()
-		if err != nil {
-			return fmt.Errorf("创建 stdin 管道失败: %w", err)
+		if m.mcpStdio == nil {
+			return errors.New("stdio MCP 协议未注入，无法启动 mcp_stdio 运行时")
 		}
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			return fmt.Errorf("创建 stdout 管道失败: %w", err)
+		// 创建 supervisor 退出信号（startProcess 已持有 m.mu）
+		m.stopChans[rt.ID] = make(chan struct{})
+
+		proc, spawnErr := m.spawnStdioProcess(rt)
+		if spawnErr != nil {
+			delete(m.stopChans, rt.ID)
+			return spawnErr
 		}
-		stderr, err := cmd.StderrPipe()
-		if err != nil {
-			return fmt.Errorf("创建 stderr 管道失败: %w", err)
-		}
-
-		// 启动进程
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("启动进程失败: %w", err)
-		}
-
-		m.processes[rt.ID] = cmd
-
-		// 启动 goroutine 读取 stderr
-		go m.readProcessStderr(rt.ID, stderr)
-
-		// 启动 supervisor
-		go m.superviseProcess(rt.ID, cmd, stdin, stdout)
+		m.processes[rt.ID] = proc
 
 		// 更新状态为 starting
 		rt.Status = model.SkillRuntimeStatusStarting
 		m.registry.Register(rt)
+
+		// 启动 supervisor（周期探活 + 掉线重连）
+		go m.superviseStdio(rt)
 	} else {
 		// 普通 process（如 search-web 脚本），后台启动
 		if err := cmd.Start(); err != nil {
@@ -277,16 +349,33 @@ func (m *SkillRuntimeManager) startProcess(rt *model.SkillRuntime) error {
 
 // stopProcess 停止本地子进程
 func (m *SkillRuntimeManager) stopProcess(rt *model.SkillRuntime) error {
+	// 通知 supervisor 退出（不再重连）
 	m.mu.Lock()
+	if stopCh, ok := m.stopChans[rt.ID]; ok {
+		select {
+		case <-stopCh:
+		default:
+			close(stopCh)
+		}
+	}
 	cmd, exists := m.processes[rt.ID]
 	m.mu.Unlock()
 
 	if !exists {
+		// 仍可能存在 stdio 会话（supervisor 重连中途），一并清理
+		if m.mcpStdio != nil {
+			m.mcpStdio.UnregisterSession(rt.ID)
+		}
 		return nil
 	}
 
 	if m.logger != nil {
 		m.logger.Info("停止本地进程运行时", zap.String("runtime_id", rt.ID))
+	}
+
+	// 先注销 stdio 会话，避免 supervisor 探活误判重连
+	if m.mcpStdio != nil {
+		m.mcpStdio.UnregisterSession(rt.ID)
 	}
 
 	// 发送终止信号
@@ -309,6 +398,7 @@ func (m *SkillRuntimeManager) stopProcess(rt *model.SkillRuntime) error {
 
 	m.mu.Lock()
 	delete(m.processes, rt.ID)
+	delete(m.stopChans, rt.ID)
 	m.mu.Unlock()
 
 	// 更新状态为 offline
@@ -383,22 +473,199 @@ func (m *SkillRuntimeManager) readProcessStderr(runtimeID string, stderr interfa
 	}
 }
 
-// superviseProcess MCP stdio 进程 supervisor
-func (m *SkillRuntimeManager) superviseProcess(runtimeID string, cmd *exec.Cmd, stdin, stdout interface{}) {
-	// 简化实现：等待进程退出，然后标记 offline
-	// 完整实现应包含 JSON-RPC 读写循环和自动重连
-	go func() {
-		_ = cmd.Wait()
-		m.mu.Lock()
-		delete(m.processes, runtimeID)
-		m.mu.Unlock()
+// stdioProbeInterval stdio MCP supervisor 的探活周期（测试可短期覆盖）
+var stdioProbeInterval = 60 * time.Second
 
-		rt := m.registry.Get(runtimeID)
-		if rt != nil {
-			rt.Status = model.SkillRuntimeStatusOffline
-			m.registry.Register(rt)
+// superviseStdio MCP stdio 进程 supervisor：周期 tools/list 探活 + 掉线自动重连。
+// 不调用 cmd.Wait（由 stopProcess 负责 reap）；进程退出经下一次探活失败感知，
+// 随后按指数退避（1s/2s/4s）重 spawn，最多 3 次，超限标记 error。
+func (m *SkillRuntimeManager) superviseStdio(rt *model.SkillRuntime) {
+	runtimeID := rt.ID
+
+	// 子进程启动后短暂等待就绪，立即探活一次
+	time.Sleep(2 * time.Second)
+	if m.isStopping(runtimeID) {
+		return
+	}
+	_ = m.probeStdioRuntime(rt)
+
+	ticker := time.NewTicker(stdioProbeInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.stopChanFor(runtimeID):
+			return
+		case <-ticker.C:
+			if m.isStopping(runtimeID) {
+				return
+			}
+			if err := m.probeStdioRuntime(rt); err == nil {
+				continue
+			}
+			// 探活失败 -> 尝试重连；重连失败（超限/停止）则结束 supervisor
+			if !m.reconnectStdio(rt) {
+				return
+			}
 		}
-	}()
+	}
+}
+
+// spawnStdioProcess 创建并启动 stdio MCP 子进程、注册会话、起 stderr reader。
+// 不触碰 m.mu/m.processes（由调用方在合适锁状态写入 processes）。沙箱校验由调用方完成。
+// 返回已启动的 cmd，供调用方存入 processes map。
+func (m *SkillRuntimeManager) spawnStdioProcess(rt *model.SkillRuntime) (*exec.Cmd, error) {
+	// D3：spawn 前预解析命令，缺失解释器时返回带安装指引的可读错误，
+	// 避免 Windows 上 python/npx 缺失只抛 "executable file not found"。
+	resolved, err := locateCommand(rt.Command)
+	if err != nil {
+		return nil, err
+	}
+	args := rt.ArgsList()
+	cmd := exec.Command(resolved, args...)
+	if rt.WorkDir != "" {
+		cmd.Dir = rt.WorkDir
+	}
+	cmd.Env = m.buildStdioEnv(rt)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("创建 stdin 管道失败: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("创建 stdout 管道失败: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("创建 stderr 管道失败: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("启动进程失败: %w", err)
+	}
+
+	if m.mcpStdio != nil {
+		m.mcpStdio.RegisterSession(rt.ID, stdin, stdout)
+	}
+	go m.readProcessStderr(rt.ID, stderr)
+
+	if m.logger != nil {
+		pid := 0
+		if cmd.Process != nil {
+			pid = cmd.Process.Pid
+		}
+		m.logger.Info("stdio MCP 子进程已启动",
+			zap.String("runtime_id", rt.ID),
+			zap.Int("pid", pid),
+		)
+	}
+	return cmd, nil
+}
+
+// reconnectStdio 探活失败后重连：清旧会话 -> 指数退避重 spawn -> 探活确认。
+// 返回 true 表示重连成功（supervisor 继续）；false 表示超限标记 error 或正在停止。
+func (m *SkillRuntimeManager) reconnectStdio(rt *model.SkillRuntime) bool {
+	runtimeID := rt.ID
+	if m.mcpStdio != nil {
+		m.mcpStdio.UnregisterSession(runtimeID)
+	}
+	m.removeProcess(runtimeID)
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		if m.isStopping(runtimeID) {
+			return false
+		}
+		// 指数退避：1s -> 2s -> 4s
+		backoff := time.Duration(1<<(attempt-1)) * time.Second
+		time.Sleep(backoff)
+
+		if m.logger != nil {
+			m.logger.Warn("stdio MCP 尝试重连",
+				zap.String("runtime_id", runtimeID),
+				zap.Int("attempt", attempt),
+			)
+		}
+		proc, spawnErr := m.spawnStdioProcess(rt)
+		if spawnErr != nil {
+			if m.logger != nil {
+				m.logger.Warn("stdio MCP 重连 spawn 失败",
+					zap.String("runtime_id", runtimeID),
+					zap.Int("attempt", attempt),
+					zap.Error(spawnErr),
+				)
+			}
+			continue
+		}
+		m.mu.Lock()
+		m.processes[runtimeID] = proc
+		m.mu.Unlock()
+		// 等待子进程就绪后探活确认
+		time.Sleep(2 * time.Second)
+		if err := m.probeStdioRuntime(rt); err == nil {
+			if m.logger != nil {
+				m.logger.Info("stdio MCP 重连成功", zap.String("runtime_id", runtimeID), zap.Int("attempt", attempt))
+			}
+			return true
+		}
+		// 探活仍失败，清理后继续下一轮
+		if m.mcpStdio != nil {
+			m.mcpStdio.UnregisterSession(runtimeID)
+		}
+		m.removeProcess(runtimeID)
+	}
+
+	// 超过重连上限 -> 标记 error
+	if m.logger != nil {
+		m.logger.Warn("stdio MCP 重连超限，标记 error", zap.String("runtime_id", runtimeID))
+	}
+	m.registry.SetRuntimeStatus(runtimeID, model.SkillRuntimeStatusError, nil, "stdio MCP 重连超限")
+	return false
+}
+
+// probeStdioRuntime 经共享 MCPStdioProtocol 探活并更新状态。成功返回 nil。
+func (m *SkillRuntimeManager) probeStdioRuntime(rt *model.SkillRuntime) error {
+	if m.mcpStdio == nil || !m.mcpStdio.IsRegistered(rt.ID) {
+		m.registry.SetRuntimeStatus(rt.ID, model.SkillRuntimeStatusOffline, nil, "stdio 会话未注册")
+		return errors.New("stdio 会话未注册")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tools, err := m.mcpStdio.ListTools(ctx, rt.ID)
+	if err != nil {
+		m.registry.SetRuntimeStatus(rt.ID, model.SkillRuntimeStatusOffline, nil, err.Error())
+		return err
+	}
+	tools = FilterTools(rt, tools) // G2：按 allowed/disallowed 过滤，caps 与 DeriveSKUs 均只见允许的工具
+	caps := make([]string, 0, len(tools))
+	for _, t := range tools {
+		caps = append(caps, t.Name)
+	}
+	m.registry.SetRuntimeStatus(rt.ID, model.SkillRuntimeStatusOnline, caps, "")
+	// auto_sku 运行时：探活成功且拿到工具列表 -> 自动派生/同步 SKU
+	if m.skuService != nil {
+		m.skuService.DeriveSKUs(rt, tools)
+	}
+	return nil
+}
+
+// stopChanFor 返回 runtime 的 supervisor 退出信号；不存在时返回 nil
+func (m *SkillRuntimeManager) stopChanFor(runtimeID string) chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.stopChans[runtimeID]
+}
+
+// isStopping 是否正在停止
+func (m *SkillRuntimeManager) isStopping(runtimeID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.stopping[runtimeID]
+}
+
+// removeProcess 从 processes map 移除（不 kill）
+func (m *SkillRuntimeManager) removeProcess(runtimeID string) {
+	m.mu.Lock()
+	delete(m.processes, runtimeID)
+	m.mu.Unlock()
 }
 
 // monitorProcess 监控普通后台进程
