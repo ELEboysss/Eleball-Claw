@@ -225,9 +225,13 @@ export const moduleGeneratorApi = {
   // 入参 = probe 字段（stdio: command/args/env/work_dir；http: endpoint/headers）+ name + description。
   // 后端先探测校验再建 source=mcp_remote 的 SkillRuntime 并派生 SKU。
   install: (body) => client.post('/claw-console/mcp/install', body, { timeout: 35000 }),
-  // H1：安装托管解释器（python-build-standalone，SHA-256 校验）-> { interpreter, path, version, source, reused }
+  // H1：安装托管解释器（python/node，SHA-256 校验）-> { interpreter, path, version, source, reused }
   // 解释器缺失横幅「自动安装」按钮调用；系统已有则直接返回（source=system）。下载 ~30MB，超时放宽到 5 分钟。
-  installInterpreter: (body) => client.post('/claw-console/tools/install-interpreter', body, { timeout: 300000 })
+  installInterpreter: (body) => client.post('/claw-console/tools/install-interpreter', body, { timeout: 300000 }),
+  // H2：查询模块依赖状态 -> { has_deps, type, packages, installed }（stdio+process 模块才有依赖）
+  depsStatus: (moduleId) => client.get(`/claw-console/modules/${moduleId}/deps-status`),
+  // H2：安装模块依赖（python venv / node npm，用户在集市页显式触发，不自动）-> { type, packages, installed, log }
+  installDeps: (moduleId) => client.post(`/claw-console/modules/${moduleId}/install-deps`, {}, { timeout: 300000 })
 }
 
 // ====== 工作目录 API（本地 claw：AR-06，DirectoryPicker 消费）======

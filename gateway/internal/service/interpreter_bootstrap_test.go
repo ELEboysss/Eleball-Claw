@@ -2,6 +2,7 @@ package service
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -199,16 +200,129 @@ func TestFindManagedPythonBin(t *testing.T) {
 }
 
 func TestManagedInterpreterPath(t *testing.T) {
-	// node/npx 暂不支持托管，应返回空。
-	if managedInterpreterPath("npx") != "" {
-		t.Error("npx 不应支持托管")
+	// node/npx/python 在未安装时均应返回空（不报错、不联网）。
+	for _, cmd := range []string{"python", "node", "npx"} {
+		if managedInterpreterPath(cmd) != "" {
+			t.Errorf("未安装时 %s 应返回空", cmd)
+		}
 	}
-	if managedInterpreterPath("node") != "" {
-		t.Error("node 不应支持托管")
+	// 未知命令也应返回空。
+	if managedInterpreterPath("rustc") != "" {
+		t.Error("未知命令应返回空")
 	}
-	// python 在未安装时应返回空（不报错、不联网）。
-	if managedInterpreterPath("python") != "" {
-		t.Error("未安装时 python 应返回空")
+}
+
+func TestIsNodeCommand(t *testing.T) {
+	for _, c := range []string{"node", "npx"} {
+		if !isNodeCommand(c) {
+			t.Errorf("%s 应为 node 命令", c)
+		}
+	}
+	for _, c := range []string{"python", "uv", "npm", ""} {
+		if isNodeCommand(c) {
+			t.Errorf("%s 不应为 node 命令", c)
+		}
+	}
+}
+
+func TestParseNodeVersion(t *testing.T) {
+	cases := []struct {
+		in   string
+		want pythonVersion
+		ok   bool
+	}{
+		{"v20.15.0", pythonVersion{20, 15, 0}, true},
+		{"20.15.0", pythonVersion{20, 15, 0}, true},
+		{"v22.4.0", pythonVersion{22, 4, 0}, true},
+		{"v20", pythonVersion{}, false},
+		{"", pythonVersion{}, false},
+	}
+	for _, c := range cases {
+		got, ok := parseNodeVersion(c.in)
+		if ok != c.ok || got != c.want {
+			t.Errorf("parseNodeVersion(%q) = %v,%v; want %v,%v", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestSelectNodeLTSEntry(t *testing.T) {
+	// 混合 LTS / 非 LTS / 预发布；应选最高 LTS。
+	entries := []nodeDistEntry{
+		{Version: "v22.4.0", LTS: false},     // 当前发布（非 LTS），跳过
+		{Version: "v20.15.0", LTS: "Iron"},   // LTS
+		{Version: "v18.20.0", LTS: "Hydrogen"}, // LTS，更低
+		{Version: "v21.0.0", LTS: false},     // 非 LTS，跳过
+	}
+	got, err := selectNodeLTSEntry(entries)
+	if err != nil {
+		t.Fatalf("selectNodeLTSEntry 失败: %v", err)
+	}
+	if got != "v20.15.0" {
+		t.Errorf("应选 v20.15.0，实得 %s", got)
+	}
+	// 无 LTS 应报错。
+	if _, err := selectNodeLTSEntry([]nodeDistEntry{{Version: "v22.4.0", LTS: false}}); err == nil {
+		t.Error("无 LTS 时应报错")
+	}
+}
+
+func TestNodeAssetName(t *testing.T) {
+	name, err := nodeAssetName("v20.15.0")
+	if err != nil {
+		// 非支持主机（理论上测试机都在支持列表）仅在此跳过。
+		t.Skipf("当前主机无 node 资产: %v", err)
+	}
+	if !strings.HasPrefix(name, "node-v20.15.0-") {
+		t.Errorf("资产名前缀错误: %s", name)
+	}
+	if !strings.HasSuffix(name, ".tar.gz") && !strings.HasSuffix(name, ".zip") {
+		t.Errorf("资产名应含扩展名: %s", name)
+	}
+}
+
+func TestNodeHostTriple(t *testing.T) {
+	plat, arch, ext, err := nodeHostTriple()
+	if err != nil {
+		t.Skipf("当前主机无 node 资产: %v", err)
+	}
+	if plat == "" || arch == "" || ext == "" {
+		t.Errorf("三元组不应有空: plat=%q arch=%q ext=%q", plat, arch, ext)
+	}
+	if runtime.GOOS == "windows" && ext != ".zip" {
+		t.Errorf("Windows 应为 .zip，实得 %s", ext)
+	}
+	if runtime.GOOS != "windows" && ext != ".tar.gz" {
+		t.Errorf("非 Windows 应为 .tar.gz，实得 %s", ext)
+	}
+}
+
+func TestFindManagedNodeBin(t *testing.T) {
+	dir := t.TempDir()
+	// 空目录
+	if findManagedNodeBin(dir, "node") != "" {
+		t.Error("空目录应返回空")
+	}
+	if findManagedNodeBin(dir, "npx") != "" {
+		t.Error("空目录应返回空")
+	}
+	// unix 布局：bin/node + bin/npx
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nodeBin := filepath.Join(binDir, "node")
+	npxBin := filepath.Join(binDir, "npx")
+	if err := os.WriteFile(nodeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(npxBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := findManagedNodeBin(dir, "node"); got != nodeBin {
+		t.Errorf("node 应找到 %s，实得 %s", nodeBin, got)
+	}
+	if got := findManagedNodeBin(dir, "npx"); got != npxBin {
+		t.Errorf("npx 应找到 %s，实得 %s", npxBin, got)
 	}
 }
 
@@ -293,5 +407,60 @@ func TestIsWithinDir(t *testing.T) {
 	}
 	if isWithinDir(dest, filepath.Clean("/tmp/extract-evil")) {
 		t.Error("前缀碰撞应判定为外")
+	}
+}
+
+// writeZip 构造一个内存 zip 文件到磁盘，返回路径。
+func writeZip(t *testing.T, entries map[string]string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test.zip")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	zw := zip.NewWriter(f)
+	for name, body := range entries {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestExtractZipZipSlip 构造含逃逸路径的 zip，断言被拒绝。
+func TestExtractZipZipSlip(t *testing.T) {
+	archive := writeZip(t, map[string]string{"../escape.txt": "bad"})
+	dest := t.TempDir()
+	if err := extractZip(archive, dest); err == nil {
+		t.Fatal("zip-slip 归档应被拒绝")
+	}
+}
+
+// TestExtractZipNormal 正常 zip 解压（含子目录）。
+func TestExtractZipNormal(t *testing.T) {
+	archive := writeZip(t, map[string]string{
+		"node-v20.15.0-linux-x64/bin/node": "dummy",
+		"node-v20.15.0-linux-x64/bin/npx":  "dummy",
+	})
+	dest := t.TempDir()
+	if err := extractZip(archive, dest); err != nil {
+		t.Fatalf("正常 zip 解压失败: %v", err)
+	}
+	node := filepath.Join(dest, "node-v20.15.0-linux-x64", "bin", "node")
+	if _, err := os.Stat(node); err != nil {
+		t.Fatalf("解压后 node 应存在: %v", err)
+	}
+	// findNodeRoot 应定位到含 node 的顶层目录。
+	root := findNodeRoot(dest)
+	if root != filepath.Join(dest, "node-v20.15.0-linux-x64") {
+		t.Errorf("findNodeRoot = %s, want %s", root, filepath.Join(dest, "node-v20.15.0-linux-x64"))
 	}
 }

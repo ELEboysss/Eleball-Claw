@@ -425,13 +425,50 @@ func (h *ClawConsoleHandler) TestCall(c *gin.Context) {
 	})
 }
 
-// installInterpreterRequest /v1/claw-console/tools/install-interpreter 请求体（H1）。
-type installInterpreterRequest struct {
-	Interpreter string `json:"interpreter"` // python/python3/...（缺省 python）；node/npx 暂不支持托管
+// DepsStatus 查询模块依赖状态（H2）：是否带第三方依赖（requirements.txt/package.json）
+// 及是否已装。供秘技集市页展示「依赖未装」badge 与装前包列表预览。
+// GET /v1/claw-console/modules/:id/deps-status
+func (h *ClawConsoleHandler) DepsStatus(c *gin.Context) {
+	moduleID := c.Param("id")
+	if h.moduleService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 2002, "message": "模块服务未初始化"})
+		return
+	}
+	status, err := h.moduleService.DepsStatus(moduleID)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": status})
 }
 
-// InstallInterpreter 安装托管解释器（H1，降低安装成本）：用户无系统 python 时自动下载
-// python-build-standalone（astral-sh，SHA-256 校验）到 ~/.eleball-claw/tools/python。
+// InstallDeps 安装模块依赖（H2，用户显式触发）：python 建 venv + pip install；
+// node npm install。装后重启模块使新依赖生效。不自动执行（用户在集市页确认才调）。
+// POST /v1/claw-console/modules/:id/install-deps
+func (h *ClawConsoleHandler) InstallDeps(c *gin.Context) {
+	moduleID := c.Param("id")
+	if h.moduleService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 2002, "message": "模块服务未初始化"})
+		return
+	}
+	// 装依赖可能耗时较长（下载/编译），放宽到 5 分钟。
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
+	defer cancel()
+	result, err := h.moduleService.InstallDeps(ctx, moduleID)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": err.Error(), "data": result})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": result})
+}
+
+// installInterpreterRequest /v1/claw-console/tools/install-interpreter 请求体（H1）。
+type installInterpreterRequest struct {
+	Interpreter string `json:"interpreter"` // python/python3/node/npx（缺省 python）
+}
+
+// InstallInterpreter 安装托管解释器（H1，降低安装成本）：用户无系统 python/node 时自动下载
+// 官方发行版（python-build-standalone / nodejs.org，SHA-256 校验）到 ~/.eleball-claw/tools/。
 // 系统已有则直接返回（source=system）；已装托管则复用（reused=true）；否则下载安装。
 // D3 interpreter_missing 横幅的「自动安装」按钮调用此端点。
 // POST /v1/claw-console/tools/install-interpreter

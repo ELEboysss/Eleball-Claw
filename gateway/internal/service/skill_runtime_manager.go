@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -204,6 +205,32 @@ func (m *SkillRuntimeManager) loadStdioCredentials(rt *model.SkillRuntime) map[s
 		return creds
 	}
 	return nil
+}
+
+// resolveStdioCommand 解析 stdio 启动命令的二进制路径。
+// H2：python 模块若已建 .venv（用户经 install-deps 装过依赖），优先用 venv python 以加载
+// 第三方包；否则回退 locateCommand（系统 -> 托管磁盘探测 -> InterpreterMissingError）。
+func (m *SkillRuntimeManager) resolveStdioCommand(rt *model.SkillRuntime) (string, error) {
+	if isPythonCommand(rt.Command) {
+		if venvBin := managedVenvPython(rt.WorkDir); venvBin != "" {
+			return venvBin, nil
+		}
+	}
+	return locateCommand(rt.Command)
+}
+
+// ensureNodePath 若 resolved 是托管 node/npx 二进制，把托管 node bin 目录前插到 PATH，
+// 供 npx 脚本 shebang（#!/usr/bin/env node）解析 node。env 为 nil 时基于 os.Environ() 构建；
+// resolved 非托管 node 时原样返回（系统 node 已在 PATH）。
+func (m *SkillRuntimeManager) ensureNodePath(resolved string, env []string) []string {
+	binDir := managedNodeBinDir()
+	if binDir == "" || !strings.HasPrefix(filepath.Clean(resolved), binDir) {
+		return env
+	}
+	if env == nil {
+		env = os.Environ()
+	}
+	return prependPath(env, binDir)
 }
 
 // startDocker 启动 Docker 运行时
@@ -517,7 +544,8 @@ func (m *SkillRuntimeManager) superviseStdio(rt *model.SkillRuntime) {
 func (m *SkillRuntimeManager) spawnStdioProcess(rt *model.SkillRuntime) (*exec.Cmd, error) {
 	// D3：spawn 前预解析命令，缺失解释器时返回带安装指引的可读错误，
 	// 避免 Windows 上 python/npx 缺失只抛 "executable file not found"。
-	resolved, err := locateCommand(rt.Command)
+	// H2：python 模块若已建 .venv（用户装过依赖），改用 venv python 以加载第三方依赖。
+	resolved, err := m.resolveStdioCommand(rt)
 	if err != nil {
 		return nil, err
 	}
@@ -526,7 +554,9 @@ func (m *SkillRuntimeManager) spawnStdioProcess(rt *model.SkillRuntime) (*exec.C
 	if rt.WorkDir != "" {
 		cmd.Dir = rt.WorkDir
 	}
-	cmd.Env = m.buildStdioEnv(rt)
+	// buildStdioEnv 注入 module 级凭证 env；ensureNodePath 把托管 node bin 放上 PATH
+	// （供 npx 脚本 shebang 解析 node；仅 resolved 为托管 node 二进制时生效）。
+	cmd.Env = m.ensureNodePath(resolved, m.buildStdioEnv(rt))
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("创建 stdin 管道失败: %w", err)

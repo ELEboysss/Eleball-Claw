@@ -8,10 +8,10 @@ import { moduleGeneratorApi } from '../api/client'
 // err.data.error_code === 'interpreter_missing' 时渲染。data 形如：
 //   { error_code: 'interpreter_missing', interpreter: 'python', hint: '...' }
 //
-// H1：当缺失的是 python 家族时，提供「自动安装」按钮 -> POST /claw-console/tools/
-// install-interpreter，后端下载 python-build-standalone（SHA-256 校验）到
-// ~/.eleball-claw/tools/python。成功后提示重新探测；onResolved 回调（可选）可用于
-// 父组件自动重探。node/npx 暂不支持托管安装，仅展示「查看安装指南」链接。
+// H1：当缺失的是 python 家族或 node/npx 时，提供「自动安装」按钮 -> POST /claw-console/
+// tools/install-interpreter，后端下载官方发行版（python-build-standalone / nodejs.org，
+// SHA-256 校验）到 ~/.eleball-claw/tools/。成功后提示重新探测；onResolved 回调（可选）
+// 可用于父组件自动重探。其余命令仅展示「查看安装指南」链接。
 //
 // 由 ModuleGenerator / MCPInstall 共用，避免安装逻辑重复。
 export default function InterpreterMissingBanner({ data, message, onResolved }) {
@@ -22,18 +22,19 @@ export default function InterpreterMissingBanner({ data, message, onResolved }) 
   if (!data || data.error_code !== 'interpreter_missing') return null
 
   const interpreter = data.interpreter || ''
-  // 仅 python 家族支持托管自动安装（node/npx 走指南链接）。
-  const canAutoInstall =
-    interpreter === 'python' ||
-    interpreter === 'python3' ||
-    /^python3\.\d+$/.test(interpreter)
+  // python 家族与 node/npx 支持托管自动安装。
+  const isPython = interpreter === 'python' || interpreter === 'python3' || /^python3\.\d+$/.test(interpreter)
+  const isNode = interpreter === 'node' || interpreter === 'npx'
+  const canAutoInstall = isPython || isNode
+  // npx 随 node 发行版自带，统一装 node；python 家族统一装 python。
+  const installTarget = isPython ? 'python' : 'node'
 
   const onInstall = async () => {
     setInstalling(true)
     setError(null)
     setResult(null)
     try {
-      const res = await moduleGeneratorApi.installInterpreter({ interpreter: 'python' })
+      const res = await moduleGeneratorApi.installInterpreter({ interpreter: installTarget })
       setResult(res)
       if (onResolved && res?.path) onResolved(res)
     } catch (e) {
@@ -42,6 +43,10 @@ export default function InterpreterMissingBanner({ data, message, onResolved }) 
       setInstalling(false)
     }
   }
+
+  const downloadHint = isPython
+    ? '正在从 astral-sh/python-build-standalone 下载并校验，约 30MB，请稍候…'
+    : '正在从 nodejs.org 下载并校验 LTS 发行版，约 25MB，请稍候…'
 
   return (
     <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 flex items-start gap-3">
@@ -77,10 +82,10 @@ export default function InterpreterMissingBanner({ data, message, onResolved }) 
           <div className="mt-2 text-xs px-2 py-1 rounded-lg bg-red-50 text-red-600 break-all">{error}</div>
         )}
         {result?.reused && result?.source === 'system' && (
-          <div className="mt-1 text-[11px] text-amber-700">检测到系统已安装 Python，无需托管下载。</div>
+          <div className="mt-1 text-[11px] text-amber-700">检测到系统已安装 {installTarget === 'python' ? 'Python' : 'Node.js'}，无需托管下载。</div>
         )}
         {installing && (
-          <div className="mt-1 text-[11px] text-amber-700">正在从 astral-sh/python-build-standalone 下载并校验，约 30MB，请稍候…</div>
+          <div className="mt-1 text-[11px] text-amber-700">{downloadHint}</div>
         )}
       </div>
     </div>

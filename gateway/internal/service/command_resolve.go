@@ -22,8 +22,8 @@ func (e *InterpreterMissingError) Error() string {
 var interpreterHints = map[string]string{
 	"python":  "未找到 Python，请安装 3.10+（https://www.python.org/downloads/）或运行 eleball-claw setup-python",
 	"python3": "未找到 Python，请安装 3.10+（https://www.python.org/downloads/）或运行 eleball-claw setup-python",
-	"node":    "未找到 Node.js，请安装 18+（https://nodejs.org/）",
-	"npx":     "未找到 Node.js/npx，请安装 18+（https://nodejs.org/）",
+	"node":    "未找到 Node.js，请安装 18+（https://nodejs.org/）或运行 eleball-claw setup-node",
+	"npx":     "未找到 Node.js/npx，请安装 18+（https://nodejs.org/）或运行 eleball-claw setup-node",
 	"uv":      "未找到 uv，请安装（https://docs.astral.sh/uv/）",
 	"uvx":     "未找到 uv/uvx，请安装（https://docs.astral.sh/uv/）",
 }

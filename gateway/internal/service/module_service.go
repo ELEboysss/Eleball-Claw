@@ -31,6 +31,8 @@ type ModuleService struct {
 	driverRepo *repository.DriverRepo // 可选：claw InstallFromCloudMeta 保留旧 drivers 表绑定
 	// chatService 可选：skill-maker AI 起草 main.py 草稿（F1 收尾，调对话模型生成 stdio MCP 脚本）。
 	chatService *ChatProxyService
+	// bootstrap 可选：H2 装依赖时确保解释器可用（python/node 托管下载，H1）。
+	bootstrap *InterpreterBootstrap
 	// P4：第三方模块镜像安装器（拉镜像 + 签名校验 + 启动容器）。官方预置模块不经此安装器。
 	installer *ImageInstaller
 }
@@ -64,6 +66,11 @@ func (s *ModuleService) SetDriverRepo(repo *repository.DriverRepo) {
 // SetChatProxyService 注入对话代理服务（claw 用：skill-maker AI 起草 main.py，F1 收尾）。
 func (s *ModuleService) SetChatProxyService(svc *ChatProxyService) {
 	s.chatService = svc
+}
+
+// SetInterpreterBootstrap 注入托管解释器引导器（claw 用：H2 装依赖时确保 python/node 可用）。
+func (s *ModuleService) SetInterpreterBootstrap(b *InterpreterBootstrap) {
+	s.bootstrap = b
 }
 
 // CheckRuntime 查询指定运行时状态，供 AgentToolLoader 过滤离线 SKU。

@@ -235,6 +235,9 @@ func NewClawRouter(
 				console.POST("/modules/:id/refresh", moduleHandler.RefreshModule)
 				// F2：直接调用模块工具（绕过 LLM），造秘技页验证生成模块可调用
 				console.POST("/modules/:id/test-call", clawConsoleHandler.TestCall)
+				// H2：用户手动装依赖（python venv / node npm），集市页触发，不自动
+				console.GET("/modules/:id/deps-status", clawConsoleHandler.DepsStatus)
+				console.POST("/modules/:id/install-deps", clawConsoleHandler.InstallDeps)
 				console.POST("/modules/rescan", moduleHandler.RescanMarketplace)
 				// P4：安装云端已购模块到本地（拉镜像+签名校验+激活）
 				console.POST("/modules/install", moduleHandler.InstallModule)

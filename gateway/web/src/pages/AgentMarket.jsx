@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { useSearchParams, Link } from 'react-router-dom'
 import useSEO from '../hooks/useSEO'
 import { useAuth } from '../context/AuthContext'
-import { agentMarketApi, billingApi, clawMarketApi } from '../api/client'
+import { agentMarketApi, billingApi, clawMarketApi, moduleGeneratorApi } from '../api/client'
 import {
   Search,
   Star,
@@ -23,7 +23,8 @@ import {
   CloudOff,
   CloudDownload,
   AlertCircle,
-  Wand2
+  Wand2,
+  Package
 } from 'lucide-react'
 import LoginModal from '../components/LoginModal'
 import DockerMissingBanner from '../components/DockerMissingBanner'
@@ -86,6 +87,12 @@ export default function AgentMarket() {
   // 云端已购秘技（ModuleInstallMeta 列表）与安装中 module_id
   const [cloudMetas, setCloudMetas] = useState([])
   const [installingId, setInstallingId] = useState(null)
+  // H2：依赖管理弹窗（模块级，stdio+process 模块的 requirements.txt/package.json）
+  const [depsModal, setDepsModal] = useState(null) // agent 卡片对象
+  const [depsStatus, setDepsStatus] = useState(null)
+  const [depsLoading, setDepsLoading] = useState(false)
+  const [depsInstalling, setDepsInstalling] = useState(false)
+  const [depsError, setDepsError] = useState('')
 
   // 加载能力开关与余额
   useEffect(() => {
@@ -355,6 +362,48 @@ export default function AgentMarket() {
     }
   }
 
+  // H2：打开依赖管理弹窗，拉取模块依赖状态（包列表 + 安装状态）
+  const openDepsModal = async (agent) => {
+    setDepsModal(agent)
+    setDepsStatus(null)
+    setDepsError('')
+    setDepsLoading(true)
+    const moduleID = parseManifestModuleId(agent)
+    if (!moduleID) {
+      setDepsError('无法解析模块 ID')
+      setDepsLoading(false)
+      return
+    }
+    try {
+      const data = await moduleGeneratorApi.depsStatus(moduleID)
+      setDepsStatus(data)
+    } catch (err) {
+      setDepsError(err.message || '加载依赖状态失败')
+    } finally {
+      setDepsLoading(false)
+    }
+  }
+
+  // H2：安装模块依赖（python venv / node npm），用户显式触发
+  const handleInstallDeps = async () => {
+    if (!depsModal) return
+    const moduleID = parseManifestModuleId(depsModal)
+    if (!moduleID) return
+    setDepsInstalling(true)
+    setDepsError('')
+    try {
+      const res = await moduleGeneratorApi.installDeps(moduleID)
+      setDepsStatus(res)
+      setMessage(`${depsModal.name} 依赖安装完成`)
+      // 安装会重启模块，刷新列表以更新在线/依赖状态
+      loadAgents()
+    } catch (err) {
+      setDepsError(err.message || '安装依赖失败')
+    } finally {
+      setDepsInstalling(false)
+    }
+  }
+
   // 未登录引导
   if (!isLoggedIn) {
     return (
@@ -598,6 +647,16 @@ export default function AgentMarket() {
                       凭证不全
                     </span>
                   )}
+                  {agent.has_deps && !agent.deps_installed && (
+                    <button
+                      onClick={() => openDepsModal(agent)}
+                      className="text-xs px-2 py-0.5 rounded-full font-medium bg-orange-50 text-orange-600 flex items-center gap-1 hover:bg-orange-100 transition-colors"
+                      title="该秘技依赖第三方包未安装，点击安装"
+                    >
+                      <Package className="w-3 h-3" />
+                      依赖未装
+                    </button>
+                  )}
                   <span
                     className={`text-xs px-2 py-0.5 rounded-full font-medium ${
                       levelColors[agent.level] || levelColors[1]
@@ -832,6 +891,86 @@ export default function AgentMarket() {
               >
                 {credentialLoading ? '保存中...' : '保存凭证'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* H2：依赖管理弹窗（模块级，展示包列表 + 风险提示 + 安装按钮） */}
+      {depsModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl w-full max-w-md max-h-[80vh] overflow-auto">
+            <div className="p-4 border-b border-eleball-outline flex items-center justify-between">
+              <h3 className="font-bold text-eleball-text flex items-center gap-1.5">
+                <Package className="w-4 h-4" />
+                {depsModal.name} 依赖管理
+              </h3>
+              <button onClick={() => setDepsModal(null)} className="text-eleball-text-tertiary hover:text-eleball-text">
+                &times;
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              {depsError && (
+                <div className="text-sm px-3 py-2 rounded-xl bg-red-50 text-red-600">{depsError}</div>
+              )}
+              {depsLoading && (
+                <div className="text-sm text-eleball-text-secondary text-center py-4">加载中...</div>
+              )}
+              {depsStatus && !depsLoading && (
+                <>
+                  {!depsStatus.has_deps ? (
+                    <div className="text-sm text-eleball-text-secondary text-center py-4">
+                      该模块无第三方依赖。
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="px-2 py-0.5 rounded-full bg-eleball-surface-variant text-eleball-text-secondary font-medium">
+                          {depsStatus.type === 'node' ? 'Node.js' : 'Python'}
+                        </span>
+                        <span className={`px-2 py-0.5 rounded-full font-medium ${depsStatus.installed ? 'bg-emerald-50 text-emerald-600' : 'bg-orange-50 text-orange-600'}`}>
+                          {depsStatus.installed ? '已安装' : '未安装'}
+                        </span>
+                      </div>
+                      <div className="text-xs px-3 py-2 rounded-xl bg-amber-50 text-amber-700 leading-relaxed">
+                        ⚠️ 将安装以下第三方依赖。依赖来自模块的 {depsStatus.type === 'node' ? 'package.json' : 'requirements.txt'}，由模块作者声明。请确认来源可信后再安装。
+                      </div>
+                      <div className="space-y-1.5 max-h-48 overflow-auto">
+                        {(depsStatus.packages || []).map((p, i) => (
+                          <div key={i} className="flex items-center justify-between text-xs px-3 py-1.5 rounded-lg bg-eleball-surface-variant">
+                            <span className="font-mono text-eleball-text">{p.name}</span>
+                            {p.spec && <span className="font-mono text-eleball-text-tertiary">{p.spec}</span>}
+                          </div>
+                        ))}
+                        {(!depsStatus.packages || depsStatus.packages.length === 0) && (
+                          <div className="text-xs text-eleball-text-secondary text-center py-2">无包声明</div>
+                        )}
+                      </div>
+                      {depsStatus.log && (
+                        <details className="text-xs">
+                          <summary className="text-eleball-text-tertiary cursor-pointer">安装输出</summary>
+                          <pre className="mt-1 px-3 py-2 rounded-lg bg-gray-50 text-eleball-text-secondary overflow-auto max-h-32 whitespace-pre-wrap">{depsStatus.log}</pre>
+                        </details>
+                      )}
+                      <button
+                        onClick={handleInstallDeps}
+                        disabled={depsInstalling}
+                        className="btn-primary text-sm px-4 py-2 w-full justify-center disabled:opacity-50"
+                      >
+                        {depsInstalling ? (
+                          <span className="flex items-center justify-center gap-1.5">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" /> 安装中…
+                          </span>
+                        ) : depsStatus.installed ? (
+                          '重新安装'
+                        ) : (
+                          '安装依赖'
+                        )}
+                      </button>
+                    </>
+                  )}
+                </>
+              )}
             </div>
           </div>
         </div>

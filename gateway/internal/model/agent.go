@@ -71,6 +71,9 @@ type AgentItem struct {
 	DriverRegistered   bool  `gorm:"-" json:"driver_registered"`   // 是否已注册对应驱动别名（仅对非内置驱动有效）
 	CredentialComplete bool  `gorm:"-" json:"credential_complete"` // 当前用户是否已配齐该 SKU 声明的必填凭证（缺则不可激活）
 	ModuleOnline       *bool `gorm:"-" json:"module_online,omitempty"` // nil 表示无模块依赖，false 表示模块离线/未注册，true 表示在线
+	HasDeps            bool  `gorm:"-" json:"has_deps,omitempty"`      // stdio+process 模块是否有第三方依赖（requirements.txt/package.json）
+	DepsInstalled      bool  `gorm:"-" json:"deps_installed,omitempty"` // 依赖是否已装（venv/node_modules 存在）
+	DepsType           string `gorm:"-" json:"deps_type,omitempty"`    // "python" | "node"（has_deps 时）
 }
 
 // Manifest 解析 ManifestJSON 为 ToolManifest

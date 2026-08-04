@@ -57,13 +57,17 @@ func getGitSHA() string {
 }
 
 func main() {
-	// 子命令：module（模块管理，不启动网关）；setup-python（预装托管解释器，不启动网关）；serve 默认（剥离 serve 让 flag 正常解析）。
+	// 子命令：module（模块管理，不启动网关）；setup-python（预装托管 Python，不启动网关）；
+	// setup-node（预装托管 Node.js）；serve 默认（剥离 serve 让 flag 正常解析）。
 	// 兼容无 serve 直接 --port（eleball-claw --port=8090）。
 	if len(os.Args) > 1 && os.Args[1] == "module" {
 		os.Exit(runModuleCommand(os.Args[2:]))
 	}
 	if len(os.Args) > 1 && (os.Args[1] == "setup-python" || os.Args[1] == "setup") {
 		os.Exit(runSetupPython(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "setup-node" {
+		os.Exit(runSetupNode(os.Args[2:]))
 	}
 	if len(os.Args) > 1 && os.Args[1] == "serve" {
 		os.Args = append(os.Args[:1], os.Args[2:]...)
@@ -478,8 +482,11 @@ func main() {
 	clawConsoleHandler.SetProcessSandboxWorkDirs(buildProcessSandboxConfig(cfg.Modules.ProcessSandbox).AllowedWorkDirs)
 	// E3：注入模块服务，供 /v1/claw-console/mcp/generate 写模块 + rescan + autostart
 	clawConsoleHandler.SetModuleService(moduleService)
-	// H1：注入托管解释器引导器，供 /v1/claw-console/tools/install-interpreter 下载 python-build-standalone
-	clawConsoleHandler.SetInterpreterBootstrap(service.NewInterpreterBootstrap(logger))
+	// H1：注入托管解释器引导器，供 /v1/claw-console/tools/install-interpreter 下载 python/node；
+	// H2 装依赖（moduleService.InstallDeps）复用同一引导器确保解释器可用。
+	interpreterBootstrap := service.NewInterpreterBootstrap(logger)
+	clawConsoleHandler.SetInterpreterBootstrap(interpreterBootstrap)
+	moduleService.SetInterpreterBootstrap(interpreterBootstrap)
 	clawCwdHandler := handler.NewClawCwdHandler()
 	clawFilesHandler := handler.NewClawFilesHandler(agentSandbox)
 	clawWorktreeHandler := handler.NewClawWorktreeHandler(service.NewWorktreeService())

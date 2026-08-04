@@ -226,6 +226,27 @@ func (s *AgentMarketService) checkModuleOnline(item *model.AgentItem) *bool {
 	return &online
 }
 
+// checkModuleDeps 检查 stdio+process 模块是否有第三方依赖及安装状态（H2，供集市页展示「依赖未装」）。
+// 非 stdio+process 模块（含 cloud 无本地 stdio 运行时）返回 hasDeps=false。
+func (s *AgentMarketService) checkModuleDeps(item *model.AgentItem) (hasDeps, installed bool, depsType string) {
+	if s.skillRuntimeRegistry == nil {
+		return false, false, ""
+	}
+	moduleID := s.resolveModuleID(item)
+	if moduleID == "" {
+		return false, false, ""
+	}
+	rt := s.skillRuntimeRegistry.Get(moduleID)
+	if rt == nil {
+		return false, false, ""
+	}
+	if rt.Transport != model.SkillRuntimeTransportMCPStdio || rt.Deployment != model.SkillRuntimeDeploymentProcess {
+		return false, false, ""
+	}
+	st := scanRuntimeDeps(rt)
+	return st.HasDeps, st.Installed, st.Type
+}
+
 // checkDriverRegistered 检查 SKU 声明的驱动别名是否已注册。
 // 无外部驱动依赖的 SKU 返回 true。
 func (s *AgentMarketService) checkDriverRegistered(item *model.AgentItem) bool {
@@ -277,6 +298,7 @@ func (s *AgentMarketService) enrichAgents(userID string, items []*model.AgentIte
 		items[i].DriverRegistered = s.checkDriverRegistered(item)
 		items[i].ModuleOnline = s.checkModuleOnline(item)
 		items[i].CredentialComplete = s.checkCredentialComplete(userID, item)
+		items[i].HasDeps, items[i].DepsInstalled, items[i].DepsType = s.checkModuleDeps(item)
 
 		// 动态评分：收藏率×5，连续值不卡上限。favoriteCount 含未购买/未激活用户收藏，
 		// 可能 > activeCount 导致评分 > 5，符合预期（无最高分限制）。
