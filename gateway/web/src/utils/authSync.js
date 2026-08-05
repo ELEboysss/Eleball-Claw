@@ -1,7 +1,7 @@
 import { CLOUD_BASE } from '../api/client'
 import { getItem, setItem, getJSON } from './storage'
 
-// claw 与内嵌云端官网（eleball.cn iframe）之间的登录态双向同步。
+// claw 与内嵌云端内容 iframe（eleball.cn，如充值页）之间的登录态双向同步。
 //
 // 背景：claw 与 eleball.cn 不同源，localStorage 各自隔离；但 claw 登录拿到的 JWT 本就是
 // 有效的云端 token（两端共享 JWT secret + storage 键名格式完全一致：eleball_token /

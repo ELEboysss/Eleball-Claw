@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Firecrawl stdio MCP 服务器。
 
-经 stdio JSON-RPC（NDJSON）暴露 scrape / crawl / extract 三工具，内部调用 Firecrawl API
-（FIRECRAWL_BASE_URL + FIRECRAWL_API_KEY 环境变量，由网关 env 模板
-${credentials.firecrawl_api_key} 在 spawn 时注入，见阶段 D1）。
+经 stdio JSON-RPC（NDJSON）暴露 scrape / crawl / extract 三工具，内部调用 Firecrawl API。
+API Key 由网关 per-call 经 tools/call 的 _meta.credentials.firecrawl_api_key 注入（用户在
+秘技集市配置的模块凭证），不再 spawn 时烤进 env；FIRECRAWL_BASE_URL 仍取 env（非密配置）。
 
 仅依赖标准库（urllib），无需 pip install，降低用户安装成本（对标 mcp-stdio-echo 的零依赖）。
 auto_sku=true：网关探活拿到 tools/list 后自动派生三份可购买 SKU，免手写 skus/*.json。
@@ -18,7 +18,6 @@ import urllib.error
 import urllib.request
 
 FIRECRAWL_BASE_URL = os.environ.get("FIRECRAWL_BASE_URL", "https://api.firecrawl.dev").rstrip("/")
-FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY", "")
 
 
 def make_result(req_id, result):
@@ -81,13 +80,13 @@ def tools_list():
     ]
 
 
-def _firecrawl_request(path, payload):
-    """调用 Firecrawl API，返回 (data, error)。"""
-    if not FIRECRAWL_API_KEY:
-        return None, "缺少 FIRECRAWL_API_KEY（请在模块凭证配置 firecrawl_api_key）"
+def _firecrawl_request(path, payload, api_key):
+    """调用 Firecrawl API，返回 (data, error)。api_key 由网关 per-call 经 _meta.credentials 注入。"""
+    if not api_key:
+        return None, "缺少 firecrawl_api_key（请在模块凭证配置 firecrawl_api_key）"
     url = FIRECRAWL_BASE_URL + path
     body = json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json", "x-api-key": FIRECRAWL_API_KEY}
+    headers = {"Content-Type": "application/json", "x-api-key": api_key}
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
@@ -112,14 +111,14 @@ def _error_text(msg):
     return {"isError": True, "content": [{"type": "text", "text": msg}]}
 
 
-def _do_scrape(args):
+def _do_scrape(args, api_key):
     url = args.get("url")
     if not url:
         return _error_text("缺少 url 参数")
     payload = {"url": url, "formats": args.get("formats", ["markdown"])}
     if "onlyMainContent" in args:
         payload["onlyMainContent"] = args["onlyMainContent"]
-    data, err = _firecrawl_request("/v1/scrape", payload)
+    data, err = _firecrawl_request("/v1/scrape", payload, api_key)
     if err:
         return _error_text(err)
     if not data.get("success"):
@@ -136,14 +135,14 @@ def _do_scrape(args):
     return _text(json.dumps(result, ensure_ascii=False))
 
 
-def _do_crawl(args):
+def _do_crawl(args, api_key):
     url = args.get("url")
     if not url:
         return _error_text("缺少 url 参数")
     payload = {"url": url}
     if "limit" in args:
         payload["limit"] = args["limit"]
-    data, err = _firecrawl_request("/v1/crawl", payload)
+    data, err = _firecrawl_request("/v1/crawl", payload, api_key)
     if err:
         return _error_text(err)
     if not data.get("success"):
@@ -152,7 +151,7 @@ def _do_crawl(args):
     return _text(json.dumps(result, ensure_ascii=False))
 
 
-def _do_extract(args):
+def _do_extract(args, api_key):
     urls = args.get("urls")
     if not urls:
         return _error_text("缺少 urls 参数")
@@ -161,7 +160,7 @@ def _do_extract(args):
         payload["schema"] = args["schema"]
     if "prompt" in args:
         payload["prompt"] = args["prompt"]
-    data, err = _firecrawl_request("/v1/extract", payload)
+    data, err = _firecrawl_request("/v1/extract", payload, api_key)
     if err:
         return _error_text(err)
     if not data.get("success"):
@@ -169,13 +168,13 @@ def _do_extract(args):
     return _text(json.dumps(data.get("data", {}), ensure_ascii=False))
 
 
-def tools_call(name, arguments):
+def tools_call(name, arguments, api_key):
     if name == "scrape":
-        return _do_scrape(arguments)
+        return _do_scrape(arguments, api_key)
     if name == "crawl":
-        return _do_crawl(arguments)
+        return _do_crawl(arguments, api_key)
     if name == "extract":
-        return _do_extract(arguments)
+        return _do_extract(arguments, api_key)
     return _error_text("Unknown tool: %s" % name)
 
 
@@ -206,7 +205,12 @@ def main():
         elif method == "tools/list":
             resp = make_result(req_id, {"tools": tools_list()})
         elif method == "tools/call":
-            resp = make_result(req_id, tools_call(params.get("name"), params.get("arguments", {})))
+            # 网关 per-call 经 _meta.credentials 注入 firecrawl_api_key（用户在秘技集市配置的模块凭证），
+            # 不再 spawn 时烤进 env；env 兜底仅供 ProbeStdio 探测等无凭证场景。
+            meta = params.get("_meta") or {}
+            creds = meta.get("credentials") or {}
+            api_key = creds.get("firecrawl_api_key") or os.environ.get("FIRECRAWL_API_KEY", "")
+            resp = make_result(req_id, tools_call(params.get("name"), params.get("arguments", {}), api_key))
         else:
             resp = make_error(req_id, -32601, "Method not found: %s" % method)
 

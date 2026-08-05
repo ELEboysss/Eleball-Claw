@@ -1,6 +1,7 @@
 package router
 
 import (
+	"io"
 	"io/fs"
 	"net/http"
 	"strings"
@@ -233,6 +234,8 @@ func NewClawRouter(
 				console.POST("/modules", moduleHandler.RegisterModule)
 				console.DELETE("/modules/:id", moduleHandler.UnregisterModule)
 				console.POST("/modules/:id/refresh", moduleHandler.RefreshModule)
+				// 拉起模块（process 同步 / docker 异步），「本地模块」页「启动服务」按钮调用
+				console.POST("/modules/:id/start", moduleHandler.StartModule)
 				// F2：直接调用模块工具（绕过 LLM），造秘技页验证生成模块可调用
 				console.POST("/modules/:id/test-call", clawConsoleHandler.TestCall)
 				// H2：用户手动装依赖（python venv / node npm），集市页触发，不自动
@@ -352,7 +355,8 @@ func serveStatic(r *gin.Engine, log *zap.Logger) {
 
 	log.Info("web 静态服务就绪（embed）")
 
-	// NoRoute：API 路径返回 JSON 404；其余 fallback 到 index.html（SPA 路由）
+	// NoRoute：API 路径返回 JSON 404；散落静态资源（dist 根目录的 logo-icon.png / favicon.png / *.svg 等）
+	// 命中则直接返回；其余 fallback 到 index.html（SPA 路由）。
 	r.NoRoute(func(c *gin.Context) {
 		path := c.Request.URL.Path
 		// /api 是云端 nginx 反代前缀，claw 本地无此前缀；命中说明前端用了错误的 baseURL，
@@ -362,12 +366,49 @@ func serveStatic(r *gin.Engine, log *zap.Logger) {
 			c.JSON(http.StatusNotFound, gin.H{"code": 4040, "message": "接口不存在: " + path})
 			return
 		}
-		// admin-web SPA fallback
+		// admin-web：/admin/assets/* 已由 StaticFS 处理；先尝试 /admin/<根文件>（如 eleball-icon.png），
+		// 命中返回静态文件，否则 SPA fallback 到 admin index。
 		if strings.HasPrefix(path, "/admin") {
+			if rel := strings.TrimPrefix(path, "/admin/"); rel != "" && rel != path {
+				if serveDistFile(c, adminDist, rel) {
+					return
+				}
+			}
 			serveIndex(c, adminIndex)
 			return
 		}
-		// web SPA fallback
+		// web：先尝试根静态文件（logo-icon.png / favicon.png / *.svg），命中返回，否则 SPA fallback。
+		if rel := strings.TrimPrefix(path, "/"); rel != "" && rel != path {
+			if serveDistFile(c, webDist, rel) {
+				return
+			}
+		}
 		serveIndex(c, webIndex)
 	})
+}
+
+// serveDistFile 从 embed 子文件系统读取单个散落静态文件并返回（按扩展名自动设 Content-Type）。
+// 用于 dist 根目录下不在 /assets 里的资源（logo-icon.png、favicon.png、*.svg 等）--
+// StaticFS 只挂了 /assets/*，这些根文件需在 NoRoute 里兜底，否则会被 SPA index.html 顶替成裂图。
+// 命中返回 true；文件不存在或为目录返回 false（调用方继续走 SPA fallback）。
+func serveDistFile(c *gin.Context, fsys fs.FS, name string) bool {
+	if strings.Contains(name, "..") || strings.HasPrefix(name, "/") {
+		return false
+	}
+	f, err := fsys.Open(name)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.IsDir() {
+		return false
+	}
+	rs, ok := f.(io.ReadSeeker)
+	if !ok {
+		return false
+	}
+	c.Header("Cache-Control", "public, max-age=3600")
+	http.ServeContent(c.Writer, c.Request, info.Name(), info.ModTime(), rs)
+	return true
 }

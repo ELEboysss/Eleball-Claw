@@ -291,7 +291,7 @@ export default function AssistantManager() {
       {/* 助手编辑弹窗（新建 / 编辑共用） */}
       {editor && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-md max-h-[85vh] overflow-auto">
+          <div className="dialog-panel w-full max-w-md max-h-[85vh] overflow-auto">
             <div className="p-4 border-b border-eleball-outline flex items-center justify-between">
               <h3 className="font-bold text-eleball-text">{editor.id ? '编辑助手' : '新建助手'}</h3>
               <button

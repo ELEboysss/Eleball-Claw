@@ -60,7 +60,7 @@ export default function TeamModal({ open, onClose, teams, onTeamsChange }) {
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl w-full max-w-md max-h-[85vh] overflow-auto">
+      <div className="dialog-panel w-full max-w-md max-h-[85vh] overflow-auto">
         <div className="p-4 border-b border-eleball-outline flex items-center justify-between">
           <h3 className="font-bold text-eleball-text flex items-center gap-2">
             <Folders className="w-4 h-4 text-eleball-primary" />

@@ -131,7 +131,7 @@ export default function SlashPalette({ categories, query, selectedIndex, onSelec
                     onClick={() => handleSelect(cmd)}
                     className={[
                       'w-full text-left px-3 py-2 flex items-start gap-2.5 transition-colors',
-                      active ? 'bg-eleball-primary-light text-eleball-primary' : 'hover:bg-eleball-surface-variant text-eleball-text'
+                      active ? 'bg-eleball-surface-variant text-eleball-primary' : 'hover:bg-eleball-surface-variant/50 text-eleball-text'
                     ].join(' ')}
                   >
                     <span className="mt-0.5 text-eleball-text-secondary">{icon}</span>
@@ -152,9 +152,9 @@ export default function SlashPalette({ categories, query, selectedIndex, onSelec
         })}
       </div>
       <div className="px-3 py-1.5 border-t border-eleball-outline-variant bg-eleball-surface text-[10px] text-eleball-text-secondary flex items-center gap-3">
-        <span><kbd className="font-sans bg-white px-1 rounded border">↑↓</kbd> 选择</span>
-        <span><kbd className="font-sans bg-white px-1 rounded border">Enter</kbd> 应用</span>
-        <span><kbd className="font-sans bg-white px-1 rounded border">Esc</kbd> 关闭</span>
+        <span><kbd className="font-mono bg-white px-1 rounded border">↑↓</kbd> 选择</span>
+        <span><kbd className="font-mono bg-white px-1 rounded border">Enter</kbd> 应用</span>
+        <span><kbd className="font-mono bg-white px-1 rounded border">Esc</kbd> 关闭</span>
       </div>
     </div>
   )

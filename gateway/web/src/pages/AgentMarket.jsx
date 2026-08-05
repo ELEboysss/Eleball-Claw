@@ -3,6 +3,7 @@ import { useSearchParams, Link } from 'react-router-dom'
 import useSEO from '../hooks/useSEO'
 import { useAuth } from '../context/AuthContext'
 import { agentMarketApi, billingApi, clawMarketApi, moduleGeneratorApi } from '../api/client'
+import PageHero from '../components/PageHero'
 import {
   Search,
   Star,
@@ -442,18 +443,19 @@ export default function AgentMarket() {
     <div className="pt-8 pb-16 px-4 max-w-6xl mx-auto min-h-screen">
       {/* 标题区 */}
       <div className="text-center mb-6">
-        <h1 className="text-2xl font-bold text-eleball-text mb-2">
-          {filter === 'owned' ? '我的秘技' : filter === 'assistants' ? '我的助手' : '秘技集市'}
-        </h1>
-        <p className="text-sm text-eleball-text-secondary">
-          {filter === 'owned'
-            ? '你已购买和激活的秘技'
-            : filter === 'assistants'
-              ? '助手是已激活秘技的命名组合，在对话页绑定后仅载入组合内的工具'
-              : 'agent模式下可使用的skills及MCP工具'}
-        </p>
+        <PageHero
+          align="center"
+          title={filter === 'owned' ? '我的秘技' : filter === 'assistants' ? '我的助手' : '秘技集市'}
+          subtitle={
+            filter === 'owned'
+              ? '你已购买和激活的秘技'
+              : filter === 'assistants'
+                ? '助手是已激活秘技的命名组合，在对话页绑定后仅载入组合内的工具'
+                : 'agent 模式下可使用的 skills 及 MCP 工具'
+          }
+        />
         <Link
-          to="/module-generator"
+          to="/studio"
           className="inline-flex items-center gap-1.5 mt-3 text-xs font-medium text-eleball-primary hover:underline"
         >
           <Wand2 className="w-3.5 h-3.5" /> 自己造一个秘技 →
@@ -690,7 +692,7 @@ export default function AgentMarket() {
 
               <div className="flex items-center gap-1 text-xs text-eleball-text-tertiary mb-4">
                 <Star className="w-3 h-3" />
-                <span>{agent.avg_rating ? agent.avg_rating.toFixed(1) : '—'}</span>
+                <span>{agent.avg_rating ? agent.avg_rating.toFixed(1) : '-'}</span>
                 <span className="mx-1">·</span>
                 <span>{agent.active_count || 0} 人激活</span>
                 <span className="mx-1">·</span>
@@ -790,7 +792,7 @@ export default function AgentMarket() {
       {/* 购买确认弹窗 */}
       {confirmAgent && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-sm">
+          <div className="dialog-panel w-full max-w-sm">
             <div className="p-4 border-b border-eleball-outline flex items-center justify-between">
               <h3 className="font-bold text-eleball-text">确认购买</h3>
               <button
@@ -844,7 +846,7 @@ export default function AgentMarket() {
       {/* SKU 凭证配置弹窗 */}
       {credentialModal && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-md max-h-[80vh] overflow-auto">
+          <div className="dialog-panel w-full max-w-md max-h-[80vh] overflow-auto">
             <div className="p-4 border-b border-eleball-outline flex items-center justify-between">
               <h3 className="font-bold text-eleball-text">{credentialModal.name} 凭证配置</h3>
               <button onClick={() => setCredentialModal(null)} className="text-eleball-text-tertiary hover:text-eleball-text">
@@ -899,7 +901,7 @@ export default function AgentMarket() {
       {/* H2：依赖管理弹窗（模块级，展示包列表 + 风险提示 + 安装按钮） */}
       {depsModal && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-md max-h-[80vh] overflow-auto">
+          <div className="dialog-panel w-full max-w-md max-h-[80vh] overflow-auto">
             <div className="p-4 border-b border-eleball-outline flex items-center justify-between">
               <h3 className="font-bold text-eleball-text flex items-center gap-1.5">
                 <Package className="w-4 h-4" />

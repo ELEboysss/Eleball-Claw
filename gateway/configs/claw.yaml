@@ -71,6 +71,16 @@ agent:
   api_key: ""
   base_url: ""
 
+# E2：工具权限配置。claw 本地以权限确认模型替代云端白名单沙箱。
+# mode 为新会话的默认权限模式，用户可在前端 Shift+Tab 切换并持久化到会话：
+#   default     逐个确认（只读自动放行，写/Shell 询问）—— 默认
+#   acceptEdits 文件编辑自动放行，Shell/构建仍询问
+#   plan        只读模式 + 计划流程（ExitPlanMode 接受后切 acceptEdits）
+#   auto        全自动（仅危险操作黑名单与 deny 规则拦截）
+#   strict      全确认（含只读，每次询问）
+permission:
+  mode: default
+
 agent_reach:
   # 本地预置模块的探测客户端配置；第三方模块拉镜像后按 modules 表独立维护地址
   module_url: ""

@@ -28,22 +28,13 @@ func TestNormalizeShellInput(t *testing.T) {
 
 	// command 含空格且 args 非空 → 带格式提示的错误
 	_, _, err = normalizeShellInput("ls -l", []string{"/tmp"})
-	if err == nil || !strings.Contains(err.Error(), "正确格式") {
+	if err == nil || !strings.Contains(err.Error(), "不应包含参数") {
 		t.Fatalf("应返回格式提示错误: %v", err)
 	}
 
 	// 空命令 → 错误
 	if _, _, err = normalizeShellInput("  ", nil); err == nil {
 		t.Fatal("空命令应报错")
-	}
-}
-
-// TestShellWhitelistAdditions pip/pip3/where 已在白名单
-func TestShellWhitelistAdditions(t *testing.T) {
-	for _, name := range []string{"pip", "pip3", "where", "which"} {
-		if !shellCommandWhitelist[name] {
-			t.Fatalf("%s 应在白名单中", name)
-		}
 	}
 }
 
@@ -82,18 +73,17 @@ func TestRunnerShellSplitIntegration(t *testing.T) {
 		t.Fatalf("整行 grep 应可执行: %q err=%v", out, err)
 	}
 
-	// 日志场景3：管道/重定向仍然拒绝，但错误带格式提示
+	// 日志场景3（D3）：管道/重定向/链式现在可执行（经 bash -c），不再被元字符禁令拦截
+	skipIfNoShell(t)
 	_, err = runner.Shell(context.Background(), "pip show aider-chat 2>/dev/null || echo not installed", nil, "")
-	if err == nil {
-		t.Fatal("管道/重定向应被拒绝")
-	}
-	if !strings.Contains(err.Error(), "正确格式") {
-		t.Fatalf("错误应带格式提示: %v", err)
+	if err != nil {
+		t.Fatalf("管道/重定向/链式应可执行: %v", err)
 	}
 
-	// 日志场景4：python3 -c 仍然禁止（安全底线）
-	_, err = runner.Shell(context.Background(), "python3", []string{"-c", "print(1)"}, "")
-	if err == nil || !strings.Contains(err.Error(), "内联执行") {
-		t.Fatalf("-c 应被禁止: %v", err)
+	// 日志场景4（D3）：内联执行 -c/-e 不再禁止
+	skipIfNoExec(t, "node")
+	out, err = runner.Shell(context.Background(), "node", []string{"-e", "console.log(1)"}, "")
+	if err != nil || !strings.Contains(out, "1") {
+		t.Fatalf("node -e 应可执行: %q err=%v", out, err)
 	}
 }

@@ -60,7 +60,9 @@ func normalizePullPolicy(policy string) string {
 // 返回成功上线的模块名列表（供关闭时 down）。
 // docker 缺失、marketplace 目录异常、单模块失败均只告警不阻断。
 // ctx 取消时中断后续模块的启动（已启动的仍返回，便于退出时清理）。
-func autoStartModules(ctx context.Context, logger *zap.Logger, cfg config.ModulesConfig, registry *service.SkillRuntimeRegistry) []string {
+// activated 为已激活（购买）模块 ID 集合：仅上线其中的 docker 模块，未激活的不自动启动
+// （由控制台「启动服务」按钮手动拉起）。
+func autoStartModules(ctx context.Context, logger *zap.Logger, cfg config.ModulesConfig, registry *service.SkillRuntimeRegistry, activated map[string]bool) []string {
 	if service.EnsureDockerOnPath() == "" {
 		logger.Warn("未检测到 docker，跳过预置模块自动上线（模块将保持离线，可安装 Docker 后重启或手动 module up）")
 		return nil
@@ -76,6 +78,19 @@ func autoStartModules(ctx context.Context, logger *zap.Logger, cfg config.Module
 		logger.Info("没有可自动启动的模块", zap.String("reason", err.Error()))
 		return nil
 	}
+	// 激活门控：仅上线已激活模块（docker 模块目录名 == 模块 ID）。
+	filtered := make([]string, 0, len(targets))
+	for _, name := range targets {
+		if activated[name] {
+			filtered = append(filtered, name)
+		}
+	}
+	if len(filtered) == 0 {
+		logger.Info("无已激活的 docker 模块，跳过自动上线（未激活模块可到控制台手动启动）",
+			zap.Int("skipped", len(targets)))
+		return nil
+	}
+	targets = filtered
 
 	policy := normalizePullPolicy(cfg.PullPolicy)
 	var started []string
@@ -200,7 +215,9 @@ func (e *composeError) Error() string {
 // autoStartProcessRuntimes 后台启动所有 deployment=process 的运行时（如 stdio MCP）。
 // 无 docker 依赖：直接经 SkillRuntimeManager spawn 本地子进程，由 supervisor 探活转在线。
 // docker 缺失或单模块失败均只告警不阻断。返回成功启动的 runtime id 列表（供日志/调试）。
-func autoStartProcessRuntimes(ctx context.Context, logger *zap.Logger, repo *repository.SkillRuntimeRepo, manager *service.SkillRuntimeManager) []string {
+// activated 为已激活（购买）模块 ID 集合：仅启动其中的 process 模块，未激活的不自动启动
+// （由控制台「启动服务」按钮手动拉起）。
+func autoStartProcessRuntimes(ctx context.Context, logger *zap.Logger, repo *repository.SkillRuntimeRepo, manager *service.SkillRuntimeManager, activated map[string]bool) []string {
 	if repo == nil || manager == nil {
 		return nil
 	}
@@ -220,6 +237,10 @@ func autoStartProcessRuntimes(ctx context.Context, logger *zap.Logger, repo *rep
 		if rt.Status == model.SkillRuntimeStatusDisabled {
 			continue
 		}
+		// 激活门控：未激活的 process 模块不自动启动。
+		if !activated[rt.ID] {
+			continue
+		}
 		if err := manager.Start(rt.ID); err != nil {
 			logger.Warn("process 运行时自动启动失败（网关继续运行）",
 				zap.String("runtime_id", rt.ID), zap.Error(err))
@@ -232,6 +253,10 @@ func autoStartProcessRuntimes(ctx context.Context, logger *zap.Logger, repo *rep
 }
 
 // buildProcessSandboxConfig 把配置转换为 SkillRuntimeManager 沙箱配置，展开 ~ 与解析超时。
+// 同时把当前 marketplace 根目录并入 allowed_work_dirs：官方/用户 process 模块的 work_dir 均
+// 落在其下，而配置默认只列安装版 home（~/.eleball-claw/marketplace）。开发模式（仓库内
+// marketplace/）或 CLAW_MARKETPLACE_DIR 自定义根时若不补登，process 模块沙箱会误判 work_dir
+// 越界（work_dir 以相对路径存储，filepath.Abs 按 claw-server CWD 解析后不在 home 白名单内）。
 func buildProcessSandboxConfig(cfg config.ProcessSandboxConfig) *service.ProcessSandboxConfig {
 	timeout, err := time.ParseDuration(cfg.Timeout)
 	if err != nil || timeout <= 0 {
@@ -241,9 +266,23 @@ func buildProcessSandboxConfig(cfg config.ProcessSandboxConfig) *service.Process
 	if maxProc <= 0 {
 		maxProc = 10
 	}
-	workDirs := make([]string, 0, len(cfg.AllowedWorkDirs))
+	workDirs := make([]string, 0, len(cfg.AllowedWorkDirs)+1)
+	seen := make(map[string]bool, len(cfg.AllowedWorkDirs)+1)
+	add := func(p string) {
+		if p == "" || seen[p] {
+			return
+		}
+		seen[p] = true
+		workDirs = append(workDirs, p)
+	}
 	for _, d := range cfg.AllowedWorkDirs {
-		workDirs = append(workDirs, expandHome(d))
+		add(expandHome(d))
+	}
+	// 并入实际 marketplace 根（绝对路径），覆盖开发模式 / 自定义根 / 安装版 home 三种场景
+	if r := service.ResolveMarketplaceRoot(); r != "" {
+		if abs, err := filepath.Abs(r); err == nil {
+			add(abs)
+		}
 	}
 	return &service.ProcessSandboxConfig{
 		AllowedWorkDirs: workDirs,

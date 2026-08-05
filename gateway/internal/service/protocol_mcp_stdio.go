@@ -270,10 +270,17 @@ func (s *stdioSession) execute(ctx context.Context, action string, params map[st
 		return nil, err
 	}
 	arguments := mcpCallArguments(params)
-	resp, err := s.call(ctx, "tools/call", map[string]interface{}{
+	callParams := map[string]interface{}{
 		"name":      action,
 		"arguments": arguments,
-	})
+	}
+	// per-call 凭证注入：把用户已配置的模块凭证经 MCP _meta 透传给子进程，子进程每次调用读取，
+	// 不再在 spawn 时烤进 env（凭证随调用走，换 key 即时生效、无需 respawn）。mcpCallArguments
+	// 仍把 credentials 从 arguments 剥离，工具入参保持干净；仅 _meta 携带凭证。
+	if creds, ok := params["credentials"].(map[string]string); ok && len(creds) > 0 {
+		callParams["_meta"] = map[string]interface{}{"credentials": creds}
+	}
+	resp, err := s.call(ctx, "tools/call", callParams)
 	if err != nil {
 		return nil, err
 	}

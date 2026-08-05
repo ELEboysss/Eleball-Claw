@@ -37,23 +37,41 @@ function mapBackendMessage(m) {
   }
 }
 
+// 判定是否为流式期间插入的空 assistant 占位消息（无正文/思考/步骤/工具/中间输出）。
+// 这类占位仅存在于本地 state 与 localStorage，后端从未持久化；流式中断（如渲染崩溃）后
+// 会常驻本地历史，并在后续回合被 mergeMessages 当作本地独有保留，造成「空回复 + 结果回复」。
+function isEmptyAssistantPlaceholder(m) {
+  if (m?.role !== 'assistant') return false
+  return (
+    !m.content &&
+    !m.reasoningContent &&
+    !m.intermediateContent &&
+    !(m.steps && m.steps.length) &&
+    !(m.toolSteps && m.toolSteps.length)
+  )
+}
+
 // 合并本地消息与后端消息：请求失败或后端数据不完整时，保留本地已有的助手回复。
 // 若后端消息更完整（数量不少于本地），直接采用后端数据；否则保留本地并追加后端独有的消息。
+// 本地空 assistant 占位一律剔除，避免中断轮的空壳常驻历史。
 function mergeMessages(localMessages = [], backendMessages = []) {
+  const local = (Array.isArray(localMessages) ? localMessages : []).filter(
+    (m) => !isEmptyAssistantPlaceholder(m)
+  )
   if (!Array.isArray(backendMessages) || backendMessages.length === 0) {
-    return localMessages
+    return local
   }
-  if (!Array.isArray(localMessages) || localMessages.length === 0) {
+  if (local.length === 0) {
     return backendMessages
   }
   // 后端消息不少于本地时，认为后端已完整持久化，直接采用
-  if (backendMessages.length >= localMessages.length) {
+  if (backendMessages.length >= local.length) {
     return backendMessages
   }
   // 否则以本地为基准，追加后端可能独有的消息（按 role + 内容前 120 字符去重）
   const makeKey = (m) => `${m.role || ''}:${(m.content || '').slice(0, 120)}`
-  const seen = new Set(localMessages.map(makeKey))
-  const merged = [...localMessages]
+  const seen = new Set(local.map(makeKey))
+  const merged = [...local]
   for (const m of backendMessages) {
     const key = makeKey(m)
     if (!seen.has(key)) {
@@ -168,12 +186,12 @@ export function ChatProvider({ children }) {
             prev.map((c) => {
               const found = messagesResults.find((r) => r.id === c.id)
               if (!found) return c
-              // 只有在后端和本地都没有消息时才兜底显示 welcome
+              // 后端和本地都没有消息时留空，由 Chat 空状态 UI 呈现欢迎语（不持久化、不发 LLM）
               const messages = found.messages?.length
                 ? found.messages
                 : c.messages?.length
                   ? c.messages
-                  : [{ role: 'assistant', content: '你好，我是 Eleball。有什么可以帮你的吗？' }]
+                  : []
               return { ...c, messages }
             })
           )

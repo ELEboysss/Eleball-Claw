@@ -55,6 +55,7 @@ import { useAgent } from '../hooks/useAgent'
 import { useInputHistory } from '../hooks/useInputHistory'
 import { useSlashCommands } from '../hooks/useSlashCommands'
 import ChatMinimap, { useMessageRefs } from '../components/ChatMinimap'
+import ErrorBoundary from '../components/ErrorBoundary'
 import { Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -1522,10 +1523,10 @@ export default function Chat() {
     }
   }, [input, attachments, isLoggedIn, currentProfile, currentConversation, conversations, token, user?.user_id, models, enableTools, executeAgent, persistMessage])
 
-  // C1：权限模式循环（default -> acceptEdits -> plan -> default），Shift+Tab 或点徽章触发
+  // C1：权限模式循环（default -> acceptEdits -> plan -> auto -> strict -> default），Shift+Tab 或点徽章触发
   const cyclePermissionMode = useCallback(() => {
     setPermissionMode(prev => {
-      const order = ['default', 'acceptEdits', 'plan']
+      const order = ['default', 'acceptEdits', 'plan', 'auto', 'strict']
       const idx = order.indexOf(prev)
       return order[(idx + 1) % order.length]
     })
@@ -2004,6 +2005,21 @@ export default function Chat() {
           >
             {(() => {
               const allMessages = currentConversation?.messages || []
+              if (allMessages.length === 0) {
+                return (
+                  <div className="flex flex-col items-center justify-center min-h-[50%] text-center px-4 py-10">
+                    <div className="w-14 h-14 rounded-full bg-eleball-primary-light flex items-center justify-center mb-4">
+                      <Bot className="w-7 h-7 text-eleball-primary" />
+                    </div>
+                    <p className="text-lg font-semibold text-eleball-text mb-1">你好，我是 Eleball</p>
+                    <p className="text-sm text-eleball-text-secondary">
+                      有什么可以帮你的吗？输入消息开始对话，或按{' '}
+                      <kbd className="px-1.5 py-0.5 rounded bg-eleball-surface-variant text-xs font-mono">/</kbd>{' '}
+                      查看命令
+                    </p>
+                  </div>
+                )
+              }
               const renderWindow = getVisibleRenderWindow(allMessages.length, visibleCount)
               const visibleMessages = allMessages.slice(renderWindow.startIndex)
               return (
@@ -2022,17 +2038,25 @@ export default function Chat() {
                         key={message.id || actualIdx}
                         ref={(el) => { messageRefs.current[actualIdx] = el }}
                       >
-                        {message.role === 'compaction' ? (
-                          <CompactionBubble message={message} />
-                        ) : (
-                          <MessageBubble
-                            message={message}
-                            isLast={actualIdx === allMessages.length - 1}
-                            loading={loading}
-                            onFork={handleFork}
-                            forkingMessageId={forkingMessageId}
-                          />
-                        )}
+                        <ErrorBoundary fallback={(err) => (
+                          <div className="text-xs text-eleball-text-tertiary rounded-xl bg-eleball-surface-variant px-3 py-2 break-all">
+                            该消息渲染出错：{err?.message || String(err || '')}
+                          </div>
+                        )}>
+                          {message.role === 'compaction' ? (
+                            <CompactionBubble message={message} />
+                          ) : (
+                            <MessageBubble
+                              message={message}
+                              isLast={actualIdx === allMessages.length - 1}
+                              loading={loading}
+                              onFork={handleFork}
+                              forkingMessageId={forkingMessageId}
+                              onApprove={approveToolCall}
+                              onPlanReview={handlePlanReview}
+                            />
+                          )}
+                        </ErrorBoundary>
                       </div>
                     )
                   })}
@@ -2281,18 +2305,22 @@ export default function Chat() {
                     <button
                       type="button"
                       onClick={cyclePermissionMode}
-                      aria-label="切换权限模式（Shift+Tab）" title={`权限模式：${permissionMode === 'plan' ? '计划（只读）' : permissionMode === 'acceptEdits' ? '自动编辑' : '默认（逐个确认）'}，Shift+Tab 切换`}
+                      aria-label="切换权限模式（Shift+Tab）" title={`权限模式：${permissionMode === 'plan' ? '计划（只读）' : permissionMode === 'acceptEdits' ? '自动编辑' : permissionMode === 'auto' ? '自动（免确认）' : permissionMode === 'strict' ? '严格（全确认）' : '默认（逐个确认）'}，Shift+Tab 切换`}
                       className={[
                         'inline-flex items-center gap-1 px-2 py-1.5 rounded-full text-xs font-medium border transition-colors',
                         permissionMode === 'plan'
                           ? 'bg-amber-50 text-amber-600 border-amber-200 hover:bg-amber-100'
                           : permissionMode === 'acceptEdits'
                           ? 'bg-green-50 text-green-600 border-green-200 hover:bg-green-100'
+                          : permissionMode === 'auto'
+                          ? 'bg-red-50 text-red-600 border-red-200 hover:bg-red-100'
+                          : permissionMode === 'strict'
+                          ? 'bg-purple-50 text-purple-600 border-purple-200 hover:bg-purple-100'
                           : 'bg-transparent text-eleball-text-secondary border-eleball-outline hover:bg-gray-50 hover:text-eleball-text'
                       ].join(' ')}
                     >
                       <Shield className="w-3.5 h-3.5" />
-                      <span>{permissionMode === 'plan' ? '计划' : permissionMode === 'acceptEdits' ? '自动编辑' : '默认'}</span>
+                      <span>{permissionMode === 'plan' ? '计划' : permissionMode === 'acceptEdits' ? '自动编辑' : permissionMode === 'auto' ? '自动' : permissionMode === 'strict' ? '严格' : '默认'}</span>
                     </button>
                   )}
                   {enableTools && supportsAgent && (
@@ -2701,7 +2729,7 @@ function CompactionBubble({ message }) {
   )
 }
 
-function MessageBubble({ message, isLast, loading, onFork, forkingMessageId }) {
+function MessageBubble({ message, isLast, loading, onFork, forkingMessageId, onApprove, onPlanReview }) {
   const isUser = message.role === 'user'
   const isAssistant = message.role === 'assistant'
 
@@ -2737,7 +2765,7 @@ function MessageBubble({ message, isLast, loading, onFork, forkingMessageId }) {
         {/* 新版 Agent 按时间线展示 thinking / tool / answer；旧消息无 steps 时回退到旧布局 */}
         {isAssistant && message.steps && message.steps.length > 0 ? (
           <div className="rounded-2xl px-4 py-2.5 text-sm leading-relaxed bg-eleball-surface-variant text-eleball-text rounded-bl-md">
-            <AgentSteps steps={message.steps} loading={loading && isLast} onApprove={approveToolCall} onPlanReview={handlePlanReview} />
+            <AgentSteps steps={message.steps} loading={loading && isLast} onApprove={onApprove} onPlanReview={onPlanReview} />
           </div>
         ) : (
           <>
@@ -2934,27 +2962,27 @@ function CodeBlock({ language, code }) {
   }
 
   return (
-    <div className="rounded-lg overflow-hidden border border-eleball-outline-variant bg-[#1e1e2e] my-1">
-      <div className="flex items-center justify-between px-3 py-1.5 bg-[#252536] text-xs text-gray-400">
-        <span className="uppercase">{language || 'code'}</span>
+    <div className="code-block my-1">
+      <div className="code-block-header flex items-center justify-between px-3 py-1.5 text-xs">
+        <span className="font-mono">{language || 'code'}</span>
         <div className="flex items-center gap-1">
           <button
             onClick={handleDownload}
-            className="p-1 rounded hover:text-white"
+            className="p-1 rounded hover:text-eleball-text"
             aria-label="下载文件" title="下载文件"
           >
             <Download className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={handleCopy}
-            className="p-1 rounded hover:text-white"
+            className="p-1 rounded hover:text-eleball-text"
             aria-label="复制" title="复制"
           >
             {copied ? <Check className="w-3.5 h-3.5 text-eleball-success" /> : <Copy className="w-3.5 h-3.5" />}
           </button>
         </div>
       </div>
-      <pre className="p-3 overflow-x-auto text-sm text-gray-100 font-mono leading-relaxed whitespace-pre-wrap">
+      <pre className="p-3 overflow-x-auto text-sm text-eleball-text font-mono leading-relaxed whitespace-pre-wrap">
         <code>{code}</code>
       </pre>
     </div>
@@ -3007,7 +3035,7 @@ const markdownComponents = {
   code: ({ inline, className, children }) => {
     if (inline) {
       return (
-        <code className="bg-gray-100 text-gray-800 px-1 py-0.5 rounded text-xs font-mono">
+        <code className="bg-eleball-surface-variant text-eleball-text px-1 py-0.5 rounded text-xs font-mono">
           {children}
         </code>
       )

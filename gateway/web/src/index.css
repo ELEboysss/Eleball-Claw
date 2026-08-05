@@ -2,18 +2,32 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Eleball Web 全局样式 —— 对齐 App 端 Material 3 白紫极简风格 */
+/* Eleball Web 全局样式 -- 对齐 App 端 Material 3 白紫极简风格 */
 :root {
-  --eleball-bg: #FFFFFF;
-  --eleball-surface: #FFFFFF;
-  --eleball-primary: #6750A4;
-  --eleball-primary-light: #EADDFF;
-  --eleball-primary-dark: #21005D;
-  --eleball-secondary: #625B71;
-  --eleball-text: #1C1B1F;
-  --eleball-text-secondary: #49454F;
-  --eleball-outline: #E2E0E5;
-  --eleball-outline-variant: #F0EDF4;
+  /* 背景与表面（中性阶，白底体系）*/
+  --eleball-bg: oklch(1 0 0);                          /* 页面底 #FFFFFF */
+  --eleball-surface: oklch(1 0 0);                     /* 卡片 / elevated 面 #FFFFFF */
+  --eleball-surface-variant: oklch(0.959 0.010 305);   /* 输入 / 凹槽底 #F3F0F7 */
+  --eleball-muted: oklch(0.970 0.006 305);             /* 静音填充 / 次要底 */
+
+  /* 中性阶 / 边框 */
+  --eleball-outline: oklch(0.910 0.007 304);           /* 标准边框 #E2E0E5 */
+  --eleball-outline-variant: oklch(0.950 0.010 305);   /* 细边框 / 分隔 #F0EDF4 */
+
+  /* 文本阶 */
+  --eleball-text: oklch(0.225 0.008 297);              /* 主文本 #1C1B1F */
+  --eleball-text-secondary: oklch(0.398 0.017 304);    /* 次文本 #49454F */
+  --eleball-text-tertiary: oklch(0.567 0.016 308);     /* 三级 / 占位符 #79747E */
+
+  /* 主色（紫，保留 #6750A4 身份，转 oklch）*/
+  --eleball-primary: oklch(0.496 0.130 294);           /* #6750A4 */
+  --eleball-primary-light: oklch(0.918 0.048 303);     /* #EADDFF */
+  --eleball-primary-dark: oklch(0.242 0.140 286);      /* #21005D */
+  --eleball-secondary: oklch(0.486 0.036 300);         /* #625B71 */
+
+  /* 语义色 */
+  --eleball-error: oklch(0.501 0.178 29);              /* #B3261E */
+  --eleball-success: oklch(0.723 0.192 150);           /* #22C55E */
 }
 
 * {
@@ -54,7 +68,7 @@ body {
   min-height: 100vh;
 }
 
-/* 滚动条样式 —— 简洁细条 */
+/* 滚动条样式 -- 简洁细条 */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -74,51 +88,152 @@ body {
 }
 
 @layer components {
-  /* 主按钮 */
+  /* Shape Consistency Lock（taste-skill §4.4）：按钮 rounded-full / 卡 rounded-3xl / 输入 rounded-2xl / code rounded-xl，全站一致。 */
+
+  /* 主按钮 -- 紫色相 tinted shadow（§4.5 tactile），active scale 反馈 */
   .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full font-semibold text-white transition-colors duration-200;
+    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full font-semibold text-white;
     background-color: var(--eleball-primary);
+    box-shadow:
+      0 1px 2px oklch(0.496 0.130 294 / 0.20),
+      0 8px 20px -8px oklch(0.496 0.130 294 / 0.35);
+    transition:
+      transform 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+      box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   }
   .btn-primary:hover {
-    filter: brightness(1.05);
+    box-shadow:
+      0 1px 2px oklch(0.496 0.130 294 / 0.22),
+      0 12px 28px -8px oklch(0.496 0.130 294 / 0.40);
   }
   .btn-primary:active {
-    filter: brightness(0.97);
+    transform: scale(0.98);
   }
 
-  /* 次按钮 */
+  /* 次按钮 -- 浅紫底，hover 加深，active scale（§4.5）*/
   .btn-secondary {
-    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full font-semibold transition-colors duration-200;
+    @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full font-semibold;
     color: var(--eleball-primary);
     background-color: var(--eleball-primary-light);
+    transition:
+      transform 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+      background-color 0.2s ease;
   }
   .btn-secondary:hover {
-    filter: brightness(0.98);
+    background-color: oklch(0.880 0.060 303);
+  }
+  .btn-secondary:active {
+    transform: scale(0.98);
   }
 
-  /* 卡片 */
+  /* 卡片 -- tinted diffuse shadow（紫色相，§4.4）+ 内顶高光 edge refraction（soft-skill Double-Bezel 简化）。
+     质感来自层阴影/内边框，不靠 glow（LILA RULE §4.2）。hover 微抬升。 */
   .card {
-    @apply rounded-3xl p-6 transition-colors duration-200;
+    @apply rounded-3xl p-6;
     background-color: var(--eleball-surface);
-    border: 1px solid var(--eleball-outline-variant);
+    border: 1px solid var(--eleball-outline);
+    box-shadow:
+      0 1px 2px oklch(0.496 0.130 294 / 0.05),
+      0 12px 32px -14px oklch(0.496 0.130 294 / 0.12),
+      inset 0 1px 0 rgba(255, 255, 255, 0.6);
+    transition:
+      transform 0.3s cubic-bezier(0.16, 1, 0.3, 1),
+      box-shadow 0.3s cubic-bezier(0.16, 1, 0.3, 1),
+      border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .card:hover {
+    transform: translateY(-1px);
+    box-shadow:
+      0 1px 2px oklch(0.496 0.130 294 / 0.06),
+      0 20px 40px -16px oklch(0.496 0.130 294 / 0.16),
+      inset 0 1px 0 rgba(255, 255, 255, 0.6);
   }
 
-  /* 输入框 */
+  /* 输入框 -- 凹槽底 + 细边框 + 软焦点环 */
   .input {
-    @apply w-full px-4 py-3 rounded-2xl outline-none transition-colors duration-200;
+    @apply w-full px-4 py-3 rounded-2xl outline-none;
     background-color: var(--eleball-surface-variant);
     color: var(--eleball-text);
-    border: 1px solid var(--eleball-outline-variant);
+    border: 1px solid var(--eleball-outline);
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
   }
   .input:focus {
     border-color: var(--eleball-primary);
+    box-shadow: 0 0 0 3px oklch(0.496 0.130 294 / 0.12);
   }
   .input::placeholder {
     color: var(--eleball-text-tertiary);
   }
 
-  /* 渐变装饰条 */
-  .gradient-accent {
-    background: var(--eleball-primary);
+  /* 幽灵按钮 -- 透明轮廓 + 凹槽 hover + active scale（§4.5）*/
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium;
+    color: var(--eleball-text-secondary);
+    background-color: transparent;
+    border: 1px solid var(--eleball-outline);
+    transition:
+      transform 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+      background-color 0.2s ease,
+      color 0.2s ease;
+  }
+  .btn-ghost:hover {
+    background-color: var(--eleball-surface-variant);
+    color: var(--eleball-text);
+  }
+  .btn-ghost:active {
+    transform: scale(0.98);
+  }
+  .btn-ghost:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px oklch(0.496 0.130 294 / 0.12);
+  }
+
+  /* 对话框面板 -- 白底 + 细边框 + tinted diffuse shadow（紫色相，§4.4）+ 内顶高光 */
+  .dialog-panel {
+    background-color: var(--eleball-surface);
+    border: 1px solid var(--eleball-outline);
+    border-radius: 1rem; /* rounded-2xl */
+    box-shadow:
+      0 8px 32px -8px oklch(0.496 0.130 294 / 0.18),
+      0 1px 2px oklch(0.496 0.130 294 / 0.05),
+      inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  }
+
+  /* 代码块 -- 白底等宽 + 细边框 + tinted 微高差 + 内顶高光（§4.4）*/
+  .code-block {
+    background-color: var(--eleball-surface);
+    border: 1px solid var(--eleball-outline-variant);
+    border-radius: 0.75rem; /* rounded-xl */
+    overflow: hidden;
+    box-shadow:
+      0 1px 2px oklch(0.496 0.130 294 / 0.05),
+      inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  }
+  .code-block-header {
+    background-color: var(--eleball-surface-variant);
+    color: var(--eleball-text-secondary);
+    border-bottom: 1px solid var(--eleball-outline-variant);
+  }
+
+  /* Eyebrow 小标题标签 -- 配额使用（taste-skill §4.7：整页 ≤ceil(section/3)）*/
+  .eyebrow {
+    @apply inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-eleball-primary;
+  }
+
+  /* Display 标题 -- 排版纪律：tracking-tighter + leading-none（§4.1）*/
+  .display {
+    @apply tracking-tighter leading-none font-bold text-eleball-text;
+  }
+
+  /* 孤行修复（§Typography）*/
+  .text-balance { text-wrap: balance; }
+  .text-pretty { text-wrap: pretty; }
+
+  /* 数字等宽（§4.1 tabular-nums）*/
+  .tabular { font-variant-numeric: tabular-nums; }
+
+  /* Hairline 分隔 -- 替代卡箱，列表/段间用（§4.4 负空间优先于卡）*/
+  .hairline {
+    @apply border-t border-eleball-outline-variant;
   }
 }

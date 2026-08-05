@@ -10,8 +10,8 @@ import { Loader2 } from 'lucide-react'
  * - 内容实时取云端，claw 无需维护本地副本，官网等内容不会与云端漂移。
  * - eleball.cn 无 X-Frame-Options / CSP frame-ancestors 限制，允许被嵌。
  *
- * 用于官网（/）、充值（/recharge）等「非本地功能」内容页；其余云端内容（文档/隐私/条款）
- * 在官网 iframe 内导航到达，不再单独建本地路由。
+ * 用于充值（/recharge）等「非本地功能」内容页；其余云端内容（文档/隐私/条款）
+ * 经导航栏「首页」按钮新标签打开官网后到达，不再单独建本地路由。
  * 见 docs/marketing/claw-implementation-plan.md §C.2。
  *
  * sandbox 取舍：

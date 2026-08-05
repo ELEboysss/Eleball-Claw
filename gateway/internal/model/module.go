@@ -79,6 +79,12 @@ type ModuleRecord struct {
 	InstallSource  string `json:"install_source,omitempty"`                         // 安装来源：cloud-purchased（云端安装，含官方，激活需 VIP1+）/ local；本地扫描预置为空
 	// 以下字段不在数据库中，由实时健康探测填充
 	HealthError    string              `gorm:"-" json:"error,omitempty"`
+	// RequiredEnv 该模块启动所需本地环境：docker / python / node / process（none/external 为空）。
+	// 控制台对离线模块据此给出「需要 Docker/Python 环境」说明。
+	RequiredEnv string `gorm:"-" json:"required_env,omitempty"`
+	// Activated 是否已被购买激活（claw 单用户任意购买即 true）。控制台据此区分
+	// 「未激活 -> 离线+环境说明」与「已激活但离线 -> 探活错误」。
+	Activated bool `gorm:"-" json:"activated"`
 }
 
 // CapabilitiesList 把 capabilities JSON 解析为字符串切片

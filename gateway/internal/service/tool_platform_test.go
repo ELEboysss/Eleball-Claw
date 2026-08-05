@@ -23,16 +23,12 @@ func TestWindowsToolRunner_Shell(t *testing.T) {
 	}
 }
 
-// TestWindowsToolRunner_ShellSafety 验证 Windows 平台下危险命令被拦截
+// TestWindowsToolRunner_ShellSafety 验证危险操作黑名单拦截（D3 本地模型：rm -rf / 硬拒）
 func TestWindowsToolRunner_ShellSafety(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("仅 Windows 平台运行")
-	}
-
 	runner := &windowsToolRunner{}
-	_, err := runner.Shell(context.Background(), "echo", []string{"hello", "&", "dir"}, "")
+	_, err := runner.Shell(context.Background(), "rm", []string{"-rf", "/"}, "")
 	if err == nil {
-		t.Fatal("Windows Shell 应拦截 & 危险字符")
+		t.Fatal("rm -rf / 应被危险操作黑名单拦截")
 	}
 }
 

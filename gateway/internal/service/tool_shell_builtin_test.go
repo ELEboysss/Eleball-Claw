@@ -210,12 +210,9 @@ func TestWindowsRunnerShellUsesBuiltin(t *testing.T) {
 		t.Fatalf("runner find 失败: %q, err=%v", out, err)
 	}
 
-	// 白名单与危险字符拦截仍然生效
+	// D3 危险操作黑名单仍硬拒（rm -rf /）
 	if _, err = runner.Shell(context.Background(), "rm", []string{"-rf", "/"}, ""); err == nil {
-		t.Fatal("非白名单命令应被拒绝")
-	}
-	if _, err = runner.Shell(context.Background(), "echo", []string{"a", "&", "b"}, ""); err == nil {
-		t.Fatal("危险字符应被拦截")
+		t.Fatal("危险操作 rm -rf / 应被拒绝")
 	}
 }
 

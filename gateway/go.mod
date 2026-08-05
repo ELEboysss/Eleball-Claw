@@ -3,6 +3,7 @@ module github.com/eleball/gateway
 go 1.25.0
 
 require (
+	fyne.io/systray v1.12.2
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gin-gonic/gin v1.12.0
 	github.com/glebarez/sqlite v1.11.0
@@ -17,6 +18,7 @@ require (
 	go.uber.org/zap v1.28.0
 	golang.org/x/crypto v0.52.0
 	golang.org/x/sys v0.45.0
+	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/gorm v1.31.1
 )
 
@@ -35,6 +37,7 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/goccy/go-yaml v1.19.2 // indirect
+	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
@@ -70,7 +73,6 @@ require (
 	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/tools v0.44.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.55.3 // indirect
 	modernc.org/mathutil v1.6.0 // indirect
 	modernc.org/memory v1.8.0 // indirect

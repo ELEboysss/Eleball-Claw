@@ -109,6 +109,20 @@ func (r *AgentRepo) ListPurchasesByUser(buyerID string) ([]*model.AgentPurchase,
 	return items, err
 }
 
+// ListAllPurchasedAgents 查询所有被任意用户购买过的已上架秘技（去重）。
+// claw 单用户场景下即「已激活」集合来源：用于模块激活门控——模块对应的 SKU 被购买过，
+// 则视为已激活，允许 boot 自动上线 / 控制台手动启动。
+func (r *AgentRepo) ListAllPurchasedAgents() ([]*model.AgentItem, error) {
+	var items []*model.AgentItem
+	err := r.db.Table("agent_items").
+		Joins("JOIN agent_purchases ON agent_purchases.agent_id = agent_items.id").
+		Where("agent_items.status = ?", model.AgentStatusApproved).
+		Group("agent_items.id").
+		Order("agent_purchases.created_at DESC").
+		Find(&items).Error
+	return items, err
+}
+
 // Update 更新秘技
 func (r *AgentRepo) Update(agent *model.AgentItem) error {
 	return r.db.Save(agent).Error

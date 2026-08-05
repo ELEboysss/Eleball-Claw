@@ -59,7 +59,7 @@ export default function DownloadModal({ open, onClose }) {
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center px-4 bg-black/40 backdrop-blur-sm">
-      <div className="relative w-full max-w-sm bg-eleball-surface rounded-3xl p-6 shadow-xl">
+      <div className="relative w-full max-w-sm dialog-panel p-6">
         <button
           onClick={onClose}
           className="absolute top-4 right-4 p-1 rounded-full text-eleball-text-tertiary hover:bg-eleball-surface-variant"

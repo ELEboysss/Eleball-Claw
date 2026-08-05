@@ -10,7 +10,6 @@
   "sku_scope": "claw",
   "auto_sku": true,
   "env": {
-    "FIRECRAWL_API_KEY": "${credentials.firecrawl_api_key}",
     "FIRECRAWL_BASE_URL": "https://api.firecrawl.dev"
   },
   "credentials": {

@@ -117,7 +117,7 @@ export default function ModelSettings({
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center px-4 bg-black/40 backdrop-blur-sm">
-      <div className="relative w-full max-w-md bg-eleball-surface rounded-3xl p-6 shadow-xl max-h-[85vh] overflow-y-auto">
+      <div className="relative w-full max-w-md dialog-panel p-6 max-h-[85vh] overflow-y-auto">
         <button
           onClick={onClose}
           className="absolute top-4 right-4 p-1 rounded-full text-eleball-text-tertiary hover:bg-eleball-surface-variant"

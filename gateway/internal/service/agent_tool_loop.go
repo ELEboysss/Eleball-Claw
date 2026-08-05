@@ -674,6 +674,13 @@ func requestToolApproval(ctx context.Context, env *ToolEnv, tool *Tool, toolName
 	// C2：PreToolUse hook 作为可编程权限扩展层最先执行。
 	hookDecision := runPreToolUseHooks(ctx, env, toolName, input, record.Step)
 
+	// D3 危险前置检查：Shell / BackgroundShell 危险命令（rm -rf /、sudo、mkfs 等）在权限决策之前
+	// 直接拒绝，不可被 always-allow 规则绕过、不可加入允许列表。后台 shell 同样不可绕过（AR-E6）。
+	if isShellLikeTool(toolName) && shellInputDangerous(input) {
+		record.Error = "危险操作被拒绝：此命令命中危险黑名单，不可执行、不可加入允许列表"
+		return false
+	}
+
 	var c1Decision model.PermissionDecision
 	if env.PermissionSvc != nil {
 		c1Decision = env.PermissionSvc.Decide(env.PermissionMode, tool, input)

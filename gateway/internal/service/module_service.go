@@ -35,6 +35,9 @@ type ModuleService struct {
 	bootstrap *InterpreterBootstrap
 	// P4：第三方模块镜像安装器（拉镜像 + 签名校验 + 启动容器）。官方预置模块不经此安装器。
 	installer *ImageInstaller
+	// dockerStarter 可选：claw 控制台「启动服务」按钮拉起 docker 部署模块时调用
+	// （docker compose up 逻辑在 cmd/claw-server，经此回调注入，避免 service 层依赖 cmd）。
+	dockerStarter func(moduleID string) error
 }
 
 // NewModuleService 创建模块业务服务
@@ -71,6 +74,12 @@ func (s *ModuleService) SetChatProxyService(svc *ChatProxyService) {
 // SetInterpreterBootstrap 注入托管解释器引导器（claw 用：H2 装依赖时确保 python/node 可用）。
 func (s *ModuleService) SetInterpreterBootstrap(b *InterpreterBootstrap) {
 	s.bootstrap = b
+}
+
+// SetDockerStarter 注入 docker 模块启动回调（claw cmd 注入：docker compose up）。
+// 控制台「启动服务」按钮对 docker 部署模块调用此回调拉起容器。
+func (s *ModuleService) SetDockerStarter(fn func(moduleID string) error) {
+	s.dockerStarter = fn
 }
 
 // CheckRuntime 查询指定运行时状态，供 AgentToolLoader 过滤离线 SKU。
@@ -210,10 +219,14 @@ func (s *ModuleService) UnregisterModule(moduleID string) error {
 // ListModules 列出所有已注册模块（返回实时健康状态）
 func (s *ModuleService) ListModules() ([]*model.ModuleRecord, error) {
 	statuses := s.registry.List()
+	activated := s.ActivatedModuleIDs()
 	items := make([]*model.ModuleRecord, 0, len(statuses))
 	for _, st := range statuses {
 		rt := s.registry.Get(st.RuntimeID)
-		items = append(items, runtimeToModuleRecord(rt, st))
+		rec := runtimeToModuleRecord(rt, st)
+		rec.RequiredEnv = requiredEnvFor(rt)
+		rec.Activated = activated[rt.ID]
+		items = append(items, rec)
 	}
 	return items, nil
 }
@@ -224,12 +237,117 @@ func (s *ModuleService) GetModule(moduleID string) (*model.ModuleRecord, error) 
 	if rt == nil {
 		return nil, errors.New("模块不存在")
 	}
-	return runtimeToModuleRecord(rt, nil), nil
+	rec := runtimeToModuleRecord(rt, nil)
+	rec.RequiredEnv = requiredEnvFor(rt)
+	rec.Activated = s.ActivatedModuleIDs()[moduleID]
+	return rec, nil
+}
+
+// requiredEnv 据 SkillRuntime 部署方式 + 启动命令推断所需本地环境，供控制台离线说明展示。
+// docker -> "docker"；process -> 据 command（python* / node，缺省 python）；none/external -> ""。
+func requiredEnvFor(rt *model.SkillRuntime) string {
+	if rt == nil {
+		return ""
+	}
+	switch rt.Deployment {
+	case model.SkillRuntimeDeploymentDocker:
+		return "docker"
+	case model.SkillRuntimeDeploymentProcess:
+		cmd := strings.TrimSpace(rt.Command)
+		switch {
+		case strings.HasPrefix(cmd, "node"):
+			return "node"
+		default: // 空 / python / python3 / 其它脚本均归 python（示例与生成模块均为 python）
+			return "python"
+		}
+	default:
+		return ""
+	}
 }
 
 // RefreshModule 强制探测模块健康状态（忽略缓存）
 func (s *ModuleService) RefreshModule(moduleID string) *SkillRuntimeStatusSnapshot {
 	return s.registry.ForceProbe(moduleID)
+}
+
+// ActivatedModuleIDs 返回已被购买（激活）的模块 ID 集合。
+// claw 单用户：任意 buyer 购买过该模块对应 SKU 即视为激活，用于 boot autostart 门控
+// 与控制台「启动服务」前置判断。agentRepo 或解析失败时返回空集（保守不启动）。
+func (s *ModuleService) ActivatedModuleIDs() map[string]bool {
+	set := make(map[string]bool)
+	if s.agentRepo == nil {
+		return set
+	}
+	items, err := s.agentRepo.ListAllPurchasedAgents()
+	if err != nil {
+		return set
+	}
+	for _, item := range items {
+		manifest, _ := item.Manifest()
+		if manifest == nil {
+			continue
+		}
+		if modID := s.resolveModuleIDFromManifest(manifest); modID != "" {
+			set[modID] = true
+		}
+	}
+	return set
+}
+
+// resolveModuleIDFromManifest 从 SKU manifest 解析其依赖的模块 ID。
+// 优先 metadata.module（旧写法），否则据 driver 别名查 drivers 表映射（与 AgentToolLoader.ResolveModuleID 一致）。
+func (s *ModuleService) resolveModuleIDFromManifest(manifest *model.ToolManifest) string {
+	if manifest == nil {
+		return ""
+	}
+	if manifest.Metadata != nil && manifest.Metadata["module"] != "" {
+		return manifest.Metadata["module"]
+	}
+	if manifest.Driver == "" || manifest.Driver == model.ToolDriverNone {
+		return ""
+	}
+	rec, err := s.ResolveDriver(string(manifest.Driver))
+	if err != nil || rec == nil {
+		return ""
+	}
+	return rec.ModuleID
+}
+
+// Start 拉起指定模块（控制台「启动服务」按钮）。按部署方式分流：
+//   - process：同步 manager.Start spawn 子进程，随后 ForceProbe 刷新状态。
+//   - docker：异步执行 dockerStarter 回调（pull/compose 耗时长，不阻塞 HTTP），立即返回当前状态；完成后再 ForceProbe。
+//   - none/external：无需启动，仅 ForceProbe。
+// 返回最新状态快照；未注册模块或 docker 回调未注入返回错误。
+func (s *ModuleService) Start(moduleID string) (*SkillRuntimeStatusSnapshot, error) {
+	rt := s.registry.Get(moduleID)
+	if rt == nil {
+		return nil, errors.New("模块不存在")
+	}
+	switch rt.Deployment {
+	case model.SkillRuntimeDeploymentProcess:
+		if err := s.manager.Start(moduleID); err != nil {
+			return nil, err
+		}
+		return s.registry.ForceProbe(moduleID), nil
+	case model.SkillRuntimeDeploymentDocker:
+		if s.dockerStarter == nil {
+			return nil, errors.New("docker 启动未配置")
+		}
+		starter := s.dockerStarter
+		go func() {
+			if err := starter(moduleID); err != nil {
+				// 异步失败：写入状态错误，前端刷新可见离线 + 原因。
+				s.registry.SetRuntimeStatus(moduleID, model.SkillRuntimeStatusOffline, nil, err.Error())
+				return
+			}
+			s.registry.ForceProbe(moduleID)
+		}()
+		// 立即返回当前状态（异步启动中），前端稍后刷新。
+		return s.registry.ForceProbe(moduleID), nil
+	default:
+		// none/external：已在线或纯远端，仅探测刷新。
+		return s.registry.ForceProbe(moduleID), nil
+	}
 }
 
 // RegisterModuleFromPlugin 插件自助注册

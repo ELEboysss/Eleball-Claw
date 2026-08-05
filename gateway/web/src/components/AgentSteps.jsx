@@ -39,15 +39,15 @@ const markdownComponents = {
   code: ({ inline, className, children }) => {
     if (inline) {
       return (
-        <code className="bg-gray-100 text-gray-800 px-1 py-0.5 rounded text-xs font-mono">
+        <code className="bg-eleball-surface-variant text-eleball-text px-1 py-0.5 rounded text-xs font-mono">
           {children}
         </code>
       )
     }
     const lang = (className || '').replace('language-', '')
     return (
-      <pre className="bg-gray-100 rounded-lg p-2 overflow-x-auto text-xs my-2">
-        {lang && <div className="text-[10px] text-eleball-text-tertiary mb-1 uppercase">{lang}</div>}
+      <pre className="bg-eleball-surface-variant border border-eleball-outline-variant rounded-lg p-2 overflow-x-auto text-xs my-2">
+        {lang && <div className="text-[10px] text-eleball-text-tertiary mb-1 font-mono">{lang}</div>}
         <code className="font-mono whitespace-pre">{children}</code>
       </pre>
     )

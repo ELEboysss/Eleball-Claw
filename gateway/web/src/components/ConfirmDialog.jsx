@@ -90,7 +90,7 @@ export default function ConfirmDialog({
       >
         <div className="flex items-start gap-3 p-5">
           {danger && (
-            <AlertTriangle className="w-6 h-6 text-red-500 flex-shrink-0 mt-0.5" aria-hidden="true" />
+            <AlertTriangle className="w-6 h-6 text-eleball-error flex-shrink-0 mt-0.5" aria-hidden="true" />
           )}
           <div className="flex-1">
             <h3 id="confirm-dialog-title" className="text-lg font-bold text-eleball-text mb-1">
@@ -102,7 +102,7 @@ export default function ConfirmDialog({
         <div className="flex gap-3 px-5 pb-5">
           <button
             onClick={onCancel}
-            className="flex-1 px-4 py-2 rounded-lg border border-eleball-outline text-eleball-text-secondary hover:bg-eleball-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-eleball-primary"
+            className="flex-1 btn-ghost"
           >
             {cancelText}
           </button>
@@ -110,7 +110,7 @@ export default function ConfirmDialog({
             ref={confirmRef}
             onClick={onConfirm}
             className={`flex-1 px-4 py-2 rounded-lg text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-eleball-primary ${
-              danger ? 'bg-red-500 hover:bg-red-600' : 'btn-primary'
+              danger ? 'bg-eleball-error hover:brightness-105' : 'btn-primary'
             }`}
           >
             {confirmText}

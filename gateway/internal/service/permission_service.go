@@ -34,11 +34,21 @@ func NewPermissionService(storePath string) *PermissionService {
 // 匹配顺序（借鉴 claude-code，C2 hook 在此之前执行）：
 //  1. 用户 deny 规则 -> deny（最高优先，覆盖只读自动放行）
 //  2. plan 模式且非只读 -> deny（plan 是严格只读模式，allow 规则也不破例）
-//  3. 只读工具 + 模式允许只读 -> allow
+//  3. 只读工具（含 git 读操作）+ 模式允许只读 -> allow
 //  4. 用户 allow 规则 -> allow
-//  5. 模式默认：acceptEdits 文件编辑放行其余 ask；default/auto ask；plan 非只读已 deny
+//  5. 模式默认：acceptEdits 文件编辑放行其余 ask；default/strict ask；auto 全放行；plan 非只读已 deny
 func (s *PermissionService) Decide(mode model.PermissionMode, tool *Tool, input map[string]interface{}) model.PermissionDecision {
 	toolName := tool.Name
+
+	// E3：只读 shell 命令（git status/diff/log/blame/show）按只读工具对待，自动放行
+	// AR-E6：BackgroundShell 同享 shellReadOnlyCommand；且其轮询（action=poll）为只读。
+	effectiveReadOnly := tool.ReadOnly
+	if isShellLikeTool(toolName) {
+		effectiveReadOnly = effectiveReadOnly || shellReadOnlyCommand(input)
+	}
+	if toolName == "BackgroundShell" {
+		effectiveReadOnly = effectiveReadOnly || backgroundShellReadOnly(input)
+	}
 
 	// 1. 用户 deny 规则优先（连只读工具也拦）
 	if s.hasMatchingRule(model.PermissionDecisionDeny, toolName, input) {
@@ -46,12 +56,12 @@ func (s *PermissionService) Decide(mode model.PermissionMode, tool *Tool, input 
 	}
 
 	// 2. plan 模式非只读直接拒绝
-	if mode == model.PermissionModePlan && !tool.ReadOnly {
+	if mode == model.PermissionModePlan && !effectiveReadOnly {
 		return model.PermissionDecisionDeny
 	}
 
-	// 3. 只读工具在 default/acceptEdits/plan 下放行（plan 仅放过只读）
-	if tool.ReadOnly && mode.IsReadOnlyAllowed() {
+	// 3. 只读工具（含 git 读操作）在 default/acceptEdits/plan 下放行（plan 仅放过只读）
+	if effectiveReadOnly && mode.IsReadOnlyAllowed() {
 		return model.PermissionDecisionAllow
 	}
 
@@ -71,7 +81,10 @@ func (s *PermissionService) Decide(mode model.PermissionMode, tool *Tool, input 
 		// 只读已放过、非只读已 deny，理论不到此；兜底 deny
 		return model.PermissionDecisionDeny
 	case model.PermissionModeAuto:
-		// 二期未实现 LLM 分类器，按 default 处理
+		// 全自动：所有工具放行（危险操作由 runner 黑名单 + 审批闸危险前置检查兜底）
+		return model.PermissionDecisionAllow
+	case model.PermissionModeStrict:
+		// 全确认：所有工具均需审批（只读未在步骤 3 放行，落此 ask）
 		return model.PermissionDecisionAsk
 	default: // default
 		return model.PermissionDecisionAsk
@@ -211,10 +224,12 @@ func toolNameMatches(ruleTool, actual string) bool {
 		return true
 	}
 	aliases := map[string][]string{
-		"bash":   {"shell"},
-		"shell":  {"bash"},
-		"read":   {"readfile"},
-		"edit":   {"writefile", "strreplacefile"},
+		"bash":            {"shell"},
+		"shell":           {"bash"},
+		"bashbg":          {"backgroundshell"},
+		"backgroundshell": {"bashbg"},
+		"read":            {"readfile"},
+		"edit":            {"writefile", "strreplacefile"},
 	}
 	for _, a := range aliases[strings.ToLower(ruleTool)] {
 		if strings.EqualFold(a, actual) {
@@ -228,7 +243,7 @@ func toolNameMatches(ruleTool, actual string) bool {
 // 路径类工具取 path；Shell 取 "command args..."；FetchURL/SearchWeb 取 url/query。
 func specMatchValue(toolName string, input map[string]interface{}) string {
 	switch toolName {
-	case "Shell":
+	case "Shell", "BackgroundShell":
 		cmd, _ := input["command"].(string)
 		var sb strings.Builder
 		sb.WriteString(cmd)

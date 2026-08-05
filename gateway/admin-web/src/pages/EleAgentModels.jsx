@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { eleAgentModelApi } from '../api/client'
 
 /**
- * claw 模型配置（本地 CRUD）。
- * 支持 BYOK 添加自有模型（任意 OpenAI 兼容/厂商协议端点），
- * 以及一键添加云端 Ele Agent 代理（Base URL 指向 api.eleball.cn，API Key 用当前登录态）。
- * 本地不计费，不展示价格字段；Ele Agent 代理调用由云端账户计费。
+ * claw 模型配置（本地 CRUD，双通道）。
+ *   - Ele Agent 云端代理：一键添加，Base URL 指向 api.eleball.cn，API Key 用当前登录态，
+ *     模型列表从云端公开接口拉取；调用经 gateway 网关代理，由云端账户计费（本地不计费）。
+ *   - BYOK：添加自有模型（任意 OpenAI 兼容/厂商协议端点），本地不计费，不展示价格字段。
+ * PR-C3：由扁平表格改为「按 provider 分组的开关式卡片」（对齐 cloud admin-web C2 视觉）。
  */
 
 const PROTOCOLS = [
@@ -27,29 +28,50 @@ const CAPABILITY_FIELDS = [
   { key: 'supports_tools', label: '工具调用' },
 ]
 
-const emptyForm = {
-  provider: '',
-  protocol: 'openai_compatible',
-  model_name: '',
-  display_name: '',
-  base_url: '',
-  api_key: '',
-  supports_chat: true,
-  supports_vision: false,
-  supports_image: false,
-  supports_video: false,
-  supports_image_input: false,
-  supports_tools: false,
+const protocolLabel = (p) => {
+  switch (p) {
+    case 'anthropic_messages': return 'Anthropic'
+    case 'gemini_generative': return 'Gemini'
+    case 'agnes_image': return 'Agnes Image'
+    case 'agnes_video': return 'Agnes Video'
+    case 'seedance': return 'Seedance'
+    case 'seedream': return 'Seedream'
+    default: return 'OpenAI 兼容'
+  }
 }
+
+// 开关组件：紫底圆角药丸 + 滑动圆点（对齐 cloud admin-web C2）
+function Toggle({ checked, onChange, disabled }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={() => !disabled && onChange(!checked)}
+      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-eleball-primary/30 ${
+        checked ? 'bg-eleball-primary' : 'bg-gray-300'
+      } ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+    >
+      <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform duration-200 ${checked ? 'translate-x-5' : 'translate-x-0.5'}`} />
+    </button>
+  )
+}
+
+function CapBadge({ label, cls }) {
+  return (
+    <span className={`inline-flex px-2 py-0.5 rounded-lg text-xs font-medium ${cls}`}>{label}</span>
+  )
+}
+
+// 是否云端 Ele Agent 代理（经 gateway 网关，base_url 指向 api.eleball.cn）
+const isCloudProxy = (item) => (item.base_url || '').includes('api.eleball.cn')
 
 export default function EleAgentModels() {
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
-  const pageSize = 20
-
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState(null) // 编辑中的配置（null=新建）
   const [isProxyPreset, setIsProxyPreset] = useState(false) // Ele Agent 云端代理快捷表单
@@ -61,12 +83,11 @@ export default function EleAgentModels() {
     setLoading(true)
     setError('')
     try {
-      const data = await eleAgentModelApi.list(page, pageSize)
-      const list = data?.items ?? []
-      setItems(Array.isArray(list) ? list : [])
-      setTotal(data?.total ?? 0)
-      const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / pageSize))
-      if (page > totalPages) setPage(totalPages)
+      // 卡片按 provider 分组，需拉取较全量
+      const data = await eleAgentModelApi.list(1, 500)
+      const list = Array.isArray(data?.items) ? data.items : []
+      setItems(list)
+      setTotal(data?.total ?? list.length)
     } catch (err) {
       setError(typeof err === 'string' ? err : (err?.message || '加载失败'))
     } finally {
@@ -77,7 +98,34 @@ export default function EleAgentModels() {
   useEffect(() => {
     fetchItems()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page])
+  }, [])
+
+  // 按 provider 分组，组内按 priority 升序
+  const grouped = useMemo(() => {
+    const map = {}
+    for (const it of items) {
+      const key = it.provider || '(未分组)'
+      if (!map[key]) map[key] = []
+      map[key].push(it)
+    }
+    return Object.entries(map)
+      .map(([provider, list]) => ({
+        provider,
+        list: list.slice().sort((a, b) => (a.priority || 0) - (b.priority || 0)),
+      }))
+      .sort((a, b) => a.provider.localeCompare(b.provider))
+  }, [items])
+
+  // 一键开关：乐观更新 + 失败回滚
+  const handleToggle = async (item, next) => {
+    setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, is_enabled: next } : i)))
+    try {
+      await eleAgentModelApi.update(item.id, { is_enabled: next })
+    } catch (err) {
+      setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, is_enabled: item.is_enabled } : i)))
+      setError(typeof err === 'string' ? err : (err?.message || '切换失败'))
+    }
+  }
 
   const openCreate = () => {
     setEditing(null)
@@ -185,7 +233,7 @@ export default function EleAgentModels() {
   }
 
   const handleRotateKey = async (m) => {
-    const hint = m.base_url?.includes('api.eleball.cn')
+    const hint = isCloudProxy(m)
       ? '该配置指向云端 Ele Agent：调用时会自动使用你当时的登录态，一般无需换 Key；此处可更新兜底 Key（如用于无登录态的脚本调用）。'
       : '请输入新的 API Key：'
     const key = window.prompt(`更换 ${m.display_name || m.model_name} 的 API Key。\n${hint}`)
@@ -196,16 +244,6 @@ export default function EleAgentModels() {
       fetchItems()
     } catch (err) {
       setError(typeof err === 'string' ? err : (err?.message || '换 Key 失败'))
-    }
-  }
-
-  const handleToggle = async (m) => {
-    setError('')
-    try {
-      await eleAgentModelApi.update(m.id, { is_enabled: !m.is_enabled })
-      fetchItems()
-    } catch (err) {
-      setError(typeof err === 'string' ? err : (err?.message || '操作失败'))
     }
   }
 
@@ -220,143 +258,56 @@ export default function EleAgentModels() {
     }
   }
 
-  const totalPages = Math.max(1, Math.ceil(total / pageSize))
-
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">模型配置</h1>
+          <h2 className="text-xl font-bold text-eleball-text">模型配置</h2>
           <p className="text-sm text-eleball-text-secondary mt-1">
-            本地模型配置（BYOK），本地不计费；Ele Agent 云端代理由云端账户计费
+            本地模型配置（BYOK），本地不计费；Ele Agent 云端代理经 gateway 网关，由云端账户计费
           </p>
         </div>
-        <div className="flex gap-2">
-          <button onClick={openProxyPreset} className="px-4 py-2 rounded-xl border border-eleball-primary text-eleball-primary text-sm font-medium hover:bg-eleball-primary-light transition-colors">
+        <div className="flex items-center gap-2">
+          <button onClick={openProxyPreset} className="btn-secondary">
             添加 Ele Agent 云端代理
           </button>
-          <button onClick={openCreate} className="btn-primary text-sm px-4 py-2">
-            新增模型
+          <button onClick={openCreate} className="btn-primary">
+            + 新增模型
           </button>
         </div>
       </div>
 
       {error && <div className="p-3 rounded-xl bg-red-50 text-red-600 text-sm">{error}</div>}
 
-      <div className="card p-6">
-        <h2 className="text-lg font-semibold mb-4">模型列表</h2>
-        {loading ? (
-          <div className="text-center py-8 text-sm text-eleball-text-secondary">加载中…</div>
-        ) : items.length === 0 ? (
-          <div className="text-center py-8 text-sm text-eleball-text-secondary">
-            暂无模型配置。点右上角「新增模型」添加 BYOK 模型，或「添加 Ele Agent 云端代理」一键接入云端模型。
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm text-left">
-              <thead className="text-xs text-eleball-text-secondary border-b border-eleball-outline">
-                <tr>
-                  <th className="px-3 py-2 font-medium">模型</th>
-                  <th className="px-3 py-2 font-medium">协议</th>
-                  <th className="px-3 py-2 font-medium">Base URL</th>
-                  <th className="px-3 py-2 font-medium">能力</th>
-                  <th className="px-3 py-2 font-medium">状态</th>
-                  <th className="px-3 py-2 font-medium">操作</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-eleball-outline-variant">
-                {items.map((m) => (
-                  <tr key={m.id}>
-                    <td className="px-3 py-2.5">
-                      <div className="font-medium">{m.display_name || `${m.provider}/${m.model_name}`}</div>
-                      <div className="text-xs text-eleball-text-secondary font-mono">{m.provider}/{m.model_name}</div>
-                    </td>
-                    <td className="px-3 py-2.5 text-xs text-eleball-text-secondary">
-                      {PROTOCOLS.find((p) => p.value === m.protocol)?.label || m.protocol || '-'}
-                    </td>
-                    <td className="px-3 py-2.5 text-xs text-eleball-text-secondary font-mono max-w-[220px] truncate" title={m.base_url}>
-                      {m.base_url}
-                    </td>
-                    <td className="px-3 py-2.5">
-                      <div className="flex flex-wrap gap-1">
-                        {CAPABILITY_FIELDS.filter((f) => m[f.key]).map((f) => (
-                          <span key={f.key} className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-eleball-text-secondary">
-                            {f.label}
-                          </span>
-                        ))}
-                      </div>
-                    </td>
-                    <td className="px-3 py-2.5">
-                      <button
-                        onClick={() => handleToggle(m)}
-                        className={`text-xs px-2 py-0.5 rounded ${m.is_enabled ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-100 text-gray-500'}`}
-                        title="点击切换启用状态"
-                      >
-                        {m.is_enabled ? '启用' : '禁用'}
-                      </button>
-                    </td>
-                    <td className="px-3 py-2.5">
-                      <div className="flex gap-2 text-xs">
-                        <button onClick={() => handleRotateKey(m)} className="text-eleball-primary hover:underline">换 Key</button>
-                        <button onClick={() => openEdit(m)} className="text-eleball-primary hover:underline">编辑</button>
-                        <button onClick={() => handleDelete(m)} className="text-red-500 hover:underline">删除</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {/* 分页 */}
-        {!loading && total > 0 && (
-          <div className="flex items-center justify-between mt-4">
-            <span className="text-sm text-eleball-text-secondary">共 {total} 条记录</span>
-            <div className="flex gap-2">
+      {/* 配置表单弹窗（BYOK 手填 / Ele Agent 云端代理选模型）*/}
+      {showForm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={() => !submitting && (setShowForm(false), setEditing(null))}>
+          <div className="dialog-panel p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">
+                {editing ? '编辑模型' : isProxyPreset ? '添加 Ele Agent 云端代理' : '新增模型'}
+              </h3>
               <button
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page === 1}
-                className="px-3 py-1.5 rounded-lg border border-eleball-outline text-sm disabled:opacity-40"
+                onClick={() => { setShowForm(false); setEditing(null) }}
+                className="p-1 rounded-full text-eleball-text-tertiary hover:bg-eleball-surface-variant"
               >
-                上一页
-              </button>
-              <span className="px-3 py-1.5 rounded-lg bg-eleball-primary text-white text-sm font-medium">
-                {page} / {totalPages}
-              </span>
-              <button
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                disabled={page >= totalPages}
-                className="px-3 py-1.5 rounded-lg border border-eleball-outline text-sm disabled:opacity-40"
-              >
-                下一页
+                ✕
               </button>
             </div>
-          </div>
-        )}
-      </div>
-
-      {/* 新建 / 编辑弹窗 */}
-      {showForm && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setShowForm(false)}>
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold mb-1">
-              {editing ? '编辑模型' : isProxyPreset ? '添加 Ele Agent 云端代理' : '新增模型'}
-            </h3>
             {isProxyPreset && (
               <p className="text-xs text-eleball-text-secondary mb-3">
                 云端地址、协议与模型能力均为云端固定配置，选择模型后自动带出；调用时自动使用你当时的最新登录态，无需维护 API Key。
               </p>
             )}
-            <form onSubmit={handleSubmit} className="space-y-3 mt-3">
+            <form onSubmit={handleSubmit} className="space-y-3">
               {isProxyPreset ? (
                 <>
                   <div>
-                    <label className="block text-xs font-medium mb-1">云端模型 *</label>
+                    <label className="block text-sm font-medium mb-1.5">云端模型 *</label>
                     <select
                       value={form.model_name}
                       onChange={(e) => selectProxyModel(e.target.value)}
-                      className="input" required
+                      className="input bg-white" required
                     >
                       <option value="" disabled>
                         {cloudOptions.length > 0 ? '请选择模型' : '模型列表加载中…'}
@@ -369,93 +320,94 @@ export default function EleAgentModels() {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-xs font-medium mb-1">展示名称</label>
+                    <label className="block text-sm font-medium mb-1.5">展示名称</label>
                     <input
                       value={form.display_name}
                       onChange={(e) => setForm({ ...form, display_name: e.target.value })}
-                      className="input" placeholder="可选，客户端模型列表中显示"
+                      className="input bg-white" placeholder="可选，客户端模型列表中显示"
                     />
                   </div>
                 </>
               ) : (
                 <>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium mb-1">平台标识 *</label>
-                  <input
-                    value={form.provider}
-                    onChange={(e) => setForm({ ...form, provider: e.target.value })}
-                    className="input" placeholder="如 kimi / volcengine" required
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium mb-1">协议</label>
-                  <select
-                    value={form.protocol}
-                    onChange={(e) => setForm({ ...form, protocol: e.target.value })}
-                    className="input"
-                  >
-                    {PROTOCOLS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-medium mb-1">模型 ID *</label>
-                <input
-                  value={form.model_name}
-                  onChange={(e) => setForm({ ...form, model_name: e.target.value })}
-                  className="input" placeholder="如 k3 / doubao-seed-2-0-pro-260215" required
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium mb-1">展示名称</label>
-                <input
-                  value={form.display_name}
-                  onChange={(e) => setForm({ ...form, display_name: e.target.value })}
-                  className="input" placeholder="可选，客户端模型列表中显示"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium mb-1">Base URL *</label>
-                <input
-                  value={form.base_url}
-                  onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-                  className="input" placeholder="https://api.example.com/v1" required
-                />
-              </div>
-              {!editing && (
-                <div>
-                  <label className="block text-xs font-medium mb-1">API Key *</label>
-                  <input
-                    type="password"
-                    value={form.api_key}
-                    onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-                    className="input" placeholder="加密存储在本地" required
-                  />
-                </div>
-              )}
-              <div>
-                <label className="block text-xs font-medium mb-1.5">能力</label>
-                <div className="flex flex-wrap gap-x-4 gap-y-2">
-                  {CAPABILITY_FIELDS.map((f) => (
-                    <label key={f.key} className="flex items-center gap-1.5 text-xs text-eleball-text">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-sm font-medium mb-1.5">平台标识 *</label>
                       <input
-                        type="checkbox"
-                        checked={form[f.key]}
-                        onChange={(e) => setForm({ ...form, [f.key]: e.target.checked })}
+                        value={form.provider}
+                        onChange={(e) => setForm({ ...form, provider: e.target.value })}
+                        className="input bg-white" placeholder="如 kimi / volcengine" required
                       />
-                      {f.label}
-                    </label>
-                  ))}
-                </div>
-              </div>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1.5">协议</label>
+                      <select
+                        value={form.protocol}
+                        onChange={(e) => setForm({ ...form, protocol: e.target.value })}
+                        className="input bg-white"
+                      >
+                        {PROTOCOLS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1.5">模型 ID *</label>
+                    <input
+                      value={form.model_name}
+                      onChange={(e) => setForm({ ...form, model_name: e.target.value })}
+                      className="input bg-white" placeholder="如 k3 / doubao-seed-2-0-pro-260215" required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1.5">展示名称</label>
+                    <input
+                      value={form.display_name}
+                      onChange={(e) => setForm({ ...form, display_name: e.target.value })}
+                      className="input bg-white" placeholder="可选，客户端模型列表中显示"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1.5">Base URL *</label>
+                    <input
+                      value={form.base_url}
+                      onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+                      className="input bg-white" placeholder="https://api.example.com/v1" required
+                    />
+                  </div>
+                  {!editing && (
+                    <div>
+                      <label className="block text-sm font-medium mb-1.5">API Key *</label>
+                      <input
+                        type="password"
+                        value={form.api_key}
+                        onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+                        className="input bg-white" placeholder="加密存储在本地" required
+                      />
+                    </div>
+                  )}
+                  <div>
+                    <label className="block text-sm font-medium mb-1.5">能力</label>
+                    <div className="flex flex-wrap gap-x-4 gap-y-2">
+                      {CAPABILITY_FIELDS.map((f) => (
+                        <label key={f.key} className="flex items-center gap-1.5 text-sm text-eleball-text">
+                          <input
+                            type="checkbox"
+                            checked={form[f.key]}
+                            onChange={(e) => setForm({ ...form, [f.key]: e.target.checked })}
+                            className="w-4 h-4 rounded border-eleball-outline text-eleball-primary focus:ring-eleball-primary"
+                          />
+                          {f.label}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
                 </>
               )}
-              <div className="flex justify-end gap-2 pt-2">
-                <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 rounded-xl border border-eleball-outline text-sm">
+              <div className="flex justify-end gap-3 pt-2">
+                <button type="button" onClick={() => { setShowForm(false); setEditing(null) }} className="btn-ghost">
                   取消
                 </button>
-                <button type="submit" disabled={submitting} className="btn-primary text-sm px-4 py-2 disabled:opacity-50">
+                <button type="submit" disabled={submitting} className="btn-primary disabled:opacity-50">
                   {submitting ? '提交中…' : editing ? '保存' : '创建'}
                 </button>
               </div>
@@ -463,6 +415,101 @@ export default function EleAgentModels() {
           </div>
         </div>
       )}
+
+      {/* 按 provider 分组的开关式卡片 */}
+      {loading && items.length === 0 ? (
+        <div className="card text-center text-eleball-text-secondary">加载中...</div>
+      ) : items.length === 0 ? (
+        <div className="card text-center text-eleball-text-secondary">
+          暂无模型配置。点右上角「新增模型」添加 BYOK 模型，或「添加 Ele Agent 云端代理」一键接入云端模型。
+        </div>
+      ) : (
+        <div className="space-y-6">
+          {grouped.map(({ provider, list }) => (
+            <div key={provider}>
+              <div className="flex items-center gap-2 mb-3">
+                <h3 className="text-sm font-semibold text-eleball-text">{provider}</h3>
+                <span className="text-xs text-eleball-text-tertiary">{list.length} 个模型</span>
+                <span className="text-xs text-eleball-text-tertiary">· 启用 {list.filter((i) => i.is_enabled).length}</span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {list.map((item) => (
+                  <div key={item.id} className="card p-4 flex flex-col gap-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="font-medium text-eleball-text truncate">{item.display_name || item.model_name}</div>
+                        <div className="text-xs text-eleball-text-secondary truncate mt-0.5 font-mono">{item.provider} / {item.model_name}</div>
+                      </div>
+                      <Toggle checked={!!item.is_enabled} onChange={(v) => handleToggle(item, v)} />
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      <span className="inline-flex px-2 py-0.5 rounded-lg text-xs font-medium bg-blue-50 text-blue-600">
+                        {protocolLabel(item.protocol)}
+                      </span>
+                      {isCloudProxy(item) ? (
+                        <CapBadge label="云端代理" cls="bg-eleball-primary/10 text-eleball-primary-dark" />
+                      ) : (
+                        <CapBadge label="本地 BYOK" cls="bg-gray-100 text-eleball-text-secondary" />
+                      )}
+                      {item.supports_chat && <CapBadge label="对话" cls="bg-sky-50 text-sky-600" />}
+                      {item.supports_vision && <CapBadge label="视觉" cls="bg-purple-50 text-purple-600" />}
+                      {item.supports_image && <CapBadge label="图片" cls="bg-indigo-50 text-indigo-600" />}
+                      {item.supports_video && <CapBadge label="视频" cls="bg-purple-50 text-purple-600" />}
+                      {item.supports_tools && <CapBadge label="工具" cls="bg-emerald-50 text-emerald-600" />}
+                    </div>
+                    <div className="flex items-center justify-between gap-2 pt-1 border-t border-eleball-outline-variant">
+                      <div className="text-[11px] text-eleball-text-tertiary truncate max-w-[140px] font-mono" title={item.base_url}>
+                        {item.base_url}
+                      </div>
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => openEdit(item)}
+                          className="text-xs px-2 py-1 rounded-lg bg-gray-100 text-eleball-text hover:bg-gray-200 transition-colors"
+                        >
+                          编辑
+                        </button>
+                        <button
+                          onClick={() => handleRotateKey(item)}
+                          className="text-xs px-2 py-1 rounded-lg bg-eleball-primary/10 text-eleball-primary-dark hover:bg-eleball-primary/20 transition-colors"
+                        >
+                          换 Key
+                        </button>
+                        <button
+                          onClick={() => handleDelete(item)}
+                          className="text-xs px-2 py-1 rounded-lg bg-red-50 text-red-600 hover:bg-red-100 transition-colors"
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {total > items.length && (
+        <div className="text-xs text-eleball-text-tertiary text-center">
+          数据较多，仅显示前 {items.length} 条（共 {total} 条）。
+        </div>
+      )}
     </div>
   )
+}
+
+const emptyForm = {
+  provider: '',
+  protocol: 'openai_compatible',
+  model_name: '',
+  display_name: '',
+  base_url: '',
+  api_key: '',
+  supports_chat: true,
+  supports_vision: false,
+  supports_image: false,
+  supports_video: false,
+  supports_image_input: false,
+  supports_tools: false,
 }

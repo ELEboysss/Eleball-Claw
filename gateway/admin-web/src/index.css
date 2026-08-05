@@ -2,26 +2,168 @@
 @tailwind components;
 @tailwind utilities;
 
-@layer base {
-  body {
-    @apply bg-eleball-bg text-eleball-text antialiased;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+/* Eleball Admin -- 对齐 cloud web（gateway/web）PR-A 设计语言：白紫 oklch token / 中性阶 / 细边框优先于阴影 / 等宽技术体。
+   tailwind.config.js 的 eleball.* 用 hex（oklch 静默丢 /N 透明度变体），此处 :root oklch 与之数值等价、供 @layer components 的 var() 引用（无透明度修饰，安全）。*/
+:root {
+  /* 背景与表面（中性阶，白底体系）*/
+  --eleball-bg: oklch(1 0 0);                          /* 页面底 #FFFFFF */
+  --eleball-surface: oklch(1 0 0);                     /* 卡片 / elevated 面 #FFFFFF */
+  --eleball-surface-variant: oklch(0.959 0.010 305);   /* 输入 / 凹槽底 / hover 底 #F3F0F7 */
+  --eleball-muted: oklch(0.970 0.006 305);             /* 静音填充 / 次要底 */
+
+  /* 中性阶 / 边框 */
+  --eleball-outline: oklch(0.910 0.007 304);           /* 标准边框 #E2E0E5 */
+  --eleball-outline-variant: oklch(0.950 0.010 305);   /* 细边框 / 分隔 #F0EDF4 */
+
+  /* 文本阶 */
+  --eleball-text: oklch(0.225 0.008 297);              /* 主文本 #1C1B1F */
+  --eleball-text-secondary: oklch(0.398 0.017 304);    /* 次文本 #49454F */
+  --eleball-text-tertiary: oklch(0.567 0.016 308);     /* 三级 / 占位符 #79747E */
+
+  /* 主色（紫，保留 #6750A4 身份，转 oklch）*/
+  --eleball-primary: oklch(0.496 0.130 294);           /* #6750A4 */
+  --eleball-primary-light: oklch(0.918 0.048 303);     /* #EADDFF */
+  --eleball-primary-dark: oklch(0.242 0.140 286);      /* #21005D */
+  --eleball-secondary: oklch(0.486 0.036 300);         /* #625B71 */
+
+  /* 语义色 */
+  --eleball-error: oklch(0.501 0.178 29);              /* #B3261E */
+  --eleball-success: oklch(0.723 0.192 150);           /* #22C55E */
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+/* 尊重 prefers-reduced-motion：全局降级动画/过渡/滚动行为 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 
+@layer base {
+  body {
+    @apply antialiased;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+    background-color: var(--eleball-bg);
+    color: var(--eleball-text);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* 滚动条样式 -- 简洁细条（对齐 cloud web）*/
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--eleball-outline-variant);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--eleball-outline);
+}
+
 @layer components {
-  .card {
-    @apply bg-white rounded-2xl border border-eleball-outline p-6 shadow-sm;
-  }
+  /* 主按钮 -- 填充紫 + brightness hover（非 translate 上浮，对齐 cloud web）*/
   .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-eleball-primary text-white font-semibold text-sm transition-all hover:bg-eleball-primary-dark hover:-translate-y-0.5;
+    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl font-semibold text-sm text-white transition-colors duration-200;
+    background-color: var(--eleball-primary);
   }
+  .btn-primary:hover {
+    filter: brightness(1.05);
+  }
+  .btn-primary:active {
+    filter: brightness(0.97);
+  }
+
+  /* 次按钮 -- 白底细边框 + primary hover */
   .btn-secondary {
-    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-white border border-eleball-outline text-eleball-text font-semibold text-sm transition-all hover:border-eleball-primary hover:text-eleball-primary;
+    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-white font-semibold text-sm transition-colors duration-200;
+    color: var(--eleball-text);
+    border: 1px solid var(--eleball-outline);
   }
+  .btn-secondary:hover {
+    border-color: var(--eleball-primary);
+    color: var(--eleball-primary);
+  }
+
+  /* 幽灵按钮 -- 透明轮廓 + 羊皮纸 hover（对齐 cloud web A2）*/
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-colors duration-200;
+    color: var(--eleball-text-secondary);
+    background-color: transparent;
+    border: 1px solid var(--eleball-outline);
+  }
+  .btn-ghost:hover {
+    background-color: var(--eleball-surface-variant);
+    color: var(--eleball-text);
+  }
+  .btn-ghost:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px oklch(0.496 0.130 294 / 0.12);
+  }
+
+  /* 卡片 -- 细中性边框 + 微妙高差（不靠重阴影，对齐 cloud web）*/
+  .card {
+    @apply rounded-2xl p-6 transition-colors duration-200;
+    background-color: var(--eleball-surface);
+    border: 1px solid var(--eleball-outline);
+    box-shadow: 0 1px 2px oklch(0 0 0 / 0.04);
+  }
+
+  /* 输入框 -- 凹槽底 + 细边框 + 软焦点环（对齐 cloud web）*/
   .input {
-    @apply w-full px-4 py-2.5 rounded-xl border border-eleball-outline bg-white text-sm transition-colors focus:outline-none focus:border-eleball-primary focus:ring-2 focus:ring-eleball-primary/20;
+    @apply w-full px-4 py-2.5 rounded-xl outline-none text-sm;
+    background-color: var(--eleball-surface-variant);
+    color: var(--eleball-text);
+    border: 1px solid var(--eleball-outline);
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
   }
+  .input:focus {
+    border-color: var(--eleball-primary);
+    box-shadow: 0 0 0 3px oklch(0.496 0.130 294 / 0.12);
+  }
+  .input::placeholder {
+    color: var(--eleball-text-tertiary);
+  }
+
+  /* 对话框面板 -- 白底 + 细边框 + 克制软高差（替代 shadow-xl/2xl，对齐 cloud web A2）*/
+  .dialog-panel {
+    background-color: var(--eleball-surface);
+    border: 1px solid var(--eleball-outline);
+    border-radius: 1rem; /* rounded-2xl */
+    box-shadow: 0 8px 32px oklch(0 0 0 / 0.10), 0 1px 2px oklch(0 0 0 / 0.04);
+  }
+
+  /* 代码块 -- 白底等宽 + 细边框（对齐 cloud web A2）*/
+  .code-block {
+    background-color: var(--eleball-surface);
+    border: 1px solid var(--eleball-outline-variant);
+    border-radius: 0.75rem; /* rounded-xl */
+    overflow: hidden;
+  }
+  .code-block-header {
+    background-color: var(--eleball-surface-variant);
+    color: var(--eleball-text-secondary);
+    border-bottom: 1px solid var(--eleball-outline-variant);
+  }
+
+  /* 表格（admin 专用）*/
   .table-header {
     @apply px-4 py-3 text-left text-xs font-semibold text-eleball-text-secondary uppercase tracking-wider;
   }

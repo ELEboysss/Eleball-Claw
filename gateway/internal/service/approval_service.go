@@ -161,7 +161,7 @@ func riskLevelFor(tool *Tool, name string) string {
 	if tool.ReadOnly {
 		return "low"
 	}
-	if name == "Shell" {
+	if isShellLikeTool(name) {
 		return "high"
 	}
 	return "medium"
@@ -170,7 +170,7 @@ func riskLevelFor(tool *Tool, name string) string {
 // approvalReason 生成人类可读的审批理由。
 func approvalReason(tool *Tool, name string, mode model.PermissionMode) string {
 	if !tool.ReadOnly {
-		if name == "Shell" {
+		if isShellLikeTool(name) {
 			return "Shell 命令可能修改系统，需确认"
 		}
 		return "文件写入/修改操作，需确认"
@@ -191,6 +191,12 @@ func alwaysAllowSpec(name string, input map[string]interface{}) string {
 			return "Shell"
 		}
 		return fmt.Sprintf("Bash(%s *)", cmd)
+	case "BackgroundShell":
+		cmd, _ := input["command"].(string)
+		if cmd == "" {
+			return "BackgroundShell"
+		}
+		return fmt.Sprintf("BashBg(%s *)", cmd)
 	case "WriteFile", "StrReplaceFile", "ReadFile", "Grep", "OCR":
 		path, _ := input["path"].(string)
 		if path == "" {

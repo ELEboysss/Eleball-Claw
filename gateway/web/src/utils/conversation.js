@@ -61,7 +61,9 @@ export function createConversation(title = '新对话') {
   return {
     id: `conv_${now}_${Math.random().toString(36).slice(2, 7)}`,
     title,
-    messages: [{ role: 'assistant', content: '你好，我是 Eleball。有什么可以帮你的吗？' }],
+    // 不预置开场白消息：避免被持久化到 localStorage、随历史发送给 LLM 污染上下文，
+    // 以及 mergeMessages 因本地更长而把它常驻显示。空对话的欢迎语由 Chat 空状态 UI 呈现。
+    messages: [],
     enableWebSearch: false,
     searchProvider: 'baidu',
     model: '',

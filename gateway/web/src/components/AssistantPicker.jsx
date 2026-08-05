@@ -24,7 +24,7 @@ export default function AssistantPicker({ open, onClose, assistants, currentId, 
       onClick={onClose}
     >
       <div
-        className="relative w-full max-w-sm bg-eleball-surface rounded-3xl p-5 shadow-xl max-h-[80vh] overflow-y-auto"
+        className="relative w-full max-w-sm dialog-panel p-5 max-h-[80vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <button

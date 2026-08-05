@@ -11,7 +11,8 @@ import (
 type AgentCredentialService struct {
 	repo      *repository.AgentCredentialRepo
 	agentRepo *repository.AgentRepo
-	// onModuleCredChange 模块级凭证变更钩子（stdio 运行时需重 spawn 注入新 env）。
+	// onModuleCredChange 模块级凭证变更钩子。env 含 ${credentials.KEY} 模板的 stdio 运行时
+	// 需重 spawn 注入新 env；无模板的经 _meta per-call 注入，RespawnByDriver 内部自行跳过。
 	// claw 在 main.go 注册为 manager.RespawnByDriver；cloud 不注册（stdio 非主推）。
 	onModuleCredChange func(driverID, userID string) error
 }
@@ -157,7 +158,8 @@ func (s *AgentCredentialService) SaveForUserAgent(userID, agentID string, values
 			return err
 		}
 	}
-	// 模块级凭证变更 -> 异步重启 stdio 进程注入新 env（stdio 长驻进程无法 per-call 注入）
+	// 模块级凭证变更 -> 异步通知 stdio 运行时。env 含凭证模板的需重 spawn 注入新 env；
+	// 无模板的经 _meta per-call 注入，钩子内部跳过（见 RespawnByDriver）。
 	if touchedModuleDriver != "" && s.onModuleCredChange != nil {
 		driver, uid := touchedModuleDriver, userID
 		go func() {

@@ -1,10 +1,36 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { CLOUD_BASE } from '../api/client'
 import useSEO from '../hooks/useSEO'
-import { Monitor, Terminal, Shield, Cloud, HardDrive, Boxes, ArrowRight, BookOpen, CreditCard } from 'lucide-react'
+import { Monitor, Terminal, Shield, Cloud, HardDrive, Boxes, ArrowRight, BookOpen, CreditCard, Copy, Check } from 'lucide-react'
 
 // claw-guide：Eleball-Claw 用户使用指南。
 // 面向最终用户：介绍产品定位、特点与使用要点，不涉及技术实现细节。
+
+// T-PR-A4：安装命令代码块 -- 白底等宽 + 一键复制（对齐 cloud Claw.jsx / PR-A2 设计语言）。
+function CodeBlock({ code, language = 'bash' }) {
+  const [copied, setCopied] = useState(false)
+  const handleCopy = () => {
+    navigator.clipboard.writeText(code)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+  return (
+    <div className="relative group code-block my-4">
+      <div className="code-block-header flex items-center justify-between px-4 py-2 text-xs">
+        <span className="font-mono">{language}</span>
+        <button onClick={handleCopy} className="flex items-center gap-1 hover:text-eleball-text transition-colors">
+          {copied ? <Check className="w-3.5 h-3.5 text-eleball-success" /> : <Copy className="w-3.5 h-3.5" />}
+          {copied ? '已复制' : '复制'}
+        </button>
+      </div>
+      <pre className="p-4 overflow-x-auto text-sm text-eleball-text font-mono leading-relaxed">
+        <code>{code}</code>
+      </pre>
+    </div>
+  )
+}
+
 export default function ClawGuide() {
   useSEO('Eleball-Claw 使用指南', '把 AI agent 运行在你的设备上：安装、启动、账户、秘技使用指南。', true)
 
@@ -27,9 +53,9 @@ export default function ClawGuide() {
             <Link to="/chat" className="btn-primary text-sm px-5 py-2 inline-flex items-center gap-2">
               开始对话 <ArrowRight className="w-4 h-4" />
             </Link>
-            <Link to="/" className="text-sm px-5 py-2 inline-flex items-center gap-2 rounded-full border border-eleball-outline-variant text-eleball-text-secondary hover:text-eleball-text">
+            <a href={CLOUD_BASE} target="_blank" rel="noopener noreferrer" className="text-sm px-5 py-2 inline-flex items-center gap-2 rounded-full border border-eleball-outline-variant text-eleball-text-secondary hover:text-eleball-text">
               <Cloud className="w-4 h-4" /> 前往官网
-            </Link>
+            </a>
           </div>
         </div>
       </section>
@@ -80,18 +106,9 @@ export default function ClawGuide() {
             一个命令完成安装，官方秘技随安装自带、开箱即用。
           </p>
           <div className="space-y-3">
-            <div>
-              <div className="text-xs text-eleball-text-tertiary mb-1">Linux / macOS</div>
-              <pre className="bg-[#1e1e2e] text-gray-100 text-sm font-mono p-3 rounded-lg overflow-x-auto">curl -fsSL https://eleball.cn/install.sh | sh</pre>
-            </div>
-            <div>
-              <div className="text-xs text-eleball-text-tertiary mb-1">Windows（PowerShell）</div>
-              <pre className="bg-[#1e1e2e] text-gray-100 text-sm font-mono p-3 rounded-lg overflow-x-auto">irm https://eleball.cn/install.ps1 | iex</pre>
-            </div>
-            <div>
-              <div className="text-xs text-eleball-text-tertiary mb-1">启动（Linux / macOS）</div>
-              <pre className="bg-[#1e1e2e] text-gray-100 text-sm font-mono p-3 rounded-lg overflow-x-auto">eleball-claw serve --port=8090</pre>
-            </div>
+            <CodeBlock code="curl -fsSL https://eleball.cn/install.sh | sh" language="Linux / macOS" />
+            <CodeBlock code="irm https://eleball.cn/install.ps1 | iex" language="Windows（PowerShell）" />
+            <CodeBlock code="eleball-claw serve --port=8090" language="启动（Linux / macOS）" />
           </div>
           <p className="text-sm text-eleball-text-secondary mt-3">
             Windows 下也可以直接双击 <code className="text-xs bg-eleball-surface-variant px-1.5 py-0.5 rounded">eleball-claw.exe</code> 启动。
@@ -145,11 +162,11 @@ export default function ClawGuide() {
 
         {/* 云端入口 */}
         <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Link to="/" className="card p-5 text-left hover:shadow-md transition-shadow">
+          <a href={CLOUD_BASE} target="_blank" rel="noopener noreferrer" className="card p-5 text-left hover:shadow-md transition-shadow">
             <BookOpen className="w-5 h-5 text-eleball-primary mb-2" />
             <div className="font-semibold text-eleball-text text-sm mb-1">官网</div>
             <div className="text-xs text-eleball-text-secondary">产品介绍 / 文档 / 充值等</div>
-          </Link>
+          </a>
           <Link to="/recharge" className="card p-5 text-left hover:shadow-md transition-shadow">
             <CreditCard className="w-5 h-5 text-eleball-primary mb-2" />
             <div className="font-semibold text-eleball-text text-sm mb-1">充值</div>

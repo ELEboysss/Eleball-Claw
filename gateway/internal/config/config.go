@@ -24,6 +24,15 @@ type AppConfig struct {
 	AdminGate   AdminGateConfig  `mapstructure:"admin_gate"`
 	Payment     PaymentConfig    `mapstructure:"payment"`
 	Mail        MailConfig        `mapstructure:"mail"`
+	Permission  PermissionConfig `mapstructure:"permission"`
+}
+
+// PermissionConfig 工具权限配置（claw 本地网关）。
+// 云端 cmd/server 不装配权限服务，此配置忽略。
+type PermissionConfig struct {
+	// Mode 新会话的默认权限模式：default/acceptEdits/plan/auto/strict（默认 default）。
+	// 用户可在前端 Shift+Tab 切换并持久化到会话；此值仅作新会话初始模式。
+	Mode string `mapstructure:"mode"`
 }
 
 // ModulesConfig 预置模块生命周期配置（claw 本地网关）

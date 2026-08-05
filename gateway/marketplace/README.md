@@ -71,7 +71,6 @@ Content-Type: application/json
 - `agent-reach/` — 互联网能力（网页阅读、搜索、视频字幕、GitHub、社交平台等）
 - `firecrawl/` — 网页抓取与结构化提取（基于 Firecrawl）；API 参数与错误码参考 [`firecrawl/docs/firecrawl-api-guide.md`](firecrawl/docs/firecrawl-api-guide.md)
 - `search-web/` - 本地联网搜索（百度千帆 / 必应），claw 内置范例模块
-- `skill-maker/` - **Prompt 型官方秘技**（非 Docker 模块）：仅含 `SKILL.md`，作为「秘技制造机」的 SystemPrompt。激活并绑定到 Agent Team 助手后，注入开发集市秘技模块的方法论。无 `docker-compose.yml`，不被 `start.sh` 扫描。
 
 ## 一键启停所有模块
 

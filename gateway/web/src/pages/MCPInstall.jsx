@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import useSEO from '../hooks/useSEO'
-import { Loader2, Plus, Trash2, FolderOpen, Play, DownloadCloud, CheckCircle2, Wrench, Server, Globe, Terminal } from 'lucide-react'
+import { Loader2, Plus, Trash2, FolderOpen, Play, DownloadCloud, CheckCircle2, Server, Globe, Terminal } from 'lucide-react'
 import { moduleGeneratorApi } from '../api/client'
 import DirectoryPicker from '../components/DirectoryPicker'
 import InterpreterMissingBanner from '../components/InterpreterMissingBanner'
@@ -42,7 +42,7 @@ function kvToObject(list) {
 }
 
 export default function MCPInstall() {
-  useSEO('安装 MCP', '把现成的 stdio/http MCP server 一键安装为本地秘技：探测工具 -> 自动上架。')
+  // 嵌入 DDIY 工作室（Studio）内容区，页头/SEO 由 Studio 统一负责。
 
   const [transport, setTransport] = useState('mcp_stdio')
   const [name, setName] = useState('')
@@ -133,19 +133,7 @@ export default function MCPInstall() {
   const isStdio = transport === 'mcp_stdio'
 
   return (
-    <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-eleball-text flex items-center gap-2">
-          <DownloadCloud className="w-6 h-6 text-eleball-primary" /> 安装远端 MCP
-        </h1>
-        <p className="text-sm text-eleball-text-secondary mt-1">
-          把现成的 stdio / http MCP server 一键安装为本地秘技：探测工具 → 自动上架。无需写脚本。
-        </p>
-        <Link to="/module-generator" className="inline-flex items-center gap-1 mt-2 text-xs font-medium text-eleball-primary hover:underline">
-          <Wrench className="w-3.5 h-3.5" /> 想自己写脚本造秘技？去造秘技页
-        </Link>
-      </div>
-
+    <div>
       {/* transport 选择 */}
       <div className="card mb-4">
         <SectionTitle icon={Server} desc="stdio 启动本地进程；http 连接远端服务。">

@@ -114,6 +114,19 @@ func (h *ModuleHandler) RefreshModule(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": status})
 }
 
+// StartModule 启动指定模块（claw 控制台「启动服务」按钮）。
+// POST /v1/claw-console/modules/:id/start：按部署方式拉起模块进程/容器并刷新状态。
+// process 同步返回；docker 异步拉起（立即返回当前状态，前端稍后刷新）。
+func (h *ModuleHandler) StartModule(c *gin.Context) {
+	id := c.Param("id")
+	status, err := h.moduleService.Start(id)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": status})
+}
+
 // RegisterModuleFromPlugin 插件自助注册
 // 插件调用此接口上报自身信息，无需登录，但需要提供正确的 auth_token。
 func (h *ModuleHandler) RegisterModuleFromPlugin(c *gin.Context) {

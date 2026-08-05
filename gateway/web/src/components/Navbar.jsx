@@ -1,20 +1,20 @@
 import { useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { Menu, X, User, Zap, LogOut } from 'lucide-react'
+import { Menu, X, User, Home, LogOut, LayoutDashboard } from 'lucide-react'
+import { CLOUD_BASE } from '../api/client'
 import { useAuth } from '../context/AuthContext'
 import LoginModal from './LoginModal'
 
 // claw 本地导航栏：紫底白高亮（与官网 iframe 内的白底紫高亮导航栏区分，提示用户「这是 claw 本地壳」）。
-// 底色 bg-eleball-primary(#6750A4)；当前链接白、其余白/70；CTA（充值/免费试用）用白底紫字药丸。
+// 底色 bg-eleball-primary(#6750A4)；当前链接白、其余白/70；CTA（官网/免费试用）用白底紫字药丸。
 // 字号/按钮比官网大一档，更瞩目。
 
 const navLinks = [
-  { label: '官网', href: '/' },
   { label: '对话', href: '/chat' },
   { label: '视觉', href: '/visual' },
   { label: '模型', href: '/models' },
   { label: '技能', href: '/agents' },
-  { label: '造秘技', href: '/module-generator' },
+  { label: 'DIY工作室', href: '/studio' },
   { label: 'Claw 指南', href: '/claw-guide' },
 ]
 
@@ -66,13 +66,24 @@ export default function Navbar() {
                     <User className="w-5 h-5" />
                     <span className="max-w-[100px] truncate">{user?.nickname || user?.username}</span>
                   </div>
-                  <Link
-                    to="/recharge"
+                  <a
+                    href="/admin/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full text-sm font-semibold text-white border border-white/30 hover:bg-white/10 transition-colors"
+                  >
+                    <LayoutDashboard className="w-4 h-4" />
+                    控制台
+                  </a>
+                  <a
+                    href={CLOUD_BASE}
+                    target="_blank"
+                    rel="noopener noreferrer"
                     className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full text-sm font-semibold text-eleball-primary bg-white hover:bg-white/90 transition-colors"
                   >
-                    <Zap className="w-4 h-4" />
-                    充值
-                  </Link>
+                    <Home className="w-4 h-4" />
+                    官网
+                  </a>
                   <button
                     onClick={handleLogout}
                     className="p-2.5 rounded-full text-white/80 hover:bg-white/10 transition-colors"
@@ -121,14 +132,26 @@ export default function Navbar() {
                     <User className="w-5 h-5" />
                     <span>{user?.nickname || user?.username}</span>
                   </div>
-                  <Link
-                    to="/recharge"
+                  <a
+                    href="/admin/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => setMobileOpen(false)}
+                    className="inline-flex items-center justify-center gap-2 rounded-full font-semibold text-white border border-white/30 hover:bg-white/10 transition-colors text-base px-6 py-2.5"
+                  >
+                    <LayoutDashboard className="w-5 h-5" />
+                    控制台
+                  </a>
+                  <a
+                    href={CLOUD_BASE}
+                    target="_blank"
+                    rel="noopener noreferrer"
                     onClick={() => setMobileOpen(false)}
                     className="inline-flex items-center justify-center gap-2 rounded-full font-semibold text-eleball-primary bg-white hover:bg-white/90 transition-colors text-base px-6 py-2.5"
                   >
-                    <Zap className="w-5 h-5" />
-                    充值
-                  </Link>
+                    <Home className="w-5 h-5" />
+                    官网
+                  </a>
                   <button
                     onClick={handleLogout}
                     className="flex items-center gap-2 text-base text-white/80 hover:text-white"

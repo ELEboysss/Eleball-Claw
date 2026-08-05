@@ -7,7 +7,7 @@ import { getItem, setItem, removeItem, getJSON } from '../utils/storage'
 const API_BASE = import.meta.env.VITE_API_BASE || '/v1'
 // 云端 eleball：账户（登录/注册/邮箱OTP/刷新/我的）/充值/支付/VIP/CDK/秘技购买/已购秘技拉取
 const CLOUD_API = import.meta.env.VITE_CLOUD_API || 'https://api.eleball.cn/v1'
-// 云端 web：官网/充值内嵌用（CLOUD_BASE，作为 CloudFrame 的 iframe src）
+// 云端 web：充值内嵌用（CLOUD_BASE，作为 CloudFrame 的 iframe src）
 export const CLOUD_BASE = import.meta.env.VITE_CLOUD_BASE || 'https://www.eleball.cn'
 
 // 把后端/网络错误信息转换成普通用户能看懂的文案

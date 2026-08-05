@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import useSEO from '../hooks/useSEO'
 import { Cpu, Search, AlertCircle } from 'lucide-react'
 import { modelApi } from '../api/client'
+import PageHero from '../components/PageHero'
 
 export default function Models() {
   useSEO('大模型中心', '支持 OpenAI/Claude/Gemini/DeepSeek 等，自带 Key 或 Ele Agent 代调用。')
@@ -96,15 +97,10 @@ export default function Models() {
 
   return (
     <div className="pt-8 pb-16 px-4 max-w-6xl mx-auto">
-      <div className="text-center mb-8">
-        <h1 className="text-2xl font-bold text-eleball-text mb-2">模型中心</h1>
-        <p className="text-sm text-eleball-text-secondary">
-          Ele Agent及本地配置的大模型
-        </p>
-        <p className="text-xs text-eleball-text-tertiary mt-1">
-          如您想使用自己的API Key，可在对话窗口添加自定义配置模型
-        </p>
-      </div>
+      <PageHero
+        title="模型中心"
+        subtitle="Ele Agent 及本地配置的大模型。想用自己的 API Key，可在对话窗口添加自定义配置模型。"
+      />
 
       {/* 筛选与搜索 */}
       <div className="flex flex-col md:flex-row md:items-center gap-4 mb-6">

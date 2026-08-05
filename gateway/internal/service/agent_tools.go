@@ -66,6 +66,12 @@ type ToolEnv struct {
 	ContextFileSvc *ContextFileService
 	// C8：已注入动态规则文件路径集合，防止同一规则在每轮工具调用后重复注入。
 	injectedRulePaths map[string]struct{}
+	// AR-E5：read-before-edit 文件状态追踪。记录本 execute 循环内已 ReadFile/WriteFile
+	// 触及的文件 absPath -> 触及时的内容快照。StrReplaceFile 据此强制未读拒改与 stale 校验
+	//（磁盘内容自上次触及后若被外部改动则拒改并提示重读）。lazy init；ToolEnv 为 per-execute
+	// 单线程顺序调用（参见 injectedRulePaths），无需加锁。跨 turn（新 execute）重建即重置，
+	// 模型需在新 turn 重新 ReadFile——这恰是更安全的新鲜快照语义。
+	readState map[string]string
 }
 
 // ResolveFilePath 解析文件工具路径（AR-06）：env.Cwd 非空时优先解析到 cwd，否则回退会话沙箱。
@@ -74,6 +80,24 @@ func (env *ToolEnv) ResolveFilePath(path string) (string, error) {
 		return env.Sandbox.ResolveProjectPath(env.Cwd, path)
 	}
 	return env.Sandbox.ResolvePath(env.UserID, env.ConversationID, path)
+}
+
+// markFileRead 记录文件内容快照（AR-E5 read-before-edit 状态）。ReadFile/WriteFile 触及后调用，
+// 已存在则覆盖为最新内容。StrReplaceFile 成功改写后亦调用，使同循环内后续编辑通过 stale 校验。
+func (env *ToolEnv) markFileRead(absPath, content string) {
+	if env.readState == nil {
+		env.readState = make(map[string]string)
+	}
+	env.readState[absPath] = content
+}
+
+// fileReadSnapshot 返回文件内容快照与是否曾在本循环内触及（AR-E5）。未触及时 ok=false。
+func (env *ToolEnv) fileReadSnapshot(absPath string) (string, bool) {
+	if env.readState == nil {
+		return "", false
+	}
+	s, ok := env.readState[absPath]
+	return s, ok
 }
 
 // SaveOutput 将工具产物登记为匿名资源
@@ -121,6 +145,9 @@ type ToolRegistry struct {
 	runner         PlatformToolRunner
 	searchProvider SearchProvider
 	driverRegistry *ToolDriverRegistry
+	// AR-E6：后台 shell 注册表（BackgroundShell 工具用）。Clone 共享同一实例，
+	// 使会话级动态注入的 registry 也能轮询/停止已启动的后台 shell。
+	bgShells *backgroundShellRegistry
 }
 
 // NewToolRegistry 创建工具注册表，使用默认跨平台运行器和搜索提供者
@@ -131,6 +158,7 @@ func NewToolRegistry() *ToolRegistry {
 		runner:         NewPlatformRunner(),
 		searchProvider: NewSearchProvider(),
 		driverRegistry: driverRegistry,
+		bgShells:       newBackgroundShellRegistry(),
 	}
 	r.registerBuiltinDriver(driverRegistry)
 	driverRegistry.Register(newRemoteURLDriver(60))
@@ -146,6 +174,7 @@ func NewToolRegistryWithDeps(runner PlatformToolRunner, sp SearchProvider) *Tool
 		runner:         runner,
 		searchProvider: sp,
 		driverRegistry: driverRegistry,
+		bgShells:       newBackgroundShellRegistry(),
 	}
 	r.registerBuiltinDriver(driverRegistry)
 	r.registerDefaults()
@@ -159,6 +188,7 @@ func NewToolRegistryWithDriverRegistry(runner PlatformToolRunner, sp SearchProvi
 		runner:         runner,
 		searchProvider: sp,
 		driverRegistry: driverRegistry,
+		bgShells:       newBackgroundShellRegistry(),
 	}
 	r.registerDefaults()
 	return r
@@ -203,7 +233,9 @@ var toolNameAliases = map[string]string{
 	"read_file":        "ReadFile",
 	"str_replace_file": "StrReplaceFile",
 	"grep":             "Grep",
+	"glob":             "Glob",
 	"shell":            "Shell",
+	"background_shell": "BackgroundShell",
 	"ocr":              "OCR",
 	"fetch_url":        "FetchURL",
 	"search_web":       "SearchWeb",
@@ -258,6 +290,7 @@ func (r *ToolRegistry) Clone() *ToolRegistry {
 		runner:         r.runner,
 		searchProvider: r.searchProvider,
 		driverRegistry: r.driverRegistry,
+		bgShells:       r.bgShells,
 	}
 	for name, tool := range r.tools {
 		cloned.tools[name] = tool
@@ -332,14 +365,14 @@ func (r *ToolRegistry) registerDefaults() {
 
 	r.Register(&Tool{
 		Name:        "ReadFile",
-		Description: "读取用户 conversation 目录或公共知识库中的文件内容",
+		Description: "读取文件内容。文本按行分页（offset 起始行 1-indexed / limit 行数，默认 2000 最大 5000），回带 total_lines/returned_lines/more_available；图片(PNG/JPG/GIF)回宽高+下载链接，PDF 回估算页数+下载链接，Jupyter(.ipynb) 渲染 cells 为文本，二进制仅回描述符。read-before-edit：读后可编辑该文件。",
 		ServerSide:  true,
 		ReadOnly:    true,
 		Driver:      string(model.ToolDriverBuiltin),
 		Manifest: &model.ToolManifest{
 			ID:          "com.eleball.tools.read_file",
 			Name:        "读取文件",
-			Description: "读取用户 conversation 目录或公共知识库中的文件内容。",
+			Description: "读取用户 conversation 目录或公共知识库中的文件内容（支持分页与图片/PDF/Jupyter）。",
 			Driver:      model.ToolDriverBuiltin,
 			Category:    "文件",
 			Level:       1,
@@ -352,6 +385,18 @@ func (r *ToolRegistry) registerDefaults() {
 				"path": map[string]interface{}{
 					"type":        "string",
 					"description": "相对于当前工作目录的文件路径，可用绝对路径",
+				},
+				"offset": map[string]interface{}{
+					"type":        "integer",
+					"description": "起始行号（1-indexed，默认 1）。配合 limit 分段读大文件",
+				},
+				"limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "返回行数上限（默认 2000，最大 5000）。超出部分置 more_available=true，可用 offset 续读",
+				},
+				"pages": map[string]interface{}{
+					"type":        "string",
+					"description": "PDF 页码范围（如 \"1-5\"），当前仅接受参数；光栅化渲染需专用工具",
 				},
 			},
 			"required": []string{"path"},
@@ -394,19 +439,19 @@ func (r *ToolRegistry) registerDefaults() {
 
 	r.Register(&Tool{
 		Name:        "StrReplaceFile",
-		Description: "修改用户 conversation 目录中的文件内容",
+		Description: "修改文件内容（字符串替换）。强制 read-before-edit：必须先 ReadFile 读取该文件后才能编辑；old_string 默认需唯一匹配（多处匹配报错），设 replace_all=true 可全替换；文件自上次读取后被外部改动（stale）会拒改并提示重读。",
 		ServerSide:  true,
 		ReadOnly:    false,
 		Driver:      string(model.ToolDriverBuiltin),
 		Manifest: &model.ToolManifest{
 			ID:          "com.eleball.tools.str_replace_file",
 			Name:        "替换文件内容",
-			Description: "修改用户 conversation 目录中的文件内容。",
+			Description: "修改文件内容（read-before-edit / 唯一匹配 / replace_all / stale 校验）。",
 			Driver:      model.ToolDriverBuiltin,
 			Category:    "文件",
 			Level:       1,
 			Permissions: []model.ToolPermission{model.ToolPermissionFileTools},
-			Actions:     []model.ToolAction{{Name: "replace", Description: "替换文件内容", Params: map[string]string{"path": "path", "old_string": "old_string", "new_string": "new_string"}}},
+			Actions:     []model.ToolAction{{Name: "replace", Description: "替换文件内容", Params: map[string]string{"path": "path", "old_string": "old_string", "new_string": "new_string", "replace_all": "replace_all"}}},
 		},
 		Parameters: map[string]interface{}{
 			"type": "object",
@@ -417,11 +462,15 @@ func (r *ToolRegistry) registerDefaults() {
 				},
 				"old_string": map[string]interface{}{
 					"type":        "string",
-					"description": "需要替换的原始字符串",
+					"description": "需要替换的原始字符串（须与文件实际内容完全一致，含缩进与换行）。默认须唯一匹配，多处匹配会报错",
 				},
 				"new_string": map[string]interface{}{
 					"type":        "string",
 					"description": "替换后的新字符串",
+				},
+				"replace_all": map[string]interface{}{
+					"type":        "boolean",
+					"description": "是否替换所有匹配。默认 false（仅唯一匹配）；true 时全部替换",
 				},
 			},
 			"required": []string{"path", "old_string", "new_string"},
@@ -431,7 +480,7 @@ func (r *ToolRegistry) registerDefaults() {
 
 	r.Register(&Tool{
 		Name:        "Grep",
-		Description: "在沙箱内搜索文件内容。仅允许访问当前用户的 conversation/session 目录和公共知识库目录",
+		Description: "在沙箱内搜索文件内容（优先 ripgrep，回退纯 Go）。仅允许访问当前用户的 conversation/session 目录和公共知识库目录。支持 output_mode/glob/type/上下文/multiline/head_limit",
 		ServerSide:  true,
 		ReadOnly:    true,
 		Driver:      string(model.ToolDriverBuiltin),
@@ -443,7 +492,10 @@ func (r *ToolRegistry) registerDefaults() {
 			Category:    "文件",
 			Level:       1,
 			Permissions: []model.ToolPermission{model.ToolPermissionFileTools},
-			Actions:     []model.ToolAction{{Name: "grep", Description: "搜索文件内容", Params: map[string]string{"path": "path", "pattern": "pattern", "recursive": "recursive"}}},
+			Actions: []model.ToolAction{{Name: "grep", Description: "搜索文件内容", Params: map[string]string{
+				"path": "path", "pattern": "pattern", "recursive": "recursive", "output_mode": "output_mode",
+				"glob": "glob", "type": "type", "context": "context", "head_limit": "head_limit",
+			}}},
 		},
 		Parameters: map[string]interface{}{
 			"type": "object",
@@ -454,16 +506,85 @@ func (r *ToolRegistry) registerDefaults() {
 				},
 				"pattern": map[string]interface{}{
 					"type":        "string",
-					"description": "搜索模式（支持基本正则）",
+					"description": "搜索模式（支持正则：| ( ) $ ^ . * 等）",
 				},
 				"recursive": map[string]interface{}{
 					"type":        "boolean",
-					"description": "是否递归搜索目录，path 为目录时自动递归",
+					"description": "是否递归搜索目录，path 为目录时默认递归",
+				},
+				"output_mode": map[string]interface{}{
+					"type":        "string",
+					"description": "输出模式：content（默认，匹配行）/ files_with_matches（仅文件名）/ count（每文件计数）",
+				},
+				"glob": map[string]interface{}{
+					"type":        "string",
+					"description": "文件名 glob 过滤，如 \"*.go\"；仅匹配的文件被搜索",
+				},
+				"type": map[string]interface{}{
+					"type":        "string",
+					"description": "按语言类型过滤，如 go/js/ts/py；等价 rg -t",
+				},
+				"before_context": map[string]interface{}{
+					"type":        "integer",
+					"description": "匹配行前显示的上下文行数（等价 -B）",
+				},
+				"after_context": map[string]interface{}{
+					"type":        "integer",
+					"description": "匹配行后显示的上下文行数（等价 -A）",
+				},
+				"context": map[string]interface{}{
+					"type":        "integer",
+					"description": "匹配行前后各显示的上下文行数（等价 -C，覆盖 before/after）",
+				},
+				"multiline": map[string]interface{}{
+					"type":        "boolean",
+					"description": "多行模式，pattern 可跨行匹配（等价 rg -U）",
+				},
+				"head_limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "限制返回结果条数，超出则截断并置 truncated=true",
 				},
 			},
 			"required": []string{"path", "pattern"},
 		},
 		Func: r.toolGrep,
+	})
+
+	r.Register(&Tool{
+		Name:        "Glob",
+		Description: "按 glob 模式匹配文件路径，支持 ** 跨目录递归，结果按修改时间倒序（最近在前）。仅允许访问当前用户的 conversation/session 目录和公共知识库目录",
+		ServerSide:  true,
+		ReadOnly:    true,
+		Driver:      string(model.ToolDriverBuiltin),
+		Manifest: &model.ToolManifest{
+			ID:          "com.eleball.tools.glob",
+			Name:        "文件匹配",
+			Description: "按 glob 模式查找文件路径。",
+			Driver:      model.ToolDriverBuiltin,
+			Category:    "文件",
+			Level:       1,
+			Permissions: []model.ToolPermission{model.ToolPermissionFileTools},
+			Actions:     []model.ToolAction{{Name: "glob", Description: "按 glob 匹配文件", Params: map[string]string{"path": "path", "pattern": "pattern"}}},
+		},
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "搜索根目录（相对当前工作目录或绝对路径），默认当前目录",
+				},
+				"pattern": map[string]interface{}{
+					"type":        "string",
+					"description": "glob 模式，如 \"**/*.go\"、\"src/**/*.ts\"；** 跨目录递归",
+				},
+				"head_limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "限制返回文件数，超出则截断并置 truncated=true",
+				},
+			},
+			"required": []string{"pattern"},
+		},
+		Func: r.toolGlob,
 	})
 
 	r.Register(&Tool{
@@ -498,6 +619,63 @@ func (r *ToolRegistry) registerDefaults() {
 			"required": []string{"command"},
 		},
 		Func: r.toolShell,
+	})
+
+	// AR-E6：BackgroundShell 后台 shell 工具。长时运行命令（dev server / 构建 / watcher）后台执行，
+	// 不阻塞对话；启动获 shell_id，轮询取输出（head_limit 截断），stop 终止。轮询只读自动放行。
+	r.Register(&Tool{
+		Name:        "BackgroundShell",
+		Description: "在后台执行长时运行 shell 命令（dev server、构建、watcher），不阻塞对话。用法：1) 启动：传 command(+args)+run_in_background=true，返回 shell_id 与初始输出；2) 轮询：传 shell_id（action=poll 或默认），取最新输出（最后 head_limit 行）与状态 running/done；3) 停止：传 shell_id+action=stop 终止进程。command 与 Shell 同格式（command 主命令、args 参数数组；支持管道/重定向/链式）。head_limit 截断防 context 爆；timeout 秒数限最大运行时长（0=不限）。",
+		ServerSide:  true,
+		ReadOnly:    false,
+		Driver:      string(model.ToolDriverBuiltin),
+		Manifest: &model.ToolManifest{
+			ID:          "com.eleball.tools.background_shell",
+			Name:        "后台 Shell",
+			Description: "后台执行长时 shell 命令并轮询输出。",
+			Driver:      model.ToolDriverBuiltin,
+			Category:    "系统",
+			Level:       2,
+			Permissions: []model.ToolPermission{model.ToolPermissionFileTools, model.ToolPermissionShell},
+			Actions:     []model.ToolAction{{Name: "shell", Description: "后台执行/轮询/停止 shell", Params: map[string]string{"command": "command", "args": "args", "run_in_background": "run_in_background", "shell_id": "shell_id", "action": "action", "head_limit": "head_limit", "timeout": "timeout"}}},
+		},
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"command": map[string]interface{}{
+					"type":        "string",
+					"description": "主命令（启动时必填，单个词不含空格；轮询/停止时留空）。如 npm、make、python",
+				},
+				"args": map[string]interface{}{
+					"type":        "array",
+					"items":       map[string]interface{}{"type": "string"},
+					"description": "命令参数数组（启动时）；组合命令可整体放入 command",
+				},
+				"run_in_background": map[string]interface{}{
+					"type":        "boolean",
+					"description": "true=后台启动（默认）；提供 shell_id 时忽略",
+				},
+				"shell_id": map[string]interface{}{
+					"type":        "string",
+					"description": "已启动的后台 shell ID，用于轮询或停止",
+				},
+				"action": map[string]interface{}{
+					"type":        "string",
+					"enum":        []string{"poll", "stop"},
+					"description": "对 shell_id 的操作：poll=取最新输出（默认），stop=终止进程",
+				},
+				"head_limit": map[string]interface{}{
+					"type":        "integer",
+					"description": "返回输出行数上限（轮询取最后 N 行），超出置 truncated=true；默认 2000",
+				},
+				"timeout": map[string]interface{}{
+					"type":        "integer",
+					"description": "后台进程最大运行秒数，0=不限（仅靠 stop 终止）",
+				},
+			},
+			"required": []string{"command"},
+		},
+		Func: r.toolBackgroundShell,
 	})
 
 	r.Register(&Tool{
@@ -638,7 +816,7 @@ func extractTitle(html string) string {
 	return ""
 }
 
-// toolReadFile 读文件工具
+// toolReadFile 读文件工具（AR-E7 强化：offset/limit 分页 + 图片/PDF/Jupyter/二进制识别）
 func (r *ToolRegistry) toolReadFile(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
 	path, _ := input["path"].(string)
 	absPath, err := env.ResolveFilePath(path)
@@ -649,11 +827,82 @@ func (r *ToolRegistry) toolReadFile(ctx context.Context, input map[string]interf
 	if err != nil {
 		return nil, err
 	}
-	return map[string]interface{}{
+
+	offset := parseHeadLimit(input["offset"], 0)
+	limit := parseHeadLimit(input["limit"], defaultReadLimit)
+	if limit > maxReadLimit {
+		limit = maxReadLimit
+	}
+
+	res := map[string]interface{}{
 		"path":     path,
 		"abs_path": absPath,
-		"content":  string(data),
-	}, nil
+	}
+
+	switch classifyFile(absPath, data) {
+	case kindImage:
+		w, h, format, _ := imageInfo(data)
+		mime := "image/png"
+		if format != "" {
+			mime = "image/" + format
+		}
+		res["kind"] = kindImage.kindString()
+		res["mime"] = mime
+		res["width"] = w
+		res["height"] = h
+		res["size"] = len(data)
+		if resourceID, rerr := env.SaveOutput(filepath.Base(absPath), mime, absPath, int64(len(data))); rerr == nil {
+			res["resource_id"] = resourceID
+			res["download_url"] = fmt.Sprintf("/v1/agent/resources/%s", resourceID)
+		} else {
+			res["note"] = "图片文件，已读取元信息（宽高/大小）；当前环境未配置资源登记，未生成下载链接。"
+		}
+		// 图片非文本可编辑，不建 read-before-edit 快照
+		return res, nil
+
+	case kindPDF:
+		res["kind"] = kindPDF.kindString()
+		res["size"] = len(data)
+		res["pages"] = estimatePDFPages(data)
+		if resourceID, rerr := env.SaveOutput(filepath.Base(absPath), "application/pdf", absPath, int64(len(data))); rerr == nil {
+			res["resource_id"] = resourceID
+			res["download_url"] = fmt.Sprintf("/v1/agent/resources/%s", resourceID)
+		}
+		res["note"] = "PDF 文件：已登记为可下载资源。pages 为估算值（压缩 PDF 可能不准）；如需文本请用 OCR 或专用工具。"
+		return res, nil
+
+	case kindJupyter:
+		text, cellCount, _ := renderJupyter(data)
+		env.markFileRead(absPath, string(data)) // 存原始 JSON 全文供 read-before-edit
+		page, total, returned, more := paginateText(text, offset, limit)
+		res["kind"] = kindJupyter.kindString()
+		res["cell_count"] = cellCount
+		res["content"] = page
+		res["total_lines"] = total
+		res["returned_lines"] = returned
+		res["offset"] = offset
+		res["limit"] = limit
+		res["more_available"] = more
+		return res, nil
+
+	case kindBinary:
+		res["kind"] = kindBinary.kindString()
+		res["size"] = len(data)
+		res["note"] = "二进制文件，无法以文本形式读取。可用 OCR（图片）或专用工具处理。"
+		return res, nil
+
+	default: // kindText
+		env.markFileRead(absPath, string(data)) // 存原始全文供 read-before-edit / stale 校验
+		content := string(data)
+		page, total, returned, more := paginateText(content, offset, limit)
+		res["content"] = page
+		res["total_lines"] = total
+		res["returned_lines"] = returned
+		res["offset"] = offset
+		res["limit"] = limit
+		res["more_available"] = more
+		return res, nil
+	}
 }
 
 // toolWriteFile 写文件工具
@@ -675,6 +924,8 @@ func (r *ToolRegistry) toolWriteFile(ctx context.Context, input map[string]inter
 	if err := env.Sandbox.WriteFile(absPath, []byte(content)); err != nil {
 		return nil, err
 	}
+	// AR-E5：写入即确立已知内容快照，使同循环内后续 StrReplaceFile 通过 read-before-edit / stale 校验。
+	env.markFileRead(absPath, content)
 	// AR-06 写审计：追加 unified diff 到 session metadata.json（失败不阻断）
 	_ = env.Sandbox.AppendWriteAudit(env.UserID, env.SessionID, "WriteFile", path, oldContent, content)
 
@@ -705,29 +956,64 @@ func (r *ToolRegistry) toolWriteFile(ctx context.Context, input map[string]inter
 	}, nil
 }
 
-// toolStrReplaceFile 修改文件工具
+// toolStrReplaceFile 修改文件工具（AR-E5 强化：read-before-edit / 唯一匹配 / replace_all / stale 校验）
 func (r *ToolRegistry) toolStrReplaceFile(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
 	path, _ := input["path"].(string)
 	oldString, _ := input["old_string"].(string)
 	newString, _ := input["new_string"].(string)
+	replaceAll, _ := input["replace_all"].(bool)
 	if oldString == "" {
 		return nil, errors.New("old_string 不能为空")
+	}
+	if path == "" {
+		return nil, errors.New("path 不能为空")
 	}
 
 	absPath, err := env.ResolveFilePath(path)
 	if err != nil {
 		return nil, err
 	}
+
+	// AR-E5：read-before-edit 强制。本 execute 循环内未 ReadFile/WriteFile 触及该文件则拒改，
+	// 防止模型基于想象/过时内容盲改。WriteFile 触及亦算（写入即确立已知内容）。
+	snapshot, read := env.fileReadSnapshot(absPath)
+	if !read {
+		return nil, fmt.Errorf("未读取该文件，拒绝修改：必须先调用 ReadFile 读取 %s 的最新内容后再编辑（read-before-edit）", path)
+	}
+
 	data, err := env.Sandbox.ReadFile(absPath)
 	if err != nil {
 		return nil, err
 	}
-	content := strings.ReplaceAll(string(data), oldString, newString)
-	if err := env.Sandbox.WriteFile(absPath, []byte(content)); err != nil {
+	content := string(data)
+
+	// AR-E5：stale 校验。磁盘内容自上次触及后若被外部改动则拒改，提示重读，避免覆盖外部改动。
+	if content != snapshot {
+		return nil, fmt.Errorf("文件内容自上次读取后已变更（stale），拒绝修改：请重新调用 ReadFile 读取 %s 的最新内容后再编辑", path)
+	}
+
+	// AR-E5：唯一匹配校验。未启用 replace_all 时 old_string 必须唯一匹配，多匹配报错不静默全替。
+	occurrences := strings.Count(content, oldString)
+	if occurrences == 0 {
+		return nil, fmt.Errorf("未找到匹配的 old_string（文件中不存在该内容）：请检查 old_string 是否与文件实际内容完全一致（含缩进与换行）；path=%s", path)
+	}
+	if occurrences > 1 && !replaceAll {
+		return nil, fmt.Errorf("old_string 在文件中匹配多处（共 %d 处），拒绝修改：请提供更长的上下文使其唯一匹配，或设置 replace_all=true 全部替换；path=%s", occurrences, path)
+	}
+
+	var newContent string
+	if replaceAll {
+		newContent = strings.ReplaceAll(content, oldString, newString)
+	} else {
+		newContent = strings.Replace(content, oldString, newString, 1)
+	}
+	if err := env.Sandbox.WriteFile(absPath, []byte(newContent)); err != nil {
 		return nil, err
 	}
+	// AR-E5：更新快照为编辑后内容，使同循环内后续编辑通过 stale 校验。
+	env.markFileRead(absPath, newContent)
 	// AR-06 写审计：追加 old->new unified diff 到 session metadata.json（失败不阻断）
-	_ = env.Sandbox.AppendWriteAudit(env.UserID, env.SessionID, "StrReplaceFile", path, string(data), content)
+	_ = env.Sandbox.AppendWriteAudit(env.UserID, env.SessionID, "StrReplaceFile", path, content, newContent)
 
 	fileName := filepath.Base(absPath)
 	mimeType := mime.TypeByExtension(filepath.Ext(absPath))
@@ -758,92 +1044,111 @@ func (r *ToolRegistry) toolStrReplaceFile(ctx context.Context, input map[string]
 	}, nil
 }
 
-// toolGrep 在沙箱内搜索文件内容
-// 仅允许访问当前用户 conversation/session 目录和公共知识库目录。
-// 实现为 Go 内置正则搜索（跨平台，不依赖外部 grep 命令，Windows 部署可用）。
-func (r *ToolRegistry) toolGrep(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
-	path, _ := input["path"].(string)
-	pattern, _ := input["pattern"].(string)
-	if path == "" {
-		return nil, errors.New("path 不能为空")
-	}
-	if pattern == "" {
-		return nil, errors.New("pattern 不能为空")
-	}
-
-	absPath, err := env.ResolveFilePath(path)
-	if err != nil {
-		return nil, err
-	}
-
-	// 安全检查：toolGrep 是纯 Go RE2 正则搜索（不经过 shell，pattern 只传入
-	// regexp.Compile 与 searchPattern 的 *regexp.Regexp），因此允许正则元字符
-	// （| ( ) $ ^ . * 等，如 "claw|Claw|CLAW" 或 "OpenClaw.*工具列表|25种Tools"）。
-	// 仅拒绝空字节这类无意义的注入指示符；语法合法性由下方 regexp.Compile 校验，
-	// RE2 保证线性时间，无 ReDoS 风险。
-	if strings.ContainsRune(pattern, 0) {
-		return nil, errors.New("pattern 包含非法字符: 空字节")
-	}
-
-	recursive := false
-	if rec, ok := input["recursive"].(bool); ok {
-		recursive = rec
-	}
-
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return nil, fmt.Errorf("正则表达式非法: %w", err)
-	}
-
-	matches, err := searchPattern(ctx, absPath, re, recursive, false)
-	if err != nil {
-		return nil, fmt.Errorf("grep 执行失败: %w", err)
-	}
-
-	// 与 GNU grep 输出习惯对齐：单文件输出 "行号:内容"，目录搜索输出 "路径:行号:内容"
-	singleFile := true
-	if info, statErr := os.Stat(absPath); statErr == nil && info.IsDir() {
-		singleFile = false
-	}
-	return map[string]interface{}{
-		"path":      path,
-		"abs_path":  absPath,
-		"pattern":   pattern,
-		"matches":   formatGrepMatches(matches, singleFile),
-		"truncated": len(matches) >= grepMaxMatches,
-	}, nil
-}
-
-// toolShell 受限 shell 工具
+// toolShell 受限 shell 工具（AR-E6：流式 + head_limit 截断 + 回带 exit_code）。
+// 非零退出仍返回 result（含 output/exit_code/error）+ nil error，让模型看到输出与退出码以诊断；
+// 仅启动级错误（非 ExitError）返回 err。危险黑名单由审批闸前置（agent_tool_loop isShellLikeTool）拦截。
 func (r *ToolRegistry) toolShell(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
 	command, _ := input["command"].(string)
 	if command == "" {
 		return nil, errors.New("command 不能为空")
 	}
-	if err := shellSafe(command); err != nil {
-		return nil, fmt.Errorf("%w。%s", err, shellUsageHint)
-	}
-
+	// D3 本地模型：不再做 cloud 式 shellSafe 元字符拒斥；危险操作黑名单与权限确认
+	// 由 runner.ShellStream（prepareShell）+ PermissionService 负责。args 按字面量传递，含特殊字符自动转义。
 	var args []string
 	if rawArgs, ok := input["args"].([]interface{}); ok {
 		for _, a := range rawArgs {
 			if s, ok := a.(string); ok {
-				if err := shellSafe(s); err != nil {
-					return nil, fmt.Errorf("参数包含非法字符: %w。%s", err, shellUsageHint)
-				}
 				args = append(args, s)
 			}
 		}
 	}
+	headLimit := parseHeadLimit(input["head_limit"], defaultShellHeadLimit)
 
-	output, err := r.runner.Shell(ctx, command, args, env.Cwd)
+	output, truncated, exitCode, err := r.runner.ShellStream(ctx, command, args, env.Cwd, headLimit)
+	result := map[string]interface{}{
+		"command":   command,
+		"args":      args,
+		"output":    output,
+		"truncated": truncated,
+		"exit_code": exitCode,
+	}
+	if err != nil {
+		result["error"] = err.Error()
+		// 非零退出（ExitError）返回 result + nil，让模型看到输出与退出码；
+		// 其他错误（启动失败等）返回 result + err。
+		if isExitError(err) {
+			return result, nil
+		}
+		return result, err
+	}
+	return result, nil
+}
+
+// toolBackgroundShell 后台 shell 工具（AR-E6）。
+// 启动（command+run_in_background）：后台执行长任务，返回 shell_id；不阻塞对话。
+// 轮询（shell_id+action=poll/默认）：取最新输出（最后 head_limit 行）与状态；只读自动放行。
+// 停止（shell_id+action=stop）：经 ctx cancel 终止进程。
+func (r *ToolRegistry) toolBackgroundShell(ctx context.Context, input map[string]interface{}, env *ToolEnv) (map[string]interface{}, error) {
+	// 轮询 / 停止已存在的后台 shell
+	if sid, _ := input["shell_id"].(string); sid != "" {
+		headLimit := parseHeadLimit(input["head_limit"], defaultShellHeadLimit)
+		action, _ := input["action"].(string)
+		if action == "stop" {
+			status, exitCode, err := r.bgShells.stop(sid)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{
+				"shell_id":  sid,
+				"status":    status,
+				"exit_code": exitCode,
+			}, nil
+		}
+		// 默认 poll
+		output, truncated, status, exitCode, err := r.bgShells.poll(sid, headLimit)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{
+			"shell_id":  sid,
+			"status":    status,
+			"output":    output,
+			"truncated": truncated,
+			"exit_code": exitCode,
+		}, nil
+	}
+
+	// 启动新后台 shell
+	command, _ := input["command"].(string)
+	if command == "" {
+		return nil, errors.New("command 不能为空（或提供 shell_id 轮询/停止已有后台 shell）")
+	}
+	var args []string
+	if rawArgs, ok := input["args"].([]interface{}); ok {
+		for _, a := range rawArgs {
+			if s, ok := a.(string); ok {
+				args = append(args, s)
+			}
+		}
+	}
+	timeout := 0
+	if t, ok := input["timeout"].(float64); ok && t > 0 {
+		timeout = int(t)
+	}
+	sid, err := r.bgShells.start(command, args, env.Cwd, timeout)
 	if err != nil {
 		return nil, err
 	}
+	// 短暂等待以捕获即时启动失败（如命令不存在），不阻塞长任务；随后返回实际状态与已产出输出。
+	time.Sleep(150 * time.Millisecond)
+	output, truncated, status, exitCode, _ := r.bgShells.poll(sid, defaultShellHeadLimit)
 	return map[string]interface{}{
-		"command": command,
-		"args":    args,
-		"output":  output,
+		"shell_id":  sid,
+		"status":    status,
+		"output":    output,
+		"truncated": truncated,
+		"exit_code": exitCode,
+		"started":   true,
 	}, nil
 }
 

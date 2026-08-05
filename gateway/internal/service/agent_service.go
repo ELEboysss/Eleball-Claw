@@ -52,6 +52,9 @@ type AgentService struct {
 	approvals *approvalRegistry
 	// C1：权限决策引擎（规则解析 + always-allow 持久化）。nil 时审批闸跳过规则直接 ask/allow。
 	permissionSvc *PermissionService
+	// E2：新会话默认权限模式（claw.yaml permission.mode 注入，默认 default）。
+	// 会话已持久化模式时以会话为准；请求显式覆盖时以请求为准。
+	defaultPermissionMode model.PermissionMode
 	// C2：生命周期钩子服务（PreToolUse/PostToolUse/Stop/PreCompact）。nil 时跳过钩子。
 	hookSvc *HookService
 	// C3：plan 文件目录（claw 装配 basePath/plans）。空则 ExitPlanMode 不落 plan 文件，仅传内容。
@@ -118,6 +121,12 @@ func NewAgentService(
 // SetPermissionService 装配权限决策引擎（C1）。claw 启用时注入；云端不注入（审批闸跳过）。
 func (s *AgentService) SetPermissionService(svc *PermissionService) {
 	s.permissionSvc = svc
+}
+
+// SetDefaultPermissionMode E2：设置新会话默认权限模式（claw.yaml permission.mode）。
+// 非法值经 NormalizePermissionMode 回落 default；未调用时 defaultPermissionMode 为空，Execute 亦回落 default。
+func (s *AgentService) SetDefaultPermissionMode(mode string) {
+	s.defaultPermissionMode = model.NormalizePermissionMode(mode)
 }
 
 // SetPlansDir C3：设置 plan 文件目录（claw 装配 basePath/plans）。空则 ExitPlanMode 不落盘。
@@ -362,8 +371,12 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	if req.SearchProvider != nil && *req.SearchProvider != "" {
 		searchProvider = *req.SearchProvider
 	}
-	// C1：权限模式解析（会话默认 + 请求覆盖），注入 env 供工具循环审批闸消费
-	permissionMode := model.NormalizePermissionMode(conv.PermissionMode)
+	// C1：权限模式解析（配置默认 < 会话持久化 < 请求覆盖），注入 env 供工具循环审批闸消费。
+	// E2：新会话（conv.PermissionMode 空）用 claw.yaml permission.mode 配置默认值。
+	permissionMode := model.NormalizePermissionMode(string(s.defaultPermissionMode))
+	if conv.PermissionMode != "" {
+		permissionMode = model.NormalizePermissionMode(conv.PermissionMode)
+	}
 	if req.PermissionMode != nil && *req.PermissionMode != "" {
 		permissionMode = model.NormalizePermissionMode(*req.PermissionMode)
 	}
@@ -909,6 +922,32 @@ func (s *AgentService) ensureSessionQuota(ctx context.Context, userID string) er
 	return nil
 }
 
+// projectBuildHints 按工作目录的项目类型（go.mod/package.json/Cargo.toml/build.gradle）
+// 返回可用构建命令提示，注入 system prompt 供 LLM 参考（E3）。无识别文件时返回空。
+// 仅提示可用命令；构建/写操作仍经权限确认。
+func projectBuildHints(cwd string) string {
+	sep := string(os.PathSeparator)
+	hints := ""
+	if _, err := os.Stat(cwd+sep+"go.mod"); err == nil {
+		hints += "\n- Go 项目：go test ./...、go build ./...、go vet ./..."
+	}
+	if _, err := os.Stat(cwd+sep+"package.json"); err == nil {
+		hints += "\n- Node 项目：npm test、npm run build、npm run dev"
+	}
+	if _, err := os.Stat(cwd+sep+"Cargo.toml"); err == nil {
+		hints += "\n- Rust 项目：cargo build、cargo test"
+	}
+	if _, err := os.Stat(cwd+sep+"build.gradle"); err == nil {
+		hints += "\n- Gradle 项目：./gradlew assembleDebug、./gradlew test"
+	} else if _, err := os.Stat(cwd+sep+"build.gradle.kts"); err == nil {
+		hints += "\n- Gradle 项目：./gradlew assembleDebug、./gradlew test"
+	}
+	if hints == "" {
+		return ""
+	}
+	return "项目类型检测（构建/写操作需经权限确认）：" + hints
+}
+
 // buildInitialMessages 构建初始消息列表，同时返回与消息数组平行的数据库 ID 列表。
 // Agent Team P2：teamID 非空且 teamMemorySvc 已装配时，检索组共享记忆并把
 // 「组共享记忆」区块拼入 system 消息内容尾部（不新增消息，避免弱模型角色混乱）；
@@ -952,6 +991,9 @@ func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecut
 	if resolvedCwd != "" {
 		systemContent += "\n\n当前工作目录：" + resolvedCwd +
 			"\n文件工具（ReadFile/WriteFile/StrReplaceFile/Grep/OCR）的 path 参数请使用相对于此目录的路径，也可使用绝对路径。"
+		if hints := projectBuildHints(resolvedCwd); hints != "" {
+			systemContent += "\n" + hints
+		}
 	}
 	// C3 plan 模式：指示只读研究 + 调 ExitPlanMode 提交 plan，禁止直接改文件（写工具已被权限闸拦截，
 	// 此处再次明示避免模型反复尝试写操作浪费轮次）。

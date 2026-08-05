@@ -34,6 +34,13 @@ func (m *mockRunner) Shell(ctx context.Context, command string, args []string, c
 	return m.shellOutput, m.shellErr
 }
 
+// ShellStream AR-E6：mock 流式接口，直接回 shellOutput/exit 0，忽略 headLimit 截断。
+func (m *mockRunner) ShellStream(ctx context.Context, command string, args []string, cwd string, headLimit int) (string, bool, int, error) {
+	m.lastShellCmd = command
+	m.lastShellArgs = args
+	return m.shellOutput, false, 0, m.shellErr
+}
+
 // mockSearchProvider 搜索提供者桩
 type mockSearchProvider struct {
 	result map[string]interface{}
@@ -116,7 +123,7 @@ func TestToolRegistry_StrReplaceFile(t *testing.T) {
 	}
 }
 
-func TestToolRegistry_ShellSafety(t *testing.T) {
+func TestToolRegistry_ShellPassthrough(t *testing.T) {
 	base := t.TempDir()
 	sandbox := NewFileSandbox(base, "")
 	runner := &mockRunner{shellOutput: "ok"}
@@ -125,17 +132,8 @@ func TestToolRegistry_ShellSafety(t *testing.T) {
 	env := &ToolEnv{UserID: "u1", ConversationID: "c1", Sandbox: sandbox}
 
 	shellTool, _ := registry.Get("Shell")
-	_, err := shellTool.Func(context.Background(), map[string]interface{}{
-		"command": "ls",
-		"args":    []interface{}{"-la", "; rm -rf /"},
-	}, env)
-	if err == nil {
-		t.Fatal("Shell 应拦截危险参数")
-	}
-	if !strings.Contains(err.Error(), "非法字符") {
-		t.Fatalf("错误提示不对: %v", err)
-	}
-
+	// D3 本地模型：toolShell 不再做 shellSafe 元字符拒斥，命令原样透传给 runner；
+	// 危险操作由 runner 黑名单 + PermissionService 负责（见 TestShell_DangerousBlocked）。
 	out, err := shellTool.Func(context.Background(), map[string]interface{}{
 		"command": "echo",
 		"args":    []interface{}{"hello"},
@@ -349,8 +347,8 @@ func TestToolRegistry_ListAvailable_RespectsVIP(t *testing.T) {
 	registry := NewToolRegistry()
 	registry.RegisterBuiltinSearchWeb()
 	all := registry.List()
-	if len(all) != 9 {
-		t.Fatalf("默认工具数量应为 9，实际 %d", len(all))
+	if len(all) != 11 {
+		t.Fatalf("默认工具数量应为 11，实际 %d", len(all))
 	}
 	free := registry.ListAvailable(false)
 	if len(free) != 2 {
@@ -364,28 +362,8 @@ func TestToolRegistry_ListAvailable_RespectsVIP(t *testing.T) {
 		t.Fatalf("非 VIP 用户应看到 SearchWeb 和 FetchURL，实际 %v", freeNames)
 	}
 	vip := registry.ListAvailable(true)
-	if len(vip) != 9 {
-		t.Fatalf("VIP 用户应看到 9 个工具，实际 %d", len(vip))
-	}
-}
-
-func TestShellSafe_DangerousChars(t *testing.T) {
-	cases := []string{
-		"ls; rm -rf /",
-		"cat /etc/passwd | grep root",
-		"echo $(whoami)",
-		"echo `date`",
-		"ls && pwd",
-		"cmd < file",
-		"cmd > file",
-	}
-	for _, c := range cases {
-		if err := shellSafe(c); err == nil {
-			t.Fatalf("应拦截危险命令: %s", c)
-		}
-	}
-	if err := shellSafe("ls"); err != nil {
-		t.Fatalf("普通命令不应拦截: %v", err)
+	if len(vip) != 11 {
+		t.Fatalf("VIP 用户应看到 11 个工具，实际 %d", len(vip))
 	}
 }
 

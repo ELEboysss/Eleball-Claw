@@ -21,6 +21,7 @@ export default function Modules() {
   const [drivers, setDrivers] = useState([])
   const [cloudInstalled, setCloudInstalled] = useState([]) // P4：云端已购可安装模块
   const [installing, setInstalling] = useState(null) // P4：安装中 module_id
+  const [starting, setStarting] = useState(null) // 「启动服务」中的 module_id
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [activeTab, setActiveTab] = useState('modules')
@@ -174,6 +175,24 @@ export default function Modules() {
     }
   }
 
+  // 拉起模块（process 同步 / docker 异步），「本地模块」页「启动服务」按钮调用。
+  // 未激活模块不会自动启动，需先到集市激活；此处仅对已注册模块按部署方式拉起。
+  const handleStartModule = async (id) => {
+    setStarting(id)
+    setError('')
+    try {
+      await moduleApi.startModule(id)
+      setError(`模块 ${id} 启动指令已发送`)
+      // process 同步起、docker 异步起（pull/compose 耗时）；分两次刷新覆盖两种情况。
+      setTimeout(() => fetchData(), 500)
+      setTimeout(() => fetchData(), 3000)
+    } catch (err) {
+      setError(err?.message || err || '启动失败')
+    } finally {
+      setStarting(null)
+    }
+  }
+
   const handleRescanMarketplace = async () => {
     if (!window.confirm('确定重新扫描 marketplace/ 目录？这会自动补齐新增的官方内置模块与驱动别名。')) return
     setLoading(true)
@@ -268,7 +287,7 @@ export default function Modules() {
 
           <div className="bg-white rounded-2xl border border-eleball-outline overflow-hidden">
             <table className="w-full text-sm">
-              <thead className="bg-gray-50">
+              <thead className="bg-eleball-surface-variant">
                 <tr>
                   <th className="text-left px-4 py-3 font-medium">模块 ID</th>
                   <th className="text-left px-4 py-3 font-medium">名称</th>
@@ -287,15 +306,39 @@ export default function Modules() {
                     <td className="px-4 py-3">{m.transport_type}</td>
                     <td className="px-4 py-3">
                       <span className={`px-2 py-1 rounded-lg text-xs font-medium ${m.status === 'online' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
-                        {m.status}
+                        {m.status === 'online' ? '在线' : '离线'}
                       </span>
-                      {m.error && (
-                        <span className="ml-2 text-xs text-red-500 cursor-help" title={m.error}>!</span>
+                      {m.status !== 'online' && (
+                        <div className="mt-1 text-[11px] leading-snug max-w-[180px]">
+                          <div>
+                            {!m.activated ? (
+                              <span className="text-amber-600">未激活</span>
+                            ) : m.error ? (
+                              <span className="text-red-500 cursor-help" title={m.error}>探活失败</span>
+                            ) : (
+                              <span className="text-eleball-text-tertiary">未运行</span>
+                            )}
+                          </div>
+                          {m.required_env && (
+                            <div className="text-eleball-text-tertiary">
+                              需{m.required_env === 'docker' ? 'Docker' : m.required_env === 'node' ? 'Node' : 'Python'}环境
+                            </div>
+                          )}
+                        </div>
                       )}
                     </td>
                     <td className="px-4 py-3">{m.version || '-'}</td>
                     <td className="px-4 py-3">{formatTime(m.last_heartbeat)}</td>
                     <td className="px-4 py-3 space-x-2">
+                      {m.status !== 'online' && m.required_env && (
+                        <button
+                          onClick={() => handleStartModule(m.module_id)}
+                          disabled={starting === m.module_id}
+                          className="text-emerald-600 hover:underline disabled:opacity-50"
+                        >
+                          {starting === m.module_id ? '启动中…' : '启动服务'}
+                        </button>
+                      )}
                       <button onClick={() => handleRefreshModule(m.module_id)} className="text-eleball-primary hover:underline">刷新</button>
                       <button onClick={() => handleSubmitReview(m)} className="text-blue-600 hover:underline">提交审核</button>
                       <button onClick={() => handleDeleteModule(m.module_id)} className="text-red-600 hover:underline">注销</button>
@@ -336,7 +379,7 @@ export default function Modules() {
 
           <div className="bg-white rounded-2xl border border-eleball-outline overflow-hidden">
             <table className="w-full text-sm">
-              <thead className="bg-gray-50">
+              <thead className="bg-eleball-surface-variant">
                 <tr>
                   <th className="text-left px-4 py-3 font-medium">驱动 ID</th>
                   <th className="text-left px-4 py-3 font-medium">名称</th>
@@ -370,14 +413,14 @@ export default function Modules() {
 
       {activeTab === 'cloud' && (
         <div className="bg-white rounded-2xl border border-eleball-outline overflow-hidden">
-          <div className="px-4 py-3 border-b border-eleball-outline bg-gray-50">
+          <div className="px-4 py-3 border-b border-eleball-outline bg-eleball-surface-variant">
             <h2 className="font-semibold text-sm">云端已购秘技</h2>
             <p className="text-xs text-eleball-text-secondary mt-1">
               从云端拉取已购模块，点「安装到本地」激活。官方模块直接激活，第三方模块拉取容器镜像并校验签名（需 Docker/Podman + cosign）。
             </p>
           </div>
           <table className="w-full text-sm">
-            <thead className="bg-gray-50">
+            <thead className="bg-eleball-surface-variant">
               <tr>
                 <th className="text-left px-4 py-3 font-medium">模块</th>
                 <th className="text-left px-4 py-3 font-medium">版本</th>

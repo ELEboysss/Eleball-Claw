@@ -298,6 +298,17 @@ func main() {
 	moduleService.SetDriverRepo(driverRepo)
 	// F1 收尾：skill-maker AI 起草 main.py 注入对话服务（能力描述 -> 对话模型生成 stdio MCP 脚本）
 	moduleService.SetChatProxyService(chatService)
+	// 控制台「启动服务」按钮拉起 docker 模块：注入 docker compose up 回调（逻辑在本 cmd 内）。
+	moduleService.SetDockerStarter(func(moduleID string) error {
+		root, err := service.EnsureMarketplaceRoot()
+		if err != nil || root == "" {
+			return fmt.Errorf("无法确定 marketplace 目录: %v", err)
+		}
+		absRoot, _ := filepath.Abs(root)
+		ctx, cancel := context.WithTimeout(context.Background(), moduleUpTimeout)
+		defer cancel()
+		return startModule(ctx, logger, absRoot, moduleID, cfg.Modules, normalizePullPolicy(cfg.Modules.PullPolicy))
+	})
 
 	// 扫描 marketplace/ 预置官方模块（search-web 等）
 	if err := seed.AutoEnsureMarketplaceModules(moduleService, logger); err != nil {
@@ -307,11 +318,6 @@ func main() {
 	// 泛化同步本地官方 SKU（module.json sku_scope=claw，如 search-web 免费搜索两变体）
 	if err := seed.SyncOfficialSKUs(agentRepo, "claw", logger); err != nil {
 		logger.Warn("同步本地官方 SKU 失败", zap.Error(err))
-	}
-
-	// 预置官方 Prompt 型秘技「秘技制造机」（免费、免 VIP；激活并绑定助手后注入造模块方法论）
-	if err := seed.SkillMakerSKU(agentRepo, logger); err != nil {
-		logger.Warn("预置秘技制造机失败", zap.Error(err))
 	}
 
 	// 启动 SkillRuntime 后台健康探测（每 5 分钟一次）
@@ -406,6 +412,8 @@ func main() {
 	// C1：装配权限决策引擎（always-allow 规则持久化到 {basePath}/permissions.json）
 	permissionSvc := service.NewPermissionService(filepath.Join(cfg.Agent.BasePath, "permissions.json"))
 	agentWorkflowService.SetPermissionService(permissionSvc)
+	// E2：注入新会话默认权限模式（claw.yaml permission.mode，默认 default）
+	agentWorkflowService.SetDefaultPermissionMode(cfg.Permission.Mode)
 	// C2：装配生命周期钩子服务（hooks.json 与 claw.yaml 同目录，热重载；不存在则空配置）
 	hookPath := filepath.Join(filepath.Dir(configPath), "hooks.json")
 	hookSvc, _ := service.NewHookService(hookPath, logger)
@@ -544,18 +552,28 @@ func main() {
 
 	// 启动后自动打开浏览器访问本地控制台（双击 exe / 手动部署均生效）。
 	// CLAW_NO_BROWSER=1 可关闭；Linux 无桌面环境（无 DISPLAY）时自动跳过。
-	openBrowserDelayed(fmt.Sprintf("http://localhost:%d", cfg.Server.Port), logger)
+	// 托盘模式（Windows GUI）下不自动开浏览器--纯后台，用户经托盘菜单「对话」进入。
+	trayOn := trayEnabled()
+	if !trayOn {
+		openBrowserDelayed(fmt.Sprintf("http://localhost:%d", cfg.Server.Port), logger)
+	}
 
 	// 预置模块自动上线：后台执行（拉镜像优先、本地构建兜底，不阻塞网关启动）；
 	// 成功启动的模块名经 channel 回传，供退出时自动下线。
 	startedCh := make(chan []string, 1)
 	sigCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
+	// 托盘退出 / Ctrl+C 均经此 cancelable ctx 触发优雅关闭：
+	// 托盘 onExit 调 cancel()；Ctrl+C 经 sigCtx 取消向下游传播到 ctx。
+	ctx, cancel := context.WithCancel(sigCtx)
+	defer cancel()
 	if cfg.Modules.AutoStart {
 		go func() {
-			startedCh <- autoStartModules(sigCtx, logger, cfg.Modules, skillRuntimeRegistry)
+			// 激活门控：仅自动上线已被购买（激活）的模块；未激活模块到控制台手动启动。
+			activated := moduleService.ActivatedModuleIDs()
+			startedCh <- autoStartModules(ctx, logger, cfg.Modules, skillRuntimeRegistry, activated)
 			// 同时启动 process 部署运行时（stdio MCP 等，无 docker 依赖；退出时由 manager.StopAll 统一停止）
-			autoStartProcessRuntimes(sigCtx, logger, skillRuntimeRepo, skillRuntimeManager)
+			autoStartProcessRuntimes(ctx, logger, skillRuntimeRepo, skillRuntimeManager, activated)
 		}()
 	} else {
 		startedCh <- nil
@@ -571,12 +589,21 @@ func main() {
 	// 终端提示（双行：英文行兜底 GBK 控制台乱码场景，中文行为用户主提示）。
 	// 走 fmt 而非 zap logger：保持纯文本输出，不混进 JSON 日志流。
 	fmt.Println()
-	fmt.Printf("Eleball-claw is running at http://localhost:%d — press Ctrl+C or close this terminal to stop the service.\n", cfg.Server.Port)
-	fmt.Println("Ctrl+C 或关闭该终端后服务将会停止。")
+	if trayOn {
+		fmt.Printf("Eleball-claw 已启动并最小化到系统托盘（http://localhost:%d）。\n", cfg.Server.Port)
+		fmt.Println("左键托盘图标显示/隐藏终端；右键打开菜单（对话 / 控制台 / 退出）。")
+	} else {
+		fmt.Printf("Eleball-claw is running at http://localhost:%d — press Ctrl+C or close this terminal to stop the service.\n", cfg.Server.Port)
+		fmt.Println("Ctrl+C 或关闭该终端后服务将会停止。")
+	}
 	fmt.Println()
 
 	// 阻塞等待退出信号（Ctrl+C / SIGTERM），然后优雅关闭
-	<-sigCtx.Done()
+	// 托盘模式：runTray 占主线程阻塞至 systray.Quit（用户点「退出」或 Ctrl+C），
+	// 其 onExit 调 cancel() 使下方 <-ctx.Done() 立即返回，进入同一优雅关闭流程；
+	// 非托盘模式 runTray 立即返回，直接在 <-ctx.Done() 阻塞等信号。
+	runTray(ctx, cancel, cfg.Server.Port, logger)
+	<-ctx.Done()
 	logger.Info("收到退出信号，开始优雅关闭")
 
 	// 预置模块自动下线：仅清理本网关成功启动的模块（等自动上线流程收尾，最多 30s）

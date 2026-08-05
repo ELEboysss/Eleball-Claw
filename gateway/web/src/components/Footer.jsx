@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom'
+import { CLOUD_BASE } from '../api/client'
 
 export default function Footer() {
   const currentYear = new Date().getFullYear()
@@ -13,7 +14,7 @@ export default function Footer() {
           </div>
 
           <div className="flex items-center gap-6 text-sm text-eleball-text-secondary">
-            <Link to="/" className="hover:text-eleball-primary transition-colors">官网</Link>
+            <a href={CLOUD_BASE} target="_blank" rel="noopener noreferrer" className="hover:text-eleball-primary transition-colors">官网</a>
             <Link to="/chat" className="hover:text-eleball-primary transition-colors">对话</Link>
             <Link to="/claw-guide" className="hover:text-eleball-primary transition-colors">Claw 指南</Link>
           </div>

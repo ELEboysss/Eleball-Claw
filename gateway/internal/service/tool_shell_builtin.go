@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"regexp"
@@ -509,6 +510,17 @@ func builtinGrep(ctx context.Context, args []string) (string, bool, error) {
 	if len(paths) == 0 {
 		paths = []string{"."}
 	}
+
+	// T-PR-E4：优先 ripgrep 做内容搜索（大仓更快更全）；-c/-l 与 rg 不可用/出错时走纯 Go。
+	// 传给 rg 的是原始 pattern（未加 (?i) 前缀），大小写由 -i 选项控制。
+	if !countOnly && !filesOnly {
+		if rg := findExecutable("rg"); rg != "" {
+			if out, ok, err := grepViaRipgrep(ctx, rg, recursive, ignoreCase, invertMatch, pattern, paths); ok {
+				return out, true, err
+			}
+		}
+	}
+
 	if ignoreCase {
 		pattern = "(?i)" + pattern
 	}
@@ -564,6 +576,37 @@ func builtinGrep(ctx context.Context, args []string) (string, bool, error) {
 		lines := formatGrepMatches(all, singleFile)
 		return strings.Join(lines, "\n") + trailingNewline(lines), true, nil
 	}
+}
+
+// grepViaRipgrep 用系统 rg 执行 shell grep 的内容搜索（-n/-i/-v，递归默认）。
+// 返回 (output, handled, err)：handled=true 表示 rg 已处理（含无匹配返回空串）；
+// handled=false 表示 rg 出错（如坏正则），调用方回退纯 Go 实现。
+func grepViaRipgrep(ctx context.Context, rg string, recursive, ignoreCase, invertMatch bool, pattern string, paths []string) (string, bool, error) {
+	var args []string
+	args = append(args, "--line-number")
+	if ignoreCase {
+		args = append(args, "-i")
+	}
+	if invertMatch {
+		args = append(args, "-v")
+	}
+	// rg 默认递归搜索目录；单文件只搜该文件，与 grep -r 语义一致，无需额外标志。
+	args = append(args, "-e", pattern)
+	args = append(args, paths...)
+
+	cmd := exec.CommandContext(ctx, rg, args...)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &bytes.Buffer{}
+	err := cmd.Run()
+	if err != nil {
+		// rg 退出码 1 = 无匹配（grep 惯例，非错误）；退出码 2 = 真错误，回退纯 Go。
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return "", true, nil
+		}
+		return "", false, nil
+	}
+	return stdout.String(), true, nil
 }
 
 func trailingNewline(lines []string) string {

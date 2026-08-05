@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import useSEO from '../hooks/useSEO'
-import { Loader2, Plus, Trash2, FolderOpen, Wand2, Play, PackagePlus, CheckCircle2, Wrench, Sparkles, Terminal, DownloadCloud } from 'lucide-react'
+import { Loader2, Plus, Trash2, FolderOpen, Play, PackagePlus, CheckCircle2, Wrench, Sparkles, Terminal } from 'lucide-react'
 import { moduleGeneratorApi, modelApi } from '../api/client'
 import DirectoryPicker from '../components/DirectoryPicker'
 import InterpreterMissingBanner from '../components/InterpreterMissingBanner'
@@ -92,7 +92,7 @@ function defaultArgsFromSchema(schema) {
 }
 
 export default function ModuleGenerator() {
-  useSEO('造秘技', '引导式生成本地 stdio MCP 秘技模块：编写脚本 -> 探测工具 -> 一键上架。')
+  // 嵌入 DDIY 工作室（Studio）内容区，页头/SEO 由 Studio 统一负责。
 
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -278,19 +278,7 @@ export default function ModuleGenerator() {
   }
 
   return (
-    <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-eleball-text flex items-center gap-2">
-          <Wand2 className="w-6 h-6 text-eleball-primary" /> 造秘技
-        </h1>
-        <p className="text-sm text-eleball-text-secondary mt-1">
-          编写一个 stdio MCP 脚本，探测它暴露的工具，一键生成可在本地对话中调用的秘技模块。
-        </p>
-        <Link to="/mcp-install" className="inline-flex items-center gap-1 mt-2 text-xs font-medium text-eleball-primary hover:underline">
-          <DownloadCloud className="w-3.5 h-3.5" /> 已有现成 MCP server（如 npx server-filesystem）？直接安装
-        </Link>
-      </div>
-
+    <div>
       {/* 基本信息 */}
       <div className="card mb-4">
         <SectionTitle icon={PackagePlus} desc="模块展示名与描述，会写进 module.json 与派生的秘技。">

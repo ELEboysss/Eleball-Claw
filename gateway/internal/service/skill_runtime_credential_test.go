@@ -131,6 +131,8 @@ func TestRespawnByDriver_RestartsStdio(t *testing.T) {
 		Transport: model.SkillRuntimeTransportMCPStdio, Deployment: model.SkillRuntimeDeploymentProcess,
 		Command: "python", WorkDir: dir}
 	rt.SetArgs([]string{"main.py"})
+	// env 含 ${credentials.KEY} 模板 -> 凭证 spawn 时烤进 env -> 变更需 respawn 才生效
+	rt.SetEnv(map[string]string{"CRED": "${credentials.api_key}"})
 	require.NoError(t, reg.Register(rt))
 	require.NoError(t, mgr.Start(rt.ID))
 	defer mgr.Stop(rt.ID)
@@ -139,4 +141,51 @@ func TestRespawnByDriver_RestartsStdio(t *testing.T) {
 	// RespawnByDriver -> Stop + Start（注入凭证）-> 再次在线
 	require.NoError(t, mgr.RespawnByDriver("drv_echo_respawn", "u1"))
 	waitOnline(t, reg, rt.ID, 10*time.Second)
+}
+
+// TestRespawnByDriver_SkipsWithoutEnvTemplate env 无 ${credentials.KEY} 模板的模块凭证经
+// _meta per-call 注入，换 key 无需 respawn：RespawnByDriver 应是 no-op（进程指针不变、保持在线）。
+func TestRespawnByDriver_SkipsWithoutEnvTemplate(t *testing.T) {
+	if !pythonAvailable() {
+		t.Skip("python 不在 PATH，跳过 stdio E2E 测试")
+	}
+	dir := sampleStdioDir()
+	if _, err := os.Stat(filepath.Join(dir, "main.py")); err != nil {
+		t.Skipf("示例模块不存在: %v", err)
+	}
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.SkillRuntime{}))
+	rtRepo := repository.NewSkillRuntimeRepo(db)
+
+	reg := NewSkillRuntimeRegistry(&config.AgentReachConfig{})
+	reg.SetRepo(rtRepo)
+	mcpStdio := NewMCPStdioProtocol(nil)
+	reg.SetMCPStdioProtocol(mcpStdio)
+	mgr := NewSkillRuntimeManager(reg, nil)
+	mgr.SetMCPStdioProtocol(mcpStdio)
+	mgr.SetCredentialService(NewAgentCredentialService(repository.NewAgentCredentialRepo(db), repository.NewAgentRepo(db)))
+
+	rt := &model.SkillRuntime{ID: "echo-skip", Name: "echo", DriverID: "drv_echo_skip",
+		Transport: model.SkillRuntimeTransportMCPStdio, Deployment: model.SkillRuntimeDeploymentProcess,
+		Command: "python", WorkDir: dir}
+	rt.SetArgs([]string{"main.py"}) // 无 env 凭证模板 -> per-call 注入 -> 无需 respawn
+	require.NoError(t, reg.Register(rt))
+	require.NoError(t, mgr.Start(rt.ID))
+	defer mgr.Stop(rt.ID)
+	waitOnline(t, reg, rt.ID, 10*time.Second)
+
+	mgr.mu.Lock()
+	cmdBefore := mgr.processes[rt.ID]
+	mgr.mu.Unlock()
+	require.NotNil(t, cmdBefore, "进程未启动")
+
+	require.NoError(t, mgr.RespawnByDriver("drv_echo_skip", "u1"))
+
+	mgr.mu.Lock()
+	cmdAfter := mgr.processes[rt.ID]
+	mgr.mu.Unlock()
+	require.NotNil(t, cmdAfter, "respawn 后进程缺失")
+	require.Same(t, cmdBefore, cmdAfter, "无 env 凭证模板应跳过 respawn，进程不应重启")
 }

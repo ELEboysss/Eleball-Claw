@@ -155,7 +155,8 @@ func (m *SkillRuntimeManager) StopAll() {
 }
 
 // RespawnByDriver 按 driverID 重启 stdio process 运行时并注入指定用户的模块级凭证。
-// 用于模块级凭证变更后让 stdio 长驻进程拿到新 env（stdio 无法 per-call 注入）。
+// 仅当运行时 env 含 ${credentials.KEY} 模板（凭证 spawn 时烤进 env）时才需 respawn；
+// 无模板的模块凭证经 _meta per-call 注入，换 key 下次调用即生效，跳过 respawn 避免无谓离线窗口。
 // 非 process/stdio 运行时或未注册时安全跳过。返回 Start 的错误（Stop 错误忽略）。
 func (m *SkillRuntimeManager) RespawnByDriver(driverID, userID string) error {
 	if driverID == "" {
@@ -168,9 +169,28 @@ func (m *SkillRuntimeManager) RespawnByDriver(driverID, userID string) error {
 	if rt.Deployment != model.SkillRuntimeDeploymentProcess || rt.Transport != model.SkillRuntimeTransportMCPStdio {
 		return nil // 仅 stdio process 需重 spawn 注入 env
 	}
+	if !envHasCredentialTemplates(rt) {
+		// 凭证经 _meta per-call 注入，换 key 无需 respawn（避免停启造成的离线窗口）
+		if m.logger != nil {
+			m.logger.Debug("模块凭证变更但 env 无凭证模板，跳过 respawn（per-call 注入已覆盖）",
+				zap.String("driver", driverID))
+		}
+		return nil
+	}
 	m.spawnUserIDs.Store(rt.ID, userID)
 	_ = m.Stop(rt.ID) // 停止旧进程（含 supervisor），忽略未运行等错误
 	return m.Start(rt.ID)
+}
+
+// envHasCredentialTemplates 检查运行时 env 是否含 ${credentials.KEY} 模板。
+// 有则凭证在 spawn 时烤进 env（换 key 需 respawn）；无则凭证经 _meta per-call 注入，无需 respawn。
+func envHasCredentialTemplates(rt *model.SkillRuntime) bool {
+	for _, v := range rt.EnvMap() {
+		if strings.Contains(v, "${credentials.") {
+			return true
+		}
+	}
+	return false
 }
 
 // buildStdioEnv 构建 stdio 子进程环境变量：os.Environ() + 模块 env（${credentials.KEY} 模板替换）。
@@ -458,22 +478,10 @@ func (m *SkillRuntimeManager) validateProcessSandbox(rt *model.SkillRuntime) err
 		}
 	}
 
-	// 检查环境变量
-	if len(m.sandboxCfg.AllowedEnvKeys) > 0 {
-		env := rt.EnvMap()
-		for k := range env {
-			allowed := false
-			for _, allowedKey := range m.sandboxCfg.AllowedEnvKeys {
-				if k == allowedKey {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
-				return fmt.Errorf("环境变量 %s 不在白名单", k)
-			}
-		}
-	}
+	// 模块声明 env（rt.EnvMap，含 ${credentials.KEY} 凭证）不经白名单：这些是模块显式声明、
+	// 子进程运行所需（如 FIRECRAWL_API_KEY），白名单只列系统通用变量（PATH/HOME/…）会误拦
+	// 所有带凭证的 process 模块。网关自身云凭证的防泄漏应经 spawn 时过滤 os.Environ（拒绝已知
+	// 密钥名）实现，而非拦模块 env——后者既不达目的（os.Environ 仍全量透传）又阻断合法模块启动。
 
 	// 检查最大进程数
 	if len(m.processes) >= m.sandboxCfg.MaxProcesses {

@@ -24,7 +24,7 @@ export default function Layout() {
       {/* 侧边栏 */}
       <aside className="w-64 bg-white border-r border-eleball-outline flex flex-col">
         <div className="h-16 flex items-center gap-3 px-6 border-b border-eleball-outline">
-          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-eleball-primary-light via-eleball-primary to-eleball-primary-dark" />
+          <img src="/admin/logo-icon.png" alt="Eleball" className="w-8 h-8 rounded-lg" />
           <div className="leading-tight">
             <div className="font-bold text-base tracking-tight">Eleball claw</div>
             <div className="text-[10px] text-eleball-text-secondary">本地控制台</div>
@@ -40,7 +40,7 @@ export default function Layout() {
                 `flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors ${
                   isActive
                     ? 'bg-eleball-primary/10 text-eleball-primary-dark'
-                    : 'text-eleball-text-secondary hover:bg-gray-50 hover:text-eleball-text'
+                    : 'text-eleball-text-secondary hover:bg-eleball-surface-variant hover:text-eleball-text'
                 }`
               }
             >
@@ -62,7 +62,7 @@ export default function Layout() {
           </div>
           <button
             onClick={handleLogout}
-            className="w-full py-2 rounded-xl text-sm font-medium text-eleball-text-secondary hover:bg-gray-50 transition-colors"
+            className="w-full py-2 rounded-xl text-sm font-medium text-eleball-text-secondary hover:bg-eleball-surface-variant transition-colors"
           >
             退出登录
           </button>
