@@ -334,7 +334,11 @@ func (l *AgentToolLoader) ResolveDriver(driverName string) (*model.DriverRecord,
 }
 
 // ResolveModuleID 从 manifest 或动态驱动记录中解析模块 ID。
-// 优先读取 metadata.module（兼容旧写法），其次根据 driver 字段查找 drivers 表中的动态驱动映射。
+// 优先读取 metadata.module（兼容旧写法），其次根据 driver 字段查找动态驱动记录的 ModuleID。
+// 注意：driverRegistry 命中 SkillRuntimeDriver 别名时 resolveDriver 返回 rec=nil（别名本身
+// 无 DriverRecord），此时手写 SKU（无 metadata.module，如 agent-reach/web.json）会解析失败
+// -> 卡片误判离线（而按 runtime ID 探活却在线）。故 rec 为空时回退 moduleService 查 DB
+// 拿 DriverRecord.ModuleID，与 ModuleService.resolveModuleIDFromManifest 同语义。
 func (l *AgentToolLoader) ResolveModuleID(manifest *model.ToolManifest) string {
 	if manifest == nil {
 		return ""
@@ -342,8 +346,13 @@ func (l *AgentToolLoader) ResolveModuleID(manifest *model.ToolManifest) string {
 	if manifest.Metadata != nil && manifest.Metadata["module"] != "" {
 		return manifest.Metadata["module"]
 	}
-	_, rec, ok := l.resolveDriver(string(manifest.Driver))
-	if ok && rec != nil {
+	_, rec, _ := l.resolveDriver(string(manifest.Driver))
+	if rec == nil && l.moduleService != nil {
+		if r, err := l.moduleService.ResolveDriver(string(manifest.Driver)); err == nil {
+			rec = r
+		}
+	}
+	if rec != nil {
 		switch rec.TransportType {
 		case string(model.ModuleTransportTypeModule), string(model.ModuleTransportTypeMCP):
 			return rec.ModuleID

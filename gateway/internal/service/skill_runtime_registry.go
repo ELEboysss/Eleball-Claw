@@ -532,15 +532,13 @@ func (r *SkillRuntimeRegistry) probeMCPStdio(runtimeID string) *SkillRuntimeStat
 	if rt == nil {
 		return r.setStatus(runtimeID, false, "", nil, "runtime 记录不存在")
 	}
-	// 无 stdio 会话（未 autostart 或已断开）时返回当前缓存态，避免误报
+	// 无 stdio 会话（未启动 / 已断开 / 重连超限）时判定为离线，不返回旧缓存。
+	// 旧缓存可能是上次在线的陈旧态：会让集市卡片误显示在线，并让 SkillRuntimeDriver
+	// 在线门控放行后在下抛 "stdio MCP 会话未注册"（runtime_call_failed），状态与实际不符。
+	// 会话未注册 = 无法通信 = 离线，是真实状态而非误报；spawn 后会话立即可用，
+	// 不存在"启动中短暂未注册"的窗口（startProcess 在 RegisterSession 后才置 starting）。
 	if r.mcpStdio == nil || !r.mcpStdio.IsRegistered(runtimeID) {
-		r.mu.RLock()
-		st := r.statuses[runtimeID]
-		r.mu.RUnlock()
-		if st == nil {
-			return r.setStatus(runtimeID, false, "", nil, "stdio 会话未注册")
-		}
-		return st
+		return r.setStatus(runtimeID, false, "", nil, "stdio 会话未注册")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
