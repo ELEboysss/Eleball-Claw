@@ -74,8 +74,8 @@ func TestModuleService_RescanMarketplace_MCP(t *testing.T) {
 
 // TestModuleService_RescanMarketplace_AgentReachMCP 验证 G1：agent-reach 从 execute 迁移到
 // mcp_http + auto_sku 后，rescan 能正确创建 mcp_http 运行时（端点经 mcpModuleBaseURL 收敛为根路径、
-// auto_sku=true、mcp_server_config.headers 含 7 个 ${credentials.KEY} 凭证模板、credentials 声明 7 个
-// module 级凭证）。读取真实 marketplace/agent-reach/module.json，守护 G1 配置不被回退。
+// auto_sku=true、mcp_server_config.headers 含 6 个 ${credentials.KEY} 凭证模板、credentials 声明 6 个
+// module 级凭证；exa 搜索经 mcporter 零配置接入，不占凭证槽）。读取真实 marketplace/agent-reach/module.json，守护 G1 配置不被回退。
 func TestModuleService_RescanMarketplace_AgentReachMCP(t *testing.T) {
 	// 定位真实 marketplace/agent-reach/module.json（兼容 go test 不同 cwd）
 	var manifestPath string
@@ -119,16 +119,14 @@ func TestModuleService_RescanMarketplace_AgentReachMCP(t *testing.T) {
 
 	cfg := rt.GetMCPServerConfig()
 	require.NotNil(t, cfg)
-	// 7 个凭证请求头模板（${credentials.KEY} 由网关 prepareMCPHeaders 替换为值后注入）
-	require.Len(t, cfg.Headers, 7)
-	assert.Equal(t, "${credentials.exa_api_key}", cfg.Headers["X-Exa-Api-Key"])
+	// 6 个凭证请求头模板（${credentials.KEY} 由网关 prepareMCPHeaders 替换为值后注入；exa 经 mcporter 零配置，无凭证）
+	require.Len(t, cfg.Headers, 6)
 	assert.Equal(t, "${credentials.twitter_cookie}", cfg.Headers["X-Twitter-Cookie"])
 	assert.Equal(t, "${credentials.bilibili_cookie}", cfg.Headers["X-Bilibili-Cookie"])
 
-	// 7 个 module 级凭证声明（同模块多 SKU 共享 module:agent_reach 桶）
+	// 6 个 module 级凭证声明（同模块多 SKU 共享 module:agent_reach 桶；exa 零配置不入此列）
 	creds := rt.CredentialsMap()
-	require.Len(t, creds, 7)
-	require.Contains(t, creds, "exa_api_key")
+	require.Len(t, creds, 6)
 	require.Contains(t, creds, "twitter_cookie")
 	assert.Equal(t, model.CredentialScopeModule, creds["bilibili_cookie"].Scope)
 }

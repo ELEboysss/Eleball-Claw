@@ -36,7 +36,8 @@ RUN git clone --depth 1 https://atomgit.com/Panniantong/Agent-Reach.git /opt/age
 # 2. 安装上游 CLI 工具
 # bilibili-cli 来自 PyPI；npm 包走国内镜像。
 RUN pip3 install --break-system-packages --no-cache-dir "bilibili-cli" "yt-dlp" && \
-    npm install -g --no-cache mcporter @jackwener/opencli
+    npm install -g --no-cache mcporter @jackwener/opencli && \
+    mcporter config add exa https://mcp.exa.ai/mcp --scope home
 
 # 3. 安装社交 CLI
 # 这些工具已从 GitHub-only 的子模块改为从清华 PyPI 镜像直接安装，

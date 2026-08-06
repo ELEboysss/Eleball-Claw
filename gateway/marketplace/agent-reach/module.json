@@ -17,19 +17,10 @@
       "X-Xiaohongshu-Cookie": "${credentials.xiaohongshu_cookie}",
       "X-Bilibili-Cookie": "${credentials.bilibili_cookie}",
       "X-YouTube-Cookie": "${credentials.youtube_cookie}",
-      "X-Github-Token": "${credentials.github_token}",
-      "X-Exa-Api-Key": "${credentials.exa_api_key}"
+      "X-Github-Token": "${credentials.github_token}"
     }
   },
   "credentials": {
-    "exa_api_key": {
-      "type": "api_key",
-      "label": "Exa API Key",
-      "description": "全网语义搜索依赖 Exa.ai，填写后 search 工具可用；缺失则 search 返回错误，其余工具不受影响。",
-      "placeholder": "exa-xxxxxxxx",
-      "required": false,
-      "scope": "module"
-    },
     "github_token": {
       "type": "api_key",
       "label": "GitHub Token",

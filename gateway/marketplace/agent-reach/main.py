@@ -21,7 +21,6 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-import requests
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -63,7 +62,6 @@ CREDENTIAL_HEADERS = {
     "X-Bilibili-Cookie": "bilibili_cookie",
     "X-YouTube-Cookie": "youtube_cookie",
     "X-Github-Token": "github_token",
-    "X-Exa-Api-Key": "exa_api_key",
 }
 
 # MCP 工具清单（9 个，name 即 action，与 CAPABILITIES 对应）。
@@ -80,7 +78,7 @@ MCP_TOOLS = [
     },
     {
         "name": "search",
-        "description": "全网语义搜索（默认 Exa，需 exa_api_key）；platform=bilibili 时走B站视频搜索",
+        "description": "全网语义搜索（Exa，经 mcporter 零配置接入，无需 API Key）；platform=bilibili 时走B站视频搜索",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -189,10 +187,18 @@ def shell_safe(value: str) -> None:
         raise ValueError("参数包含非法 shell 字符")
 
 
-def run(cmd: list[str], user_id: str, timeout: int = 60, github_token: str = "") -> dict:
-    """在隔离的 HOME 目录下执行命令"""
+def run(cmd: list[str], user_id: str, timeout: int = 60, github_token: str = "", use_user_home: bool = True) -> dict:
+    """在隔离的 HOME 目录下执行命令。
+
+    use_user_home=False 时把 HOME 指向容器 /root--
+    供 keyless 工具（如经 mcporter 调用的 Exa 搜索）使用构建期以 root 注册的 mcporter 配置，
+    这些工具不需要任何用户凭证/Cookie。容器以 root 运行（Dockerfile 无 USER 指令）。
+    """
     env = os.environ.copy()
-    env["HOME"] = str(user_cookie_dir(user_id))
+    if use_user_home:
+        env["HOME"] = str(user_cookie_dir(user_id))
+    else:
+        env["HOME"] = "/root"
     if github_token:
         env["GH_TOKEN"] = github_token
     try:
@@ -321,8 +327,10 @@ def build_command(action: str, params: dict, user_id: str) -> list[str]:
         platform = str(params.get("platform", "")).lower()
         if platform == "bilibili":
             return ["bili", "search", query, "--type", "video", "-n", str(limit)]
-        # 默认走 exa HTTP API（由 execute 直接处理，需 exa_api_key 凭证）
-        return None
+        # 默认走 Exa MCP（经 mcporter 零配置接入，无需 API Key；exa server 在镜像构建期注册）
+        q = json.dumps(query)
+        call = f"exa.web_search_exa(query: {q}, numResults: {limit})"
+        return ["mcporter", "call", call]
 
     if action == "youtube_subtitles":
         cookies_file = user_cookie_dir(user_id) / "youtube_cookies.txt"
@@ -372,46 +380,6 @@ def build_command(action: str, params: dict, user_id: str) -> list[str]:
     raise ValueError(f"不支持的 action: {action}")
 
 
-def do_search(query: str, limit: int, exa_key: str) -> dict:
-    """调用 Exa HTTP API 执行全网语义搜索。exa_key 由网关注入 params.credentials.exa_api_key。"""
-    if not exa_key:
-        return {
-            "content": "",
-            "error": "缺少 Exa API Key，请在秘技凭证配置中填写 exa_api_key",
-            "error_code": "agent_reach_credential_missing",
-        }
-    if not query:
-        raise HTTPException(status_code=400, detail="query 不能为空")
-    try:
-        resp = requests.post(
-            "https://api.exa.ai/search",
-            headers={"x-api-key": exa_key, "Content-Type": "application/json"},
-            json={"query": query, "numResults": limit, "contents": {"text": {"maxCharacters": 1000}}},
-            timeout=30,
-        )
-        if resp.status_code != 200:
-            return {
-                "content": "",
-                "error": f"exa HTTP {resp.status_code}: {resp.text[:200]}",
-                "error_code": "agent_reach_execution_failed",
-            }
-        results = resp.json().get("results", [])
-        lines, sources = [], []
-        for r in results:
-            title = r.get("title", "")
-            url = r.get("url", "")
-            text = r.get("text", "")
-            sources.append(url)
-            lines.append(f"## {title}\n{url}\n{text}")
-        return {"content": "\n\n".join(lines), "sources": sources}
-    except requests.RequestException as e:
-        return {
-            "content": "",
-            "error": f"exa 请求失败: {e}",
-            "error_code": "agent_reach_execution_failed",
-        }
-
-
 # ---------------------------------------------------------------------------
 # 标准模块接口（execute 传输）
 # ---------------------------------------------------------------------------
@@ -446,17 +414,10 @@ def execute(req: ExecuteRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # search 默认走 exa HTTP API（需 exa_api_key 凭证，由网关注入 params.credentials）
-    if cmd is None:
-        exa_key = credentials.get("exa_api_key") or ""
-        return do_search(
-            query=str(req.params.get("query", "")),
-            limit=int(req.params.get("limit", 5) or 5),
-            exa_key=exa_key,
-        )
-
+    # search 经 mcporter 调 Exa（keyless，无需用户凭证），用容器默认 HOME 以读取构建期注册的 mcporter 配置
+    use_user_home = req.action != "search"
     timeout = 120 if req.action in ("youtube_subtitles", "social_search", "social_read") else 60
-    result = run(cmd, req.user_id, timeout, github_token=github_token)
+    result = run(cmd, req.user_id, timeout, github_token=github_token, use_user_home=use_user_home)
     return result
 
 
@@ -483,7 +444,7 @@ def _normalize_credentials(credentials: dict[str, Any]) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # MCP Streamable HTTP 接口（mcp_http 传输，claw）
 # 凭证经网关 mcp_server_config.headers 模板（${credentials.KEY}）注入为请求头，
-# 模块从请求头读取后复用 /execute 的 save_cookies/build_command/run/do_search 逻辑。
+# 模块从请求头读取后复用 /execute 的 save_cookies/build_command/run 逻辑。
 # ---------------------------------------------------------------------------
 
 def _mcp_result(req_id: Any, result: dict) -> JSONResponse:
@@ -512,7 +473,7 @@ def _result_to_mcp(req_id: Any, result: dict) -> JSONResponse:
 
 
 def _handle_tool_call(req_id: Any, name: str, arguments: dict, request: Request) -> JSONResponse:
-    """执行 MCP tools/call：从请求头取凭证 -> save_cookies -> build_command -> run/do_search。"""
+    """执行 MCP tools/call：从请求头取凭证 -> save_cookies -> build_command -> run。"""
     if name not in CAPABILITIES:
         return _mcp_result(req_id, {"isError": True, "content": [{"type": "text", "text": f"未知工具: {name}"}]})
 
@@ -528,18 +489,10 @@ def _handle_tool_call(req_id: Any, name: str, arguments: dict, request: Request)
     except ValueError as e:
         return _mcp_result(req_id, {"isError": True, "content": [{"type": "text", "text": str(e)}]})
 
-    # search 默认走 exa HTTP API（cmd is None），需 exa_api_key 凭证
-    if cmd is None:
-        exa_key = credentials.get("exa_api_key") or ""
-        result = do_search(
-            query=str(params.get("query", "")),
-            limit=int(params.get("limit", 5) or 5),
-            exa_key=exa_key,
-        )
-        return _result_to_mcp(req_id, result)
-
+    # search 经 mcporter 调 Exa（keyless，无需用户凭证），用容器默认 HOME 以读取构建期注册的 mcporter 配置
+    use_user_home = name != "search"
     timeout = 120 if name in ("youtube_subtitles", "social_search", "social_read") else 60
-    result = run(cmd, MCP_USER_ID, timeout, github_token=github_token)
+    result = run(cmd, MCP_USER_ID, timeout, github_token=github_token, use_user_home=use_user_home)
     return _result_to_mcp(req_id, result)
 
 
