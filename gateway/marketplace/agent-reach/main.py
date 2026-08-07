@@ -69,7 +69,7 @@ CREDENTIAL_HEADERS = {
 MCP_TOOLS = [
     {
         "name": "web_read",
-        "description": "读取任意网页正文（经 r.jina.ai 渲染，适合公众号/新闻/文档）",
+        "description": "读取任意网页正文为 markdown（经 Exa 渲染，适合公众号/新闻/文档）",
         "inputSchema": {
             "type": "object",
             "properties": {"query": {"type": "string", "description": "网页 URL 或域名"}},
@@ -320,7 +320,12 @@ def build_command(action: str, params: dict, user_id: str) -> list[str]:
 
     if action == "web_read":
         url = query if query.startswith("http://") or query.startswith("https://") else f"https://{query}"
-        return ["curl", "-s", "-L", "--max-time", "30", f"https://r.jina.ai/{url}"]
+        # 经 Exa web_fetch 读取网页正文为 markdown（mcporter 零配置接入，同 search 通道，国内可达）。
+        # 旧方案 curl https://r.jina.ai/{url}：r.jina.ai（Jina Reader，Cloudflare）国内 TCP 不可达，
+        # 表现为 exit=7 或网关 30s 超时；search 走 mcp.exa.ai 可达，故 web_read 改走同一通道。
+        urls_json = json.dumps([url])
+        call = f"exa.web_fetch_exa(urls: {urls_json}, maxCharacters: 20000)"
+        return ["mcporter", "call", call]
 
     if action == "search":
         # 兼容 LLM 直接指定 platform 的情况（如B站视频搜索）
@@ -414,8 +419,8 @@ def execute(req: ExecuteRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # search 经 mcporter 调 Exa（keyless，无需用户凭证），用容器默认 HOME 以读取构建期注册的 mcporter 配置
-    use_user_home = req.action != "search"
+    # search / web_read 经 mcporter 调 Exa（keyless，无需用户凭证），用容器默认 HOME 以读取构建期注册的 mcporter 配置
+    use_user_home = req.action not in ("search", "web_read")
     timeout = 120 if req.action in ("youtube_subtitles", "social_search", "social_read") else 60
     result = run(cmd, req.user_id, timeout, github_token=github_token, use_user_home=use_user_home)
     return result
@@ -489,8 +494,8 @@ def _handle_tool_call(req_id: Any, name: str, arguments: dict, request: Request)
     except ValueError as e:
         return _mcp_result(req_id, {"isError": True, "content": [{"type": "text", "text": str(e)}]})
 
-    # search 经 mcporter 调 Exa（keyless，无需用户凭证），用容器默认 HOME 以读取构建期注册的 mcporter 配置
-    use_user_home = name != "search"
+    # search / web_read 经 mcporter 调 Exa（keyless，无需用户凭证），用容器默认 HOME 以读取构建期注册的 mcporter 配置
+    use_user_home = name not in ("search", "web_read")
     timeout = 120 if name in ("youtube_subtitles", "social_search", "social_read") else 60
     result = run(cmd, MCP_USER_ID, timeout, github_token=github_token, use_user_home=use_user_home)
     return _result_to_mcp(req_id, result)

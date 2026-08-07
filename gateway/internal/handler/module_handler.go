@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 
 	"github.com/eleball/gateway/internal/model"
@@ -230,40 +231,81 @@ func (h *ModuleHandler) InstallModule(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": record})
 }
 
-// SubmitForReview P4：本地秘技提交云端审核。
+// SubmitForReview T8：本地秘技分享到云端审核。
 //
-// 把本地模块/驱动信息转发到云端 POST /v1/market/modules/register（需 auth_token，
-// 从请求头 X-Module-Auth-Token 或 body 取）。云端审核通过后上架为云端秘技。
-// 路由：POST /v1/claw-console/modules/submit-review（claw_router 注册）。
+// UI 仅传 module_id；handler 查本地记录取权威元数据 + 调 PackageModule（T7）打 tarball，
+// 以 multipart（metadata JSON + tarball 文件）转发到云端暂存端点
+// POST /market/modules/submissions（T9 实现，免登录，admin 审批闸门）。
+// 云端审核通过后由 T11 解压发布到 marketplace/。去掉旧 auth_token 鸡生蛋流程
+// （旧流程转发 /market/modules/register 需先有审批后下发的 auth_token，逻辑死锁）。
+// 路由：POST /v1/claw-console/modules/submit-review（claw_router 注册，复用）。
 func (h *ModuleHandler) SubmitForReview(c *gin.Context) {
 	if h.cloudAPIBase == "" {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 3001, "message": "未配置云端 API Base，无法提交审核"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 3001, "message": "未配置云端 API Base，无法分享到云端"})
 		return
 	}
 
-	var req model.ModuleRegisterRequest
+	var req model.ModuleShareRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "参数错误: " + err.Error()})
 		return
 	}
 
-	providedToken := c.GetHeader("X-Module-Auth-Token")
-	if providedToken == "" {
-		providedToken = req.AuthToken
+	// 查本地记录取审核列表展示用元数据（权威信息以 tarball 内 module.json 为准）
+	rec, err := h.moduleService.GetModule(req.ModuleID)
+	if err != nil || rec == nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": 4004, "message": "本地模块不存在: " + req.ModuleID})
+		return
 	}
 
-	// 转发到云端 register 接口
-	body, _ := json.Marshal(req)
+	// 打包 tarball（T7：脚本模块递归 tar 磁盘目录 / MCP 安装模块 DB 物化 module.json）
+	pkg, err := h.moduleService.PackageModule(req.ModuleID)
+	if err != nil {
+		h.logger.Warn("模块打包失败", zap.String("module_id", req.ModuleID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 3001, "message": "模块打包失败: " + err.Error()})
+		return
+	}
+
+	// 元数据（供云端审核列表展示，无需解压 tarball）
+	meta := model.ModuleSubmissionMeta{
+		ModuleID:     rec.ID,
+		Name:         rec.Name,
+		Description:  rec.Description,
+		SourceOrigin: rec.SourceOrigin,
+		SourceActor:  rec.SourceActor,
+		Version:      rec.Version,
+		Capabilities: rec.CapabilitiesList(),
+	}
+	metaJSON, _ := json.Marshal(meta)
+
+	// 拼 multipart：metadata(JSON 字段) + tarball(文件)
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("metadata", string(metaJSON)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 3001, "message": "构造元数据失败: " + err.Error()})
+		return
+	}
+	part, err := writer.CreateFormFile("tarball", pkg.Filename)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 3001, "message": "构造上传表单失败: " + err.Error()})
+		return
+	}
+	if _, err := part.Write(pkg.Data); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 3001, "message": "写入 tarball 失败: " + err.Error()})
+		return
+	}
+	if err := writer.Close(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 3001, "message": "关闭表单失败: " + err.Error()})
+		return
+	}
+
 	cloudReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost,
-		h.cloudAPIBase+"/market/modules/register", bytes.NewReader(body))
+		h.cloudAPIBase+"/market/modules/submissions", &body)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 3001, "message": "构造云端请求失败: " + err.Error()})
 		return
 	}
-	cloudReq.Header.Set("Content-Type", "application/json")
-	if providedToken != "" {
-		cloudReq.Header.Set("X-Module-Auth-Token", providedToken)
-	}
+	cloudReq.Header.Set("Content-Type", writer.FormDataContentType())
 
 	resp, err := http.DefaultClient.Do(cloudReq)
 	if err != nil {

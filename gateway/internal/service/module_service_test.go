@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -205,7 +206,7 @@ func TestModuleService_WriteUserModule(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, tools)
 
-	// 一键生成（module_id 缺省，据 name 推导为 my-echo-tool）
+	// 一键生成（module_id 缺省，据 name 推导为 my-echo-tool-<uuid8>，T6 加消歧后缀）
 	result, err := svc.WriteUserModule(UserModuleGenerateRequest{
 		Name:        "My Echo Tool",
 		Description: "测试用户模块",
@@ -214,11 +215,13 @@ func TestModuleService_WriteUserModule(t *testing.T) {
 		WorkDir:     userScriptDir,
 	}, tools)
 	require.NoError(t, err)
-	require.Equal(t, "my-echo-tool", result.ModuleID)
-	defer manager.Stop(result.ModuleID)
+	// T6：新生成模块 ID = slug + uuid8 后缀，使重名模块不撞；后续断言用实际 ID 而非硬编码
+	assert.True(t, strings.HasPrefix(result.ModuleID, "my-echo-tool-"), "got %s", result.ModuleID)
+	moduleID := result.ModuleID
+	defer manager.Stop(moduleID)
 
 	// module.json + main.py 落盘
-	moduleDir := filepath.Join(root, "my-echo-tool")
+	moduleDir := filepath.Join(root, moduleID)
 	require.FileExists(t, filepath.Join(moduleDir, "module.json"))
 	require.FileExists(t, filepath.Join(moduleDir, "main.py"))
 	// main.py 是用户脚本内容（含标记）而非骨架
@@ -232,17 +235,17 @@ func TestModuleService_WriteUserModule(t *testing.T) {
 	assert.Contains(t, string(mj), "\"transport\": \"mcp_stdio\"")
 
 	// rescan 注册了 SkillRuntime（AutoSKU + DriverID）
-	rt, err := skillRuntimeRepo.GetByID("my-echo-tool")
+	rt, err := skillRuntimeRepo.GetByID(moduleID)
 	require.NoError(t, err)
 	assert.True(t, rt.AutoSKU)
-	assert.Equal(t, "my-echo-tool", rt.DriverID)
+	assert.Equal(t, moduleID, rt.DriverID)
 
 	// autostart -> 在线 -> DeriveSKUs 出 echo SKU
-	waitOnline(t, registry, "my-echo-tool", 10*time.Second)
+	waitOnline(t, registry, moduleID, 10*time.Second)
 	deadline := time.Now().Add(15 * time.Second)
 	var echo *model.AgentItem
 	for time.Now().Before(deadline) {
-		if it, err := agentRepo.GetByID("my-echo-tool-echo"); err == nil && it != nil {
+		if it, err := agentRepo.GetByID(moduleID + "-echo"); err == nil && it != nil {
 			echo = it
 			break
 		}
@@ -261,8 +264,9 @@ func TestModuleService_WriteUserModule(t *testing.T) {
 	}, tools)
 	require.NoError(t, err)
 	defer manager.Stop(result2.ModuleID)
-	require.Equal(t, "drafted-tool", result2.ModuleID)
-	d2, err := os.ReadFile(filepath.Join(root, "drafted-tool", "main.py"))
+	// T6：drafted-tool-<uuid8>
+	assert.True(t, strings.HasPrefix(result2.ModuleID, "drafted-tool-"), "got %s", result2.ModuleID)
+	d2, err := os.ReadFile(filepath.Join(root, result2.ModuleID, "main.py"))
 	require.NoError(t, err)
 	assert.Contains(t, string(d2), "drafted-content-marker")
 	assert.NotContains(t, string(d2), "user-echo-marker", "草稿应优先于 work_dir 脚本拷贝")
@@ -467,7 +471,8 @@ func TestInstallMCPRuntime_HTTP(t *testing.T) {
 	}, tools)
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	assert.Equal(t, "mcp-remote-remote-test", result.RuntimeID)
+	// T6：mcp-remote-remote-test-<uuid8>
+	assert.True(t, strings.HasPrefix(result.RuntimeID, "mcp-remote-remote-test-"), "got %s", result.RuntimeID)
 	assert.Equal(t, result.RuntimeID, result.DriverID)
 	assert.Equal(t, "mcp_http", result.Transport)
 	assert.Equal(t, 2, result.SKUCount)

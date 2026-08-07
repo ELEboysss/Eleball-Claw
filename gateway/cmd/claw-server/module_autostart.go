@@ -79,14 +79,21 @@ func autoStartModules(ctx context.Context, logger *zap.Logger, cfg config.Module
 		return nil
 	}
 	// 激活门控：仅上线已激活模块（docker 模块目录名 == 模块 ID）。
+	// 例外：auto_sku 模块（如 firecrawl/agent-reach）SKU 需探活在线后才派生，存在"先启动才能购买"
+	// 的鸡生蛋，故无购买记录也自动启动（与 process 部署门控 autoStartProcessRuntimes 一致）；
+	// 用户可在控制台禁用（Status=disabled）不需要的模块。
 	filtered := make([]string, 0, len(targets))
 	for _, name := range targets {
 		if activated[name] {
 			filtered = append(filtered, name)
+			continue
+		}
+		if rt := registry.Get(name); rt != nil && rt.AutoSKU && rt.Status != model.SkillRuntimeStatusDisabled {
+			filtered = append(filtered, name)
 		}
 	}
 	if len(filtered) == 0 {
-		logger.Info("无已激活的 docker 模块，跳过自动上线（未激活模块可到控制台手动启动）",
+		logger.Info("无可自动上线的 docker 模块（已激活或 auto_sku），跳过自动上线（其余模块可到控制台手动启动）",
 			zap.Int("skipped", len(targets)))
 		return nil
 	}
@@ -238,7 +245,9 @@ func autoStartProcessRuntimes(ctx context.Context, logger *zap.Logger, repo *rep
 			continue
 		}
 		// 激活门控：未激活的 process 模块不自动启动。
-		if !activated[rt.ID] {
+		// 例外：auto_sku 模块（如 firecrawl）SKU 需探活在线后才派生，存在"先启动才能购买"
+		// 的鸡生蛋，故无购买记录也自动启动；用户可在控制台禁用（Status=disabled）不需要的模块。
+		if !activated[rt.ID] && !rt.AutoSKU {
 			continue
 		}
 		if err := manager.Start(rt.ID); err != nil {

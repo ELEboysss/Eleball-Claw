@@ -2,18 +2,13 @@ import { useEffect, useState } from 'react'
 import { moduleApi, clawMarketApi } from '../api/client'
 import DockerMissingBanner from '../components/DockerMissingBanner'
 
-// capabilities 后端以 JSON 字符串存储/返回，解析为数组（兼容已为数组的形态）
-function parseCapabilities(raw) {
-  if (Array.isArray(raw)) return raw
-  if (typeof raw === 'string' && raw) {
-    try {
-      const v = JSON.parse(raw)
-      return Array.isArray(v) ? v : []
-    } catch {
-      return []
-    }
-  }
-  return []
+// 模块来源标签：eleball_cloud->eleball云端 / eleball_builtin->eleball内置 / user·mcp->主体名；
+// source_origin 缺失回退 official 合成。
+function sourceLabel(origin, actor, official) {
+  if (origin === 'eleball_cloud') return 'eleball云端'
+  if (origin === 'eleball_builtin') return 'eleball内置'
+  if (origin === 'user' || origin === 'mcp') return actor || (origin === 'mcp' ? 'MCP' : '用户')
+  return official ? '官方' : '第三方'
 }
 
 export default function Modules() {
@@ -82,25 +77,15 @@ export default function Modules() {
     }
   }
 
-  // P4：本地秘技提交云端审核（转发云端 register，需 auth_token）
+  // T8：本地秘技分享到云端审核（先提交、审核后下发；免 auth_token 鸡生蛋）
   const handleSubmitReview = async (m) => {
-    const authToken = window.prompt(`提交模块 ${m.module_id} 到云端审核。\n请输入云端下发的 auth_token（管理员审批后获得）：`)
-    if (authToken === null) return
+    if (!window.confirm(`确定分享模块 ${m.module_id} 到云端？\n提交后由管理员审核，通过后上架为云端秘技。`)) return
     setError('')
     try {
-      await moduleApi.submitForReview({
-        module_id: m.module_id,
-        name: m.name,
-        description: m.description,
-        url: m.url,
-        transport_type: m.transport_type,
-        capabilities: parseCapabilities(m.capabilities),
-        version: m.version,
-        auth_token: authToken,
-      }, authToken)
-      setError(`模块 ${m.module_id} 已提交云端审核`)
+      await moduleApi.submitForReview(m.module_id)
+      setError(`模块 ${m.module_id} 已分享到云端，等待审核`)
     } catch (err) {
-      setError(err?.message || err || '提交失败')
+      setError(err?.message || err || '分享失败')
     }
   }
 
@@ -291,6 +276,7 @@ export default function Modules() {
                 <tr>
                   <th className="text-left px-4 py-3 font-medium">模块 ID</th>
                   <th className="text-left px-4 py-3 font-medium">名称</th>
+                  <th className="text-left px-4 py-3 font-medium">模块来源</th>
                   <th className="text-left px-4 py-3 font-medium">传输类型</th>
                   <th className="text-left px-4 py-3 font-medium">状态</th>
                   <th className="text-left px-4 py-3 font-medium">版本</th>
@@ -303,6 +289,7 @@ export default function Modules() {
                   <tr key={m.module_id} className="border-t border-eleball-outline">
                     <td className="px-4 py-3 font-mono">{m.module_id}</td>
                     <td className="px-4 py-3">{m.name}</td>
+                    <td className="px-4 py-3 text-xs text-eleball-text-secondary">{sourceLabel(m.source_origin, m.source_actor, m.official) || '-'}</td>
                     <td className="px-4 py-3">{m.transport_type}</td>
                     <td className="px-4 py-3">
                       <span className={`px-2 py-1 rounded-lg text-xs font-medium ${m.status === 'online' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
@@ -340,13 +327,13 @@ export default function Modules() {
                         </button>
                       )}
                       <button onClick={() => handleRefreshModule(m.module_id)} className="text-eleball-primary hover:underline">刷新</button>
-                      <button onClick={() => handleSubmitReview(m)} className="text-blue-600 hover:underline">提交审核</button>
+                      <button onClick={() => handleSubmitReview(m)} className="text-blue-600 hover:underline">分享到云端</button>
                       <button onClick={() => handleDeleteModule(m.module_id)} className="text-red-600 hover:underline">注销</button>
                     </td>
                   </tr>
                 ))}
                 {modules.length === 0 && !loading && (
-                  <tr><td colSpan={7} className="px-4 py-8 text-center text-eleball-text-secondary">暂无模块</td></tr>
+                  <tr><td colSpan={8} className="px-4 py-8 text-center text-eleball-text-secondary">暂无模块</td></tr>
                 )}
               </tbody>
             </table>
@@ -424,7 +411,7 @@ export default function Modules() {
               <tr>
                 <th className="text-left px-4 py-3 font-medium">模块</th>
                 <th className="text-left px-4 py-3 font-medium">版本</th>
-                <th className="text-left px-4 py-3 font-medium">类型</th>
+                <th className="text-left px-4 py-3 font-medium">模块来源</th>
                 <th className="text-left px-4 py-3 font-medium">镜像</th>
                 <th className="text-left px-4 py-3 font-medium">操作</th>
               </tr>
@@ -438,11 +425,15 @@ export default function Modules() {
                   </td>
                   <td className="px-4 py-3">{m.version || '-'}</td>
                   <td className="px-4 py-3">
-                    {m.official ? (
-                      <span className="px-2 py-0.5 rounded text-xs bg-emerald-50 text-emerald-600">官方预置</span>
-                    ) : (
-                      <span className="px-2 py-0.5 rounded text-xs bg-amber-50 text-amber-600">第三方</span>
-                    )}
+                    {(() => {
+                      const label = sourceLabel(m.source_origin, m.source_actor, m.official)
+                      const isEleball = m.source_origin === 'eleball_cloud' || m.source_origin === 'eleball_builtin' || (!m.source_origin && m.official)
+                      return (
+                        <span className={`px-2 py-0.5 rounded text-xs ${isEleball ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
+                          {label}
+                        </span>
+                      )
+                    })()}
                   </td>
                   <td className="px-4 py-3 text-xs text-eleball-text-secondary font-mono">
                     {m.image ? `${m.image.repository}@${m.image.digest?.slice(0, 19) || m.image.tag || '-'}` : '-'}

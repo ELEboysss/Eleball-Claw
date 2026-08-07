@@ -192,6 +192,11 @@ func (r *SkillRuntimeRegistry) Register(runtime *model.SkillRuntime) error {
 	if runtime.Capabilities == "" {
 		runtime.Capabilities = "[]"
 	}
+	// 模块来源属性缺失时按 side 默认（claw=eleball_builtin），覆盖所有写入路径
+	// （集市扫描/RegisterDriver/迁移）；云端下载=eleball_cloud、user/mcp 由各写入点显式设置后此处保留。
+	if runtime.SourceOrigin == "" {
+		runtime.SourceOrigin = model.SkillRuntimeOriginEleballBuiltin
+	}
 
 	if r.runtimeRepo != nil {
 		if err := r.runtimeRepo.CreateOrUpdate(runtime); err != nil {
@@ -560,7 +565,7 @@ func (r *SkillRuntimeRegistry) probeMCPStdio(runtimeID string) *SkillRuntimeStat
 }
 
 // SetRuntimeStatus 供 SkillRuntimeManager supervisor 更新 stdio 运行时状态
-//（starting/online/offline/error）。同时刷新请求级缓存与异步持久化。
+// （starting/online/offline/error）。同时刷新请求级缓存与异步持久化。
 func (r *SkillRuntimeRegistry) SetRuntimeStatus(runtimeID string, status model.SkillRuntimeStatus, caps []string, errMsg string) {
 	rt := r.Get(runtimeID)
 	version := ""
@@ -656,5 +661,8 @@ func newModuleHTTPClient(cfg *config.AgentReachConfig) *http.Client {
 			transport.Proxy = http.ProxyURL(proxyURL)
 		}
 	}
-	return &http.Client{Timeout: 30 * time.Second, Transport: transport}
+	// 不设客户端级超时：实际由各调用点的 per-request context 控制（健康探测 5s、execute 120s）。
+	// 旧值 30s 会截断 execute 的 120s 上下文，导致长时模块调用（如 web_read）出现
+	// "context deadline exceeded ... Client.Timeout exceeded" 的竞态超时。
+	return &http.Client{Transport: transport}
 }

@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
-"""Firecrawl stdio MCP 服务器。
+"""Firecrawl MCP HTTP 服务器（cloud + claw 双端同构）。
 
-经 stdio JSON-RPC（NDJSON）暴露 scrape / crawl / extract 三工具，内部调用 Firecrawl API。
-API Key 由网关 per-call 经 tools/call 的 _meta.credentials.firecrawl_api_key 注入（用户在
-秘技集市配置的模块凭证），不再 spawn 时烤进 env；FIRECRAWL_BASE_URL 仍取 env（非密配置）。
+经 MCP Streamable HTTP JSON-RPC 暴露 scrape / crawl / extract 三工具，内部调用 Firecrawl API。
+transport=mcp_http + deployment=docker：网关经 POST / 发 JSON-RPC，探活走 initialize + tools/list。
+API Key 由网关经 mcp_server_config.headers 的 X-Firecrawl-Key（${credentials.firecrawl_api_key}）
+逐请求注入；FIRECRAWL_BASE_URL 取 env（非密配置）。tools/list 不需 Key，tools/call 缺 Key 报错。
 
-仅依赖标准库（urllib），无需 pip install，降低用户安装成本（对标 mcp-stdio-echo 的零依赖）。
+仅依赖标准库（urllib + http.server），无需 pip install（对标 mcp-stdio-echo 零依赖，比 agent-reach 更轻）。
 auto_sku=true：网关探活拿到 tools/list 后自动派生三份可购买 SKU，免手写 skus/*.json。
 
-运行：python main.py（由网关 process deployment 自动 spawn，无需手动启动）。
+运行：python main.py（容器内监听 0.0.0.0:8080；云端经 eleball-net DNS http://firecrawl:8080、
+claw 经宿主机端口映射 http://localhost:8095 访问）。
 """
 
 import json
 import os
-import sys
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 FIRECRAWL_BASE_URL = os.environ.get("FIRECRAWL_BASE_URL", "https://api.firecrawl.dev").rstrip("/")
+PORT = int(os.environ.get("PORT", "8080"))
 
 
 def make_result(req_id, result):
@@ -81,7 +84,7 @@ def tools_list():
 
 
 def _firecrawl_request(path, payload, api_key):
-    """调用 Firecrawl API，返回 (data, error)。api_key 由网关 per-call 经 _meta.credentials 注入。"""
+    """调用 Firecrawl API，返回 (data, error)。api_key 由网关经 X-Firecrawl-Key 头逐请求注入。"""
     if not api_key:
         return None, "缺少 firecrawl_api_key（请在模块凭证配置 firecrawl_api_key）"
     url = FIRECRAWL_BASE_URL + path
@@ -178,44 +181,92 @@ def tools_call(name, arguments, api_key):
     return _error_text("Unknown tool: %s" % name)
 
 
-def main():
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            req = json.loads(line)
-        except Exception as e:
-            sys.stdout.write(json.dumps(make_error(None, -32700, "Parse error: %s" % e)) + "\n")
-            sys.stdout.flush()
-            continue
+def handle_rpc(req, api_key):
+    """分发单条 JSON-RPC 请求，返回响应 dict；通知（无 id）返回 None。"""
+    req_id = req.get("id")
+    method = req.get("method")
+    params = req.get("params", {}) or {}
 
-        req_id = req.get("id")
-        method = req.get("method")
-        params = req.get("params", {}) or {}
+    if method == "initialize":
+        return make_result(req_id, {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "firecrawl", "version": "1.0.0"},
+        })
+    if method == "notifications/initialized":
+        return None  # 通知无需响应
+    if method == "tools/list":
+        return make_result(req_id, {"tools": tools_list()})
+    if method == "tools/call":
+        return make_result(req_id, tools_call(params.get("name"), params.get("arguments", {}), api_key))
+    return make_error(req_id, -32601, "Method not found: %s" % method)
 
-        if method == "initialize":
-            resp = make_result(req_id, {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "firecrawl", "version": "1.0.0"},
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def _send_json(self, status, obj):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_empty(self, status):
+        self.send_response(status)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_GET(self):
+        if self.path in ("/health", "/"):
+            self._send_json(200, {
+                "module_id": "firecrawl",
+                "version": "1.0.0",
+                "status": "ok",
+                "capabilities": ["scrape", "crawl", "extract"],
             })
-        elif method == "notifications/initialized":
-            continue
-        elif method == "tools/list":
-            resp = make_result(req_id, {"tools": tools_list()})
-        elif method == "tools/call":
-            # 网关 per-call 经 _meta.credentials 注入 firecrawl_api_key（用户在秘技集市配置的模块凭证），
-            # 不再 spawn 时烤进 env；env 兜底仅供 ProbeStdio 探测等无凭证场景。
-            meta = params.get("_meta") or {}
-            creds = meta.get("credentials") or {}
-            api_key = creds.get("firecrawl_api_key") or os.environ.get("FIRECRAWL_API_KEY", "")
-            resp = make_result(req_id, tools_call(params.get("name"), params.get("arguments", {}), api_key))
-        else:
-            resp = make_error(req_id, -32601, "Method not found: %s" % method)
+            return
+        self._send_json(404, {"error": "not found"})
 
-        sys.stdout.write(json.dumps(resp) + "\n")
-        sys.stdout.flush()
+    def do_POST(self):
+        # / 与 /mcp 均接受 JSON-RPC（网关 mcp_http 协议 POST 到 endpoint 根）
+        if self.path not in ("/", "/mcp"):
+            self._send_json(404, {"error": "not found"})
+            return
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length) if length else b""
+        try:
+            req = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception as e:
+            self._send_json(200, make_error(None, -32700, "Parse error: %s" % e))
+            return
+
+        # API Key 由网关 mcp_server_config.headers 的 X-Firecrawl-Key 注入（逐请求）
+        api_key = self.headers.get("X-Firecrawl-Key", "")
+
+        # JSON-RPC 批量请求：逐项分发，过滤通知（None）
+        if isinstance(req, list):
+            resp = [r for r in (handle_rpc(item, api_key) for item in req) if r]
+            if resp:
+                self._send_json(200, resp)
+            else:
+                self._send_empty(200)
+            return
+
+        resp = handle_rpc(req, api_key)
+        if resp is None:
+            self._send_empty(200)  # 通知
+            return
+        self._send_json(200, resp)
+
+    def log_message(self, fmt, *args):
+        pass  # 静默默认访问日志
+
+
+def main():
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server.serve_forever()
 
 
 if __name__ == "__main__":

@@ -10,9 +10,9 @@ import (
 	"github.com/eleball/gateway/internal/config"
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
+	sqlite "github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	sqlite "github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -54,14 +54,14 @@ func setupCloudInstallTest(t *testing.T) (*ModuleService, *AgentMarketService, *
 
 	// 预置 official 模块（marketplace 扫描的等价物）
 	rt := &model.SkillRuntime{
-		ID:          "search-web",
-		Name:        "Search Web",
-		Endpoint:    server.URL,
-		Transport:   model.SkillRuntimeTransportExecute,
-		Deployment:  model.SkillRuntimeDeploymentDocker,
-		Official:    true,
-		DriverID:    "search-web",
-		Status:      model.SkillRuntimeStatusOffline,
+		ID:           "search-web",
+		Name:         "Search Web",
+		Endpoint:     server.URL,
+		Transport:    model.SkillRuntimeTransportExecute,
+		Deployment:   model.SkillRuntimeDeploymentDocker,
+		Official:     true,
+		DriverID:     "search-web",
+		Status:       model.SkillRuntimeStatusOffline,
 		Capabilities: "[]",
 	}
 	require.NoError(t, registry.Register(rt))
@@ -128,6 +128,37 @@ func TestInstallFromCloudMeta_OfficialUpsertsDriver(t *testing.T) {
 	driver, err = driverRepo.GetByID("search-web")
 	require.NoError(t, err)
 	assert.Equal(t, "search-web", driver.ModuleID)
+}
+
+// TestInstallFromCloudMeta_PersistsSourceOrigin 云端下发的来源属性持久化到本地运行时
+// （type3：official 模块扫描默认 eleball_builtin，云端下发 eleball_cloud 时校正）。
+func TestInstallFromCloudMeta_PersistsSourceOrigin(t *testing.T) {
+	moduleSvc, _, _, _ := setupCloudInstallTest(t)
+
+	// 预置模块经 Register 兜底默认为 eleball_builtin（claw 侧）
+	rt0, err := moduleSvc.repo.GetByID("search-web")
+	require.NoError(t, err)
+	assert.Equal(t, model.SkillRuntimeOriginEleballBuiltin, rt0.SourceOrigin)
+
+	// 云端下发 eleball_cloud -> 幂等路径校正并持久化
+	meta := cloudInstallMeta()
+	meta.SourceOrigin = "eleball_cloud"
+	_, err = moduleSvc.InstallFromCloudMeta(meta)
+	require.NoError(t, err)
+	rt, err := moduleSvc.repo.GetByID("search-web")
+	require.NoError(t, err)
+	assert.Equal(t, model.SkillRuntimeOriginEleballCloud, rt.SourceOrigin)
+
+	// 用户共享模块（user + actor）-> 幂等重装校正
+	meta2 := cloudInstallMeta()
+	meta2.SourceOrigin = "user"
+	meta2.SourceActor = "alice"
+	_, err = moduleSvc.InstallFromCloudMeta(meta2)
+	require.NoError(t, err)
+	rt2, err := moduleSvc.repo.GetByID("search-web")
+	require.NoError(t, err)
+	assert.Equal(t, model.SkillRuntimeOriginUser, rt2.SourceOrigin)
+	assert.Equal(t, "alice", rt2.SourceActor)
 }
 
 // TestIsCloudPurchasedAgent_LocalPresetExempt 本地扫描预置模块（InstallSource 为空）的秘技免 VIP 门控
@@ -260,4 +291,78 @@ func TestEnsureCloudAgentProvision_NoManifest(t *testing.T) {
 
 	_, err := agentRepo.GetByID("agent-search-web")
 	assert.Error(t, err)
+}
+
+// TestInstallFromCloudMeta_CloudManifestDisablesAutoSKU 云端下发 manifest 后：
+// auto_sku 关闭（DB + 内存副本）、遗留派生 SKU 下架、手写 SKU 保留。
+// 对应 S2：消除「auto-derive 用 MCP 工具名与云端 manifest 定名共存」的命名错位。
+func TestInstallFromCloudMeta_CloudManifestDisablesAutoSKU(t *testing.T) {
+	moduleSvc, _, agentRepo, _ := setupCloudInstallTest(t)
+
+	// 模拟 auto_sku 模块：开启自动派生并持久化（DB + 内存副本同步）。
+	rt, err := moduleSvc.repo.GetByID("search-web")
+	require.NoError(t, err)
+	rt.AutoSKU = true
+	require.NoError(t, moduleSvc.repo.CreateOrUpdate(rt))
+	if inMem := moduleSvc.registry.Get("search-web"); inMem != nil {
+		inMem.AutoSKU = true
+	}
+
+	// 遗留派生 SKU：manifest 带 auto_sku_module 标记，名取 MCP 工具名（与云端 manifest 定名不一致）。
+	derivedMF := map[string]interface{}{
+		"id":          "search-web-echo",
+		"name":        "echo",
+		"description": "echo tool",
+		"driver":      "search-web",
+		"parameters":  map[string]interface{}{"type": "object"},
+		"metadata":    map[string]string{"module": "search-web", "auto_sku_module": "search-web"},
+	}
+	derivedRaw, _ := json.Marshal(derivedMF)
+	require.NoError(t, agentRepo.Create(&model.AgentItem{
+		ID:           "search-web-echo",
+		Name:         "echo",
+		Status:       model.AgentStatusApproved,
+		ManifestJSON: string(derivedRaw),
+	}))
+
+	// 手写 SKU：无 auto_sku_module 标记，不应被下架。
+	handMF := map[string]interface{}{
+		"id":          "search-web-custom",
+		"name":        "自定义工具",
+		"description": "手写 SKU",
+		"driver":      "search-web",
+		"parameters":  map[string]interface{}{"type": "object"},
+		"metadata":    map[string]string{"module": "search-web"},
+	}
+	handRaw, _ := json.Marshal(handMF)
+	require.NoError(t, agentRepo.Create(&model.AgentItem{
+		ID:           "search-web-custom",
+		Name:         "自定义工具",
+		Status:       model.AgentStatusApproved,
+		ManifestJSON: string(handRaw),
+	}))
+
+	// 云端 manifest 安装（idempotent 路径，search-web 已预置）。
+	record, err := moduleSvc.InstallFromCloudMeta(cloudInstallMeta())
+	require.NoError(t, err)
+	require.NotNil(t, record)
+
+	// auto_sku 已关闭：DB + 内存副本。
+	rtAfter, err := moduleSvc.repo.GetByID("search-web")
+	require.NoError(t, err)
+	assert.False(t, rtAfter.AutoSKU, "云端 manifest 接管后 auto_sku 应关闭")
+	inMem := moduleSvc.registry.Get("search-web")
+	if assert.NotNil(t, inMem) {
+		assert.False(t, inMem.AutoSKU, "内存副本 auto_sku 应同步关闭（supervisor 立即停止派生）")
+	}
+
+	// 遗留派生 SKU 已下架。
+	derived, err := agentRepo.GetByID("search-web-echo")
+	require.NoError(t, err)
+	assert.Equal(t, model.AgentStatusDelisted, derived.Status, "遗留派生 SKU 应下架")
+
+	// 手写 SKU 不受影响。
+	hand, err := agentRepo.GetByID("search-web-custom")
+	require.NoError(t, err)
+	assert.Equal(t, model.AgentStatusApproved, hand.Status, "手写 SKU 不应被下架")
 }

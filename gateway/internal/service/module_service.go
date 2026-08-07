@@ -145,6 +145,8 @@ func (s *ModuleService) ListInstalledModulesForUser(userID string, since *time.T
 			TransportType: legacyTransportType(rt.Transport),
 			DriverID:      rt.DriverID,
 			Official:      rt.Official,
+			SourceOrigin:  string(rt.SourceOrigin),
+			SourceActor:   rt.SourceActor,
 			Capabilities:  rt.CapabilitiesList(),
 			Manifest:      json.RawMessage(item.ManifestJSON),
 			AuthToken:     rt.AuthToken,
@@ -317,6 +319,7 @@ func (s *ModuleService) resolveModuleIDFromManifest(manifest *model.ToolManifest
 //   - process：同步 manager.Start spawn 子进程，随后 ForceProbe 刷新状态。
 //   - docker：异步执行 dockerStarter 回调（pull/compose 耗时长，不阻塞 HTTP），立即返回当前状态；完成后再 ForceProbe。
 //   - none/external：无需启动，仅 ForceProbe。
+//
 // 返回最新状态快照；未注册模块或 docker 回调未注入返回错误。
 func (s *ModuleService) Start(moduleID string) (*SkillRuntimeStatusSnapshot, error) {
 	rt := s.registry.Get(moduleID)
@@ -425,6 +428,8 @@ type ModuleInstallMeta struct {
 	TransportType string           `json:"transport_type"`
 	DriverID      string           `json:"driver_id,omitempty"`
 	Official      bool             `json:"official"`
+	SourceOrigin  string           `json:"source_origin,omitempty"` // 模块来源属性（eleball_cloud/eleball_builtin/user/mcp），云端下发，InstallFromCloudMeta 持久化到本地运行时
+	SourceActor   string           `json:"source_actor,omitempty"`  // 来源主体（user=用户名 / mcp=MCP 名）；eleball_* 为空
 	Capabilities  []string         `json:"capabilities,omitempty"`
 	Image         *ModuleImageMeta `json:"image,omitempty"`
 	Signature     string           `json:"signature,omitempty"`
@@ -450,6 +455,8 @@ type marketplaceModuleManifest struct {
 	TransportType     string                         `json:"transport_type"`                // 兼容旧格式
 	Deployment        string                         `json:"deployment"`                    // 新格式
 	Source            string                         `json:"source"`                        // 新格式
+	SourceOrigin      string                         `json:"source_origin,omitempty"`       // 模块来源属性，缺失由 Register 按 side 默认
+	SourceActor       string                         `json:"source_actor,omitempty"`        // 来源主体（user=用户名 / mcp=MCP 名）
 	Command           string                         `json:"command,omitempty"`             // process/stdio 启动命令
 	Args              []string                       `json:"args,omitempty"`                // process/stdio 参数
 	Env               map[string]string              `json:"env,omitempty"`                 // process/stdio 环境变量
@@ -567,6 +574,7 @@ type UserModuleGenerateRequest struct {
 	Description     string                         `json:"description"`      // 模块描述
 	ModuleID        string                         `json:"module_id"`        // 模块 ID（缺省据 name 生成）
 	MainPyContent   string                         `json:"main_py_content"`  // main.py 草稿内容（web 编辑器；非空时优先落盘，见 writeUserMainPy）
+	Username        string                         `json:"username"`         // 创建者用户名（写 module.json source_actor；前端 T5 传入，缺失则空）
 }
 
 // UserModuleGenerateResult 生成结果
@@ -682,6 +690,8 @@ func writeUserModuleJSON(moduleDir, moduleID string, req UserModuleGenerateReque
 		Credentials:  req.CredentialsMeta,
 		Capabilities: caps,
 	}
+	m.SourceOrigin = "user" // type4a：/studio 脚本造秘技，actor=创建者用户名
+	m.SourceActor = req.Username
 	m.Driver.ID = moduleID
 	m.Driver.Name = req.Name
 	m.Driver.Description = req.Description
@@ -692,7 +702,11 @@ func writeUserModuleJSON(moduleDir, moduleID string, req UserModuleGenerateReque
 	return os.WriteFile(filepath.Join(moduleDir, "module.json"), data, 0o644)
 }
 
-// sanitizeUserModuleID 据展示名推导合法 module ID：小写 + [a-z0-9-]，其余折叠为单 -。
+// sanitizeUserModuleID 据展示名推导合法 module ID：小写 + [a-z0-9-]，其余折叠为单 -，
+// 再追加 uuid8 后缀（复用 cloud generateUniqueModuleID 的 uuid 模式）使重名模块不撞
+// （为 T11 分享到云端铺路：不同用户同名模块得到不同 ID，云端无需改名、本地↔云端 ID 链稳定）。
+// 仅用于新生成模块（module_id 缺省路径，WriteUserModule:596）；显式传 module_id 的重新生成/定点
+// 走 :594 旁路，不经过本函数，故「仅影响新生成模块，不破坏存量查找，官方模块 ID 不变」。
 func sanitizeUserModuleID(name string) string {
 	var sb strings.Builder
 	prevDash := false
@@ -705,7 +719,11 @@ func sanitizeUserModuleID(name string) string {
 			prevDash = true
 		}
 	}
-	return strings.Trim(sb.String(), "-")
+	base := strings.Trim(sb.String(), "-")
+	if base == "" {
+		base = "mod" // 名称无可折叠字符时回退，镜像 cloud generateUniqueModuleID 的 mod-<uuid8>
+	}
+	return base + "-" + uuid.New().String()[:8]
 }
 
 // userModuleEchoSkeleton 最小 stdio MCP 骨架（echo 工具），用户未提供脚本时落盘以便后续编辑。
@@ -948,6 +966,8 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 			Name:              m.Name,
 			Description:       m.Description,
 			Source:            model.SkillRuntimeSource(m.Source),
+			SourceOrigin:      model.SkillRuntimeSourceOrigin(m.SourceOrigin),
+			SourceActor:       m.SourceActor,
 			Transport:         transport,
 			Deployment:        deployment,
 			Endpoint:          endpoint,
@@ -979,9 +999,16 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 		}
 
 		if existing != nil {
-			rt.Status = existing.Status
 			rt.CreatedAt = existing.CreatedAt
 			rt.UpdatedAt = time.Now()
+			// process 模块跨重启后子进程已不存在，online/starting/error 为陈旧缓存，
+			// 重置为 offline 由探活/自启动重新判定（消除重启后"在线但会话未注册"误报）；
+			// disabled 是用户主动禁用，跨重启保留。
+			if deployment == model.SkillRuntimeDeploymentProcess && existing.Status != model.SkillRuntimeStatusDisabled {
+				rt.Status = model.SkillRuntimeStatusOffline
+			} else {
+				rt.Status = existing.Status
+			}
 		} else {
 			rt.Status = model.SkillRuntimeStatusOffline
 			rt.CreatedAt = time.Now()
@@ -1087,7 +1114,8 @@ func (s *ModuleService) InstallMCPRuntime(req *MCPInstallRequest, tools []MCPToo
 		deployment = model.SkillRuntimeDeploymentExternal
 	}
 
-	runtimeID := "mcp-remote-" + model.GenerateModuleID(req.Name)
+	// 追加 uuid8 后缀（复用 cloud generateUniqueModuleID 的 uuid 模式）使重名 MCP 模块不撞（T6，为 T11 铺路）。
+	runtimeID := "mcp-remote-" + model.GenerateModuleID(req.Name) + "-" + uuid.New().String()[:8]
 	rt := &model.SkillRuntime{
 		ID:          runtimeID,
 		Name:        req.Name,
@@ -1099,6 +1127,8 @@ func (s *ModuleService) InstallMCPRuntime(req *MCPInstallRequest, tools []MCPToo
 		DriverID:    runtimeID, // 自驱动
 		Status:      model.SkillRuntimeStatusOffline,
 	}
+	rt.SourceOrigin = model.SkillRuntimeOriginMCP // type4b：MCP 安装，actor=MCP 名
+	rt.SourceActor = req.Name
 	caps := make([]string, 0, len(tools))
 	for _, t := range tools {
 		caps = append(caps, t.Name)
@@ -1244,6 +1274,8 @@ func runtimeToModuleRecord(rt *model.SkillRuntime, st *SkillRuntimeStatusSnapsho
 		TransportType: model.ModuleTransportTypeModule,
 		Version:       rt.Version,
 		Official:      rt.Official,
+		SourceOrigin:  string(rt.SourceOrigin),
+		SourceActor:   rt.SourceActor,
 		ImageRef:      rt.ImageRef,
 		ImageDigest:   rt.ImageDigest,
 		Signature:     rt.Signature,
@@ -1363,6 +1395,18 @@ func (s *ModuleService) upsertCloudPurchasedModuleRecord(moduleID string, rt *mo
 //   - official=true：直接激活本地预置（marketplace/ 已扫描注册），无需拉镜像。
 //   - 第三方：ImageInstaller 拉镜像 + 签名校验 + 启动容器，再写入 registry 激活。
 //
+// applyCloudSourceOrigin 把云端下发的来源属性写到本地运行时（type3：云端下载模块）。
+// meta.SourceOrigin 非空时覆盖本地扫描值（云端为权威来源）；空则保留本地值。返回是否有变更。
+func applyCloudSourceOrigin(rt *model.SkillRuntime, meta ModuleInstallMeta) bool {
+	if meta.SourceOrigin == "" {
+		return false
+	}
+	changed := string(rt.SourceOrigin) != meta.SourceOrigin || rt.SourceActor != meta.SourceActor
+	rt.SourceOrigin = model.SkillRuntimeSourceOrigin(meta.SourceOrigin)
+	rt.SourceActor = meta.SourceActor
+	return changed
+}
+
 // 返回安装后的 ModuleRecord（含 image/signature 元数据）。已安装同 module_id 视为幂等成功。
 func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.ModuleRecord, error) {
 	if s.registry == nil {
@@ -1371,6 +1415,13 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Mod
 
 	// 已存在则幂等返回（避免重复拉镜像/启动容器）
 	if existing, err := s.repo.GetByID(meta.ModuleID); err == nil && existing != nil {
+		// 持久化云端下发的来源属性（type3：云端下载模块 -> eleball_cloud / user 共享 -> user+actor）。
+		// 幂等重装也会校正本地扫描默认值（如 agent-reach/firecrawl 扫描默认 eleball_builtin -> 云端 eleball_cloud）。
+		if applyCloudSourceOrigin(existing, meta) {
+			if err := s.repo.CreateOrUpdate(existing); err != nil {
+				return nil, fmt.Errorf("持久化模块来源属性失败: %w", err)
+			}
+		}
 		// 官方预置模块：幂等路径也补齐旧 modules 表的 official/来源标记（本地扫描建记录时无此信息）。
 		// 注意：经云端 installed 接口安装的官方模块同样标记 cloud-purchased，
 		// 与本地纯扫描预置（InstallSource 为空）区分，激活时统一走 VIP 门控。
@@ -1381,6 +1432,10 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Mod
 		}
 		// 幂等路径也要补齐驱动绑定（首次安装时驱动写库失败重试、云端补发 driver_id 等场景）
 		if err := s.upsertDriverBinding(meta); err != nil {
+			return nil, err
+		}
+		// S2：云端下发了 manifest -> 云端 manifest 定名接管，关闭 auto_sku 并下架遗留派生 SKU。
+		if err := s.applyCloudManifestSKUAuthority(meta, existing); err != nil {
 			return nil, err
 		}
 		record := runtimeToModuleRecord(existing, s.registry.Check(meta.ModuleID))
@@ -1400,6 +1455,11 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Mod
 		if err := s.upsertCloudPurchasedModuleRecord(meta.ModuleID, rec, meta.Version); err != nil {
 			return nil, err
 		}
+		if applyCloudSourceOrigin(rec, meta) {
+			if err := s.repo.CreateOrUpdate(rec); err != nil {
+				return nil, fmt.Errorf("持久化模块来源属性失败: %w", err)
+			}
+		}
 		record = runtimeToModuleRecord(rec, s.registry.Check(meta.ModuleID))
 		record.InstallSource = "cloud-purchased"
 	} else {
@@ -1414,6 +1474,7 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Mod
 			return nil, err
 		}
 		rt := moduleRecordToRuntime(rec)
+		applyCloudSourceOrigin(rt, meta) // Register 持久化（含来源属性）
 		if err := s.registry.Register(rt); err != nil {
 			return nil, fmt.Errorf("注册模块到 registry 失败: %w", err)
 		}
@@ -1436,7 +1497,55 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Mod
 		record.SetCapabilities(st.Capabilities)
 		record.HealthError = st.Error
 	}
+	// S2：云端下发了 manifest -> 云端 manifest 定名接管，关闭 auto_sku 并下架遗留派生 SKU。
+	if rt, err := s.repo.GetByID(meta.ModuleID); err == nil && rt != nil {
+		if err := s.applyCloudManifestSKUAuthority(meta, rt); err != nil {
+			return nil, err
+		}
+	}
 	return record, nil
+}
+
+// applyCloudManifestSKUAuthority 云端下发了 manifest 时，云端 manifest 即该模块 SKU 的权威来源：
+//   - 关闭运行时 auto_sku：停止据 tools/list 自动派生（派生名取 MCP 工具名，与云端 manifest 定名不一致，
+//     会导致本地卡片名与云端对不上）。
+//   - 下架遗留派生 SKU：仅 manifest 标记 auto_sku_module == rt.ID 的自动派生项；手写 SKU 与云端 manifest
+//     落库的 SKU 无此标记，保留。
+//
+// auto_sku 翻转以入参 rt（DB 副本，含调用方已应用的来源属性等变更）为准写库，避免用 registry 内存副本
+// 覆盖那些变更；同时把内存副本（supervisor 持有同一指针）的 auto_sku 同步置 false，使其立即停止派生。
+// 未注入 AgentRepo 或 meta 无 manifest 时跳过。
+func (s *ModuleService) applyCloudManifestSKUAuthority(meta ModuleInstallMeta, rt *model.SkillRuntime) error {
+	if s.agentRepo == nil || rt == nil || len(meta.Manifest) == 0 || string(meta.Manifest) == "null" {
+		return nil
+	}
+	if rt.AutoSKU {
+		rt.AutoSKU = false
+		if err := s.repo.CreateOrUpdate(rt); err != nil {
+			return fmt.Errorf("关闭 auto_sku 失败: %w", err)
+		}
+	}
+	if inMem := s.registry.Get(rt.ID); inMem != nil && inMem != rt {
+		inMem.AutoSKU = false // supervisor 持有同一指针，立即停止自动派生
+	}
+	// 下架本模块遗留的自动派生 SKU（auto_sku_module == rt.ID）；手写/云端 manifest SKU 无此标记，保留。
+	existing, err := s.agentRepo.ListByModuleSKUs(rt.ID)
+	if err != nil {
+		return fmt.Errorf("查询模块 %s 现有 SKU 失败: %w", rt.ID, err)
+	}
+	for _, item := range existing {
+		if item.Status == model.AgentStatusDelisted {
+			continue
+		}
+		mf, _ := item.Manifest()
+		if mf == nil || mf.Metadata["auto_sku_module"] != rt.ID {
+			continue
+		}
+		if err := s.agentRepo.UpdateStatus(item.ID, model.AgentStatusDelisted); err != nil {
+			return fmt.Errorf("下架遗留派生 SKU %s 失败: %w", item.ID, err)
+		}
+	}
+	return nil
 }
 
 // upsertDriverBinding 按云端 meta upsert 本地驱动别名并绑定到已安装模块。

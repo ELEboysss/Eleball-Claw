@@ -59,6 +59,15 @@ const categoryIcons = {
   '创意': Sparkles
 }
 
+// 模块来源标签：eleball_cloud->eleball云端 / eleball_builtin->eleball内置 / user·mcp->主体名；
+// source_origin 缺失（旧云端）回退 official 合成「官方/第三方」。
+function sourceLabel(origin, actor, official) {
+  if (origin === 'eleball_cloud') return 'eleball云端'
+  if (origin === 'eleball_builtin') return 'eleball内置'
+  if (origin === 'user' || origin === 'mcp') return actor || (origin === 'mcp' ? 'MCP' : '用户')
+  return official ? '官方' : '第三方'
+}
+
 export default function AgentMarket() {
   useSEO('Agent 技能市场', '可购买、可组合、可编排的 Agent 能力。给你的悬浮球加技能。')
   const { isLoggedIn, user } = useAuth()
@@ -94,6 +103,10 @@ export default function AgentMarket() {
   const [depsLoading, setDepsLoading] = useState(false)
   const [depsInstalling, setDepsInstalling] = useState(false)
   const [depsError, setDepsError] = useState('')
+  // C1：卡片详情大窗 + 评论区懒加载
+  const [detailAgent, setDetailAgent] = useState(null)
+  const [detailReviews, setDetailReviews] = useState([])
+  const [detailReviewsLoading, setDetailReviewsLoading] = useState(false)
 
   // 加载能力开关与余额
   useEffect(() => {
@@ -113,6 +126,20 @@ export default function AgentMarket() {
     }).catch(() => {})
     loadAgents()
   }, [category, sort, filter])
+
+  // C1：打开详情大窗时懒加载评论区（仅本地秘技；云端已购未安装卡片无评价接口，跳过）
+  useEffect(() => {
+    if (!detailAgent || detailAgent.cloud_not_installed) {
+      setDetailReviews([])
+      return
+    }
+    setDetailReviewsLoading(true)
+    agentMarketApi
+      .listReviews(detailAgent.id)
+      .then((d) => setDetailReviews(d?.items || d || []))
+      .catch(() => setDetailReviews([]))
+      .finally(() => setDetailReviewsLoading(false))
+  }, [detailAgent])
 
   const loadAgents = () => {
     // 「我的助手」Tab 不加载秘技列表，助手数据由 AssistantManager 自行加载
@@ -171,6 +198,16 @@ export default function AgentMarket() {
     }
   }
 
+  // C1：解析本地秘技 manifest 全量对象（详情大窗展示用）；云端卡片无 manifest_json 返回 null
+  const parseManifest = (agent) => {
+    try {
+      const manifest = typeof agent.manifest_json === 'string' ? JSON.parse(agent.manifest_json) : agent.manifest_json
+      return manifest || null
+    } catch {
+      return null
+    }
+  }
+
   // 把云端 ModuleInstallMeta 合成为与本地卡片同构的展示对象（卡片数据来自 meta + meta.manifest）
   const metaToCloudCard = (meta) => {
     let manifest = meta.manifest
@@ -192,7 +229,7 @@ export default function AgentMarket() {
       avg_rating: meta.avg_rating ?? 0,
       active_count: meta.active_count ?? 0,
       purchase_count: meta.purchase_count ?? 0,
-      creator_name: meta.official ? '官方' : '第三方',
+      creator_name: sourceLabel(meta.source_origin, meta.source_actor, meta.official),
       // 云端已购·未安装标记，渲染「下载到本地」按钮
       cloud_not_installed: true,
       cloud_meta: meta
@@ -405,6 +442,100 @@ export default function AgentMarket() {
     }
   }
 
+  // C1：卡片与详情大窗共用的底部动作区（价格 + 购买/激活/下载）。
+  // 内部交互元素一律 stopPropagation，使卡片 onClick 打开详情不被按钮点击误触；
+  // 在详情大窗内调用时无父级 onClick，stopPropagation 为无副作用空操作。
+  const renderAgentActions = (agent) => {
+    const isPurchased = purchasedIds.has(agent.id)
+    return (
+      <div className="mt-auto flex items-center justify-between gap-3">
+        <div className="text-sm">
+          {agent.cloud_not_installed ? (
+            <span className="text-sky-600 font-medium">云端已购</span>
+          ) : agent.price_danwan === 0 ? (
+            <span className="text-emerald-600 font-medium">免费</span>
+          ) : (
+            <span className="font-bold text-eleball-text">
+              {agent.price_danwan.toLocaleString('zh-CN')} 弹丸
+            </span>
+          )}
+          {agent.price_elegant && (
+            <span className="text-xs text-eleball-text-secondary ml-1 block">
+              或 {agent.price_elegant.toLocaleString('zh-CN')} 优雅弹丸
+            </span>
+          )}
+        </div>
+        {agent.cloud_not_installed ? (
+          <button
+            onClick={(e) => { e.stopPropagation(); handleInstall(agent.cloud_meta) }}
+            disabled={installingId === agent.cloud_meta?.module_id}
+            className="btn-primary text-sm px-4 py-2 flex items-center gap-1.5 disabled:opacity-50"
+            title={agent.cloud_meta?.official ? '官方秘技，需 VIP1 及以上' : '第三方秘技，需 Docker/Podman 且需 VIP1 及以上'}
+          >
+            {installingId === agent.cloud_meta?.module_id ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                安装中...
+              </>
+            ) : (
+              <>
+                <CloudDownload className="w-3.5 h-3.5" />
+                下载到本地
+              </>
+            )}
+          </button>
+        ) : isPurchased && agent.manifest_json ? (
+          <label
+            onClick={(e) => e.stopPropagation()}
+            className={`inline-flex items-center gap-2 px-3 py-2 rounded-full text-xs font-medium transition-colors ${agent.driver_registered === false || agent.credential_complete === false ? 'cursor-not-allowed bg-gray-100 text-gray-400' : 'cursor-pointer ' + (agent.is_active ? 'bg-emerald-50 text-emerald-600' : 'bg-eleball-surface-variant text-eleball-text-secondary')}`}
+          >
+            <input
+              type="checkbox"
+              className="sr-only"
+              checked={!!agent.is_active}
+              disabled={agent.driver_registered === false || agent.credential_complete === false || togglingId === agent.id}
+              onChange={() => handleToggleActive(agent)}
+            />
+            <span className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${agent.is_active ? 'bg-emerald-500' : 'bg-gray-300'}`}>
+              <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition-transform ${agent.is_active ? 'translate-x-3.5' : 'translate-x-1'}`} />
+            </span>
+            {agent.driver_registered === false
+              ? '驱动未注册'
+              : agent.credential_complete === false
+                ? '凭证不全'
+                : togglingId === agent.id
+                  ? '处理中...'
+                  : agent.is_active
+                    ? agent.module_online === false
+                      ? '已激活（离线）'
+                      : '已激活'
+                    : '未激活'}
+          </label>
+        ) : isPurchased ? (
+          <span className="px-4 py-2 rounded-full text-sm font-medium bg-eleball-surface-variant text-eleball-text-secondary">
+            已拥有
+          </span>
+        ) : agent.driver_registered === false ? (
+          <button
+            onClick={(e) => e.stopPropagation()}
+            disabled
+            className="text-sm px-4 py-2 rounded-full font-medium bg-gray-100 text-gray-400 cursor-not-allowed"
+            title="驱动未注册，暂不可购买"
+          >
+            {agent.price_danwan === 0 ? '暂不可领' : '不可购买'}
+          </button>
+        ) : (
+          <button
+            onClick={(e) => { e.stopPropagation(); openPurchaseConfirm(agent) }}
+            className="btn-primary text-sm px-4 py-2"
+          >
+            {agent.price_danwan === 0 ? '免费领取' : '购买'}
+          </button>
+        )}
+      </div>
+    )
+  }
+
   // 未登录引导
   if (!isLoggedIn) {
     return (
@@ -608,11 +739,11 @@ export default function AgentMarket() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {filteredAgents.map((agent) => {
           const Icon = categoryIcons[agent.category] || Sparkles
-          const isPurchased = purchasedIds.has(agent.id)
           return (
             <div
               key={agent.id}
-              className="card p-5 flex flex-col hover:border-eleball-primary/40 transition-colors"
+              onClick={() => setDetailAgent(agent)}
+              className="card p-5 flex flex-col hover:border-eleball-primary/40 transition-colors cursor-pointer"
             >
               <div className="flex items-start justify-between mb-4">
                 <div className="w-12 h-12 rounded-2xl bg-eleball-primary-light flex items-center justify-center shrink-0">
@@ -651,7 +782,7 @@ export default function AgentMarket() {
                   )}
                   {agent.has_deps && !agent.deps_installed && (
                     <button
-                      onClick={() => openDepsModal(agent)}
+                      onClick={(e) => { e.stopPropagation(); openDepsModal(agent) }}
                       className="text-xs px-2 py-0.5 rounded-full font-medium bg-orange-50 text-orange-600 flex items-center gap-1 hover:bg-orange-100 transition-colors"
                       title="该秘技依赖第三方包未安装，点击安装"
                     >
@@ -668,7 +799,7 @@ export default function AgentMarket() {
                   </span>
                   {Object.keys(parseManifestCredentials(agent)).length > 0 && (
                     <button
-                      onClick={() => openCredentialModal(agent)}
+                      onClick={(e) => { e.stopPropagation(); openCredentialModal(agent) }}
                       className="text-eleball-text-tertiary hover:text-eleball-primary transition-colors"
                       title="配置凭证"
                     >
@@ -676,7 +807,7 @@ export default function AgentMarket() {
                     </button>
                   )}
                   <button
-                    onClick={() => {}}
+                    onClick={(e) => e.stopPropagation()}
                     className="text-eleball-text-tertiary hover:text-eleball-primary transition-colors"
                     title="收藏"
                   >
@@ -699,87 +830,7 @@ export default function AgentMarket() {
                 <span>{agent.creator_name || '官方'}</span>
               </div>
 
-              <div className="mt-auto flex items-center justify-between gap-3">
-                <div className="text-sm">
-                  {agent.cloud_not_installed ? (
-                    <span className="text-sky-600 font-medium">云端已购</span>
-                  ) : agent.price_danwan === 0 ? (
-                    <span className="text-emerald-600 font-medium">免费</span>
-                  ) : (
-                    <span className="font-bold text-eleball-text">
-                      {agent.price_danwan.toLocaleString('zh-CN')} 弹丸
-                    </span>
-                  )}
-                  {agent.price_elegant && (
-                    <span className="text-xs text-eleball-text-secondary ml-1 block">
-                      或 {agent.price_elegant.toLocaleString('zh-CN')} 优雅弹丸
-                    </span>
-                  )}
-                </div>
-                {agent.cloud_not_installed ? (
-                  <button
-                    onClick={() => handleInstall(agent.cloud_meta)}
-                    disabled={installingId === agent.cloud_meta?.module_id}
-                    className="btn-primary text-sm px-4 py-2 flex items-center gap-1.5 disabled:opacity-50"
-                    title={agent.cloud_meta?.official ? '官方秘技，需 VIP1 及以上' : '第三方秘技，需 Docker/Podman 且需 VIP1 及以上'}
-                  >
-                    {installingId === agent.cloud_meta?.module_id ? (
-                      <>
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        安装中...
-                      </>
-                    ) : (
-                      <>
-                        <CloudDownload className="w-3.5 h-3.5" />
-                        下载到本地
-                      </>
-                    )}
-                  </button>
-                ) : isPurchased && agent.manifest_json ? (
-                  <label className={`inline-flex items-center gap-2 px-3 py-2 rounded-full text-xs font-medium transition-colors ${agent.driver_registered === false || agent.credential_complete === false ? 'cursor-not-allowed bg-gray-100 text-gray-400' : 'cursor-pointer ' + (agent.is_active ? 'bg-emerald-50 text-emerald-600' : 'bg-eleball-surface-variant text-eleball-text-secondary')}`}>
-                    <input
-                      type="checkbox"
-                      className="sr-only"
-                      checked={!!agent.is_active}
-                      disabled={agent.driver_registered === false || agent.credential_complete === false || togglingId === agent.id}
-                      onChange={() => handleToggleActive(agent)}
-                    />
-                    <span className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${agent.is_active ? 'bg-emerald-500' : 'bg-gray-300'}`}>
-                      <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition-transform ${agent.is_active ? 'translate-x-3.5' : 'translate-x-1'}`} />
-                    </span>
-                    {agent.driver_registered === false
-                      ? '驱动未注册'
-                      : agent.credential_complete === false
-                        ? '凭证不全'
-                        : togglingId === agent.id
-                          ? '处理中...'
-                          : agent.is_active
-                            ? agent.module_online === false
-                              ? '已激活（离线）'
-                              : '已激活'
-                            : '未激活'}
-                  </label>
-                ) : isPurchased ? (
-                  <span className="px-4 py-2 rounded-full text-sm font-medium bg-eleball-surface-variant text-eleball-text-secondary">
-                    已拥有
-                  </span>
-                ) : agent.driver_registered === false ? (
-                  <button
-                    disabled
-                    className="text-sm px-4 py-2 rounded-full font-medium bg-gray-100 text-gray-400 cursor-not-allowed"
-                    title="驱动未注册，暂不可购买"
-                  >
-                    {agent.price_danwan === 0 ? '暂不可领' : '不可购买'}
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => openPurchaseConfirm(agent)}
-                    className="btn-primary text-sm px-4 py-2"
-                  >
-                    {agent.price_danwan === 0 ? '免费领取' : '购买'}
-                  </button>
-                )}
-              </div>
+              {renderAgentActions(agent)}
             </div>
           )
         })}
@@ -977,6 +1028,243 @@ export default function AgentMarket() {
           </div>
         </div>
       )}
+
+      {/* C1：秘技详情大窗（点击卡片打开，展示完整描述 / manifest 详情 / 系统提示词 / 统计 / 评价） */}
+      {detailAgent && (() => {
+        const agent = detailAgent
+        const Icon = categoryIcons[agent.category] || Sparkles
+        const manifest = parseManifest(agent)
+        const creds = manifest?.credentials || {}
+        const hasCreds = Object.keys(creds).length > 0
+        return (
+          <div
+            className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+            onClick={() => setDetailAgent(null)}
+          >
+            <div
+              className="dialog-panel w-full max-w-2xl max-h-[85vh] flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* 头部：图标 + 名称 + 等级 + 状态徽章 + 关闭 */}
+              <div className="p-4 border-b border-eleball-outline flex items-start gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-eleball-primary-light flex items-center justify-center shrink-0 overflow-hidden">
+                  {agent.icon_url ? (
+                    <img src={agent.icon_url} alt={agent.name} className="w-full h-full object-cover" />
+                  ) : (
+                    <Icon className="w-6 h-6 text-eleball-primary" />
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="font-bold text-eleball-text truncate">{agent.name}</h3>
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${levelColors[agent.level] || levelColors[1]}`}>
+                      {levelNames[agent.level] || '秘技'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-wrap mt-1.5">
+                    {agent.cloud_not_installed && (
+                      <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-sky-50 text-sky-600 flex items-center gap-1">
+                        <CloudDownload className="w-3 h-3" /> 云端已购·未安装
+                      </span>
+                    )}
+                    {agent.driver_registered === false && (
+                      <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-orange-50 text-orange-600 flex items-center gap-1">
+                        <AlertCircle className="w-3 h-3" /> 未注册
+                      </span>
+                    )}
+                    {agent.driver_registered !== false && agent.module_online === false && (
+                      <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-red-50 text-red-600 flex items-center gap-1">
+                        <CloudOff className="w-3 h-3" /> 离线
+                      </span>
+                    )}
+                    {agent.driver_registered !== false && agent.module_online === true && (
+                      <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-emerald-50 text-emerald-600 flex items-center gap-1">
+                        <Cloud className="w-3 h-3" /> 在线
+                      </span>
+                    )}
+                    {agent.credential_complete === false && (
+                      <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-amber-50 text-amber-600 flex items-center gap-1">
+                        <AlertCircle className="w-3 h-3" /> 凭证不全
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <button onClick={() => setDetailAgent(null)} className="text-eleball-text-tertiary hover:text-eleball-text shrink-0 text-xl leading-none">
+                  &times;
+                </button>
+              </div>
+
+              {/* 内容区：可滚动 */}
+              <div className="p-4 space-y-4 overflow-auto">
+                {/* 完整描述（不截断） */}
+                <p className="text-sm text-eleball-text-secondary leading-relaxed whitespace-pre-wrap">
+                  {agent.description || '暂无描述'}
+                </p>
+
+                {/* 统计 */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                  <div className="rounded-xl bg-eleball-surface-variant p-2">
+                    <div className="text-sm font-bold text-eleball-text flex items-center justify-center gap-1">
+                      <Star className="w-3 h-3" />{agent.avg_rating ? agent.avg_rating.toFixed(1) : '-'}
+                    </div>
+                    <div className="text-[10px] text-eleball-text-tertiary mt-0.5">评分</div>
+                  </div>
+                  <div className="rounded-xl bg-eleball-surface-variant p-2">
+                    <div className="text-sm font-bold text-eleball-text">{agent.active_count || 0}</div>
+                    <div className="text-[10px] text-eleball-text-tertiary mt-0.5">人激活</div>
+                  </div>
+                  <div className="rounded-xl bg-eleball-surface-variant p-2">
+                    <div className="text-sm font-bold text-eleball-text">{agent.purchase_count || 0}</div>
+                    <div className="text-[10px] text-eleball-text-tertiary mt-0.5">人购买</div>
+                  </div>
+                  <div className="rounded-xl bg-eleball-surface-variant p-2">
+                    <div className="text-sm font-bold text-eleball-text">{agent.use_count || 0}</div>
+                    <div className="text-[10px] text-eleball-text-tertiary mt-0.5">次使用</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap text-xs text-eleball-text-tertiary">
+                  <span>作者：{agent.creator_name || '官方'}</span>
+                  {agent.category && <span>· 分类：{agent.category}</span>}
+                  {agent.favorite_count != null && <span>· {agent.favorite_count} 人收藏</span>}
+                </div>
+
+                {/* manifest 能力详情（本地秘技；云端卡片无 manifest 跳过） */}
+                {manifest && (
+                  <div className="space-y-3">
+                    <div className="text-xs font-semibold text-eleball-text-tertiary uppercase tracking-wide">能力详情</div>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      {manifest.driver && (
+                        <div className="flex items-center gap-1.5"><span className="text-eleball-text-tertiary">驱动</span><span className="font-mono text-eleball-text">{manifest.driver}</span></div>
+                      )}
+                      {manifest.runtime_type && (
+                        <div className="flex items-center gap-1.5"><span className="text-eleball-text-tertiary">运行时</span><span className="font-mono text-eleball-text">{manifest.runtime_type}</span></div>
+                      )}
+                      {manifest.timeout_seconds > 0 && (
+                        <div className="flex items-center gap-1.5"><span className="text-eleball-text-tertiary">超时</span><span className="text-eleball-text">{manifest.timeout_seconds}s</span></div>
+                      )}
+                      {manifest.pricing && manifest.pricing.unit && (
+                        <div className="flex items-center gap-1.5"><span className="text-eleball-text-tertiary">计费</span><span className="text-eleball-text">{manifest.pricing.unit} / {manifest.pricing.currency || 'danwan'}</span></div>
+                      )}
+                    </div>
+
+                    {/* 权限 */}
+                    {manifest.permissions && manifest.permissions.length > 0 && (
+                      <div className="flex items-center gap-1.5 flex-wrap text-xs">
+                        <span className="text-eleball-text-tertiary">权限：</span>
+                        {manifest.permissions.map((p) => (
+                          <span key={p} className="px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 font-medium">{p}</span>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* 支持动作 */}
+                    {manifest.actions && manifest.actions.length > 0 && (
+                      <div className="space-y-1.5">
+                        <div className="text-eleball-text-tertiary text-xs">支持动作</div>
+                        {manifest.actions.map((a, i) => (
+                          <div key={i} className="rounded-lg bg-eleball-surface-variant p-2 text-xs">
+                            <div className="font-mono text-eleball-text">{a.name}</div>
+                            {a.description && <div className="text-eleball-text-secondary mt-0.5">{a.description}</div>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* 参数 schema（折叠） */}
+                    {manifest.parameters && Object.keys(manifest.parameters).length > 0 && (
+                      <details className="text-xs">
+                        <summary className="text-eleball-text-tertiary cursor-pointer">参数 schema</summary>
+                        <pre className="mt-1 px-3 py-2 rounded-lg bg-gray-50 text-eleball-text-secondary overflow-auto max-h-48 text-[11px] whitespace-pre-wrap">{JSON.stringify(manifest.parameters, null, 2)}</pre>
+                      </details>
+                    )}
+
+                    {/* 所需凭证 */}
+                    {hasCreds && (
+                      <div className="space-y-1.5">
+                        <div className="text-eleball-text-tertiary text-xs">所需凭证</div>
+                        {Object.entries(creds).map(([key, def]) => (
+                          <div key={key} className="rounded-lg bg-eleball-surface-variant p-2 text-xs">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-medium text-eleball-text">{def.label || key}</span>
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500">{def.type}</span>
+                              {def.scope === 'module' && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600">模块级共享</span>}
+                              {def.required && <span className="text-red-500 text-[10px]">必填</span>}
+                            </div>
+                            {def.description && <div className="text-eleball-text-secondary mt-0.5">{def.description}</div>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* 模块元数据（折叠） */}
+                    {manifest.metadata && Object.keys(manifest.metadata).length > 0 && (
+                      <details className="text-xs">
+                        <summary className="text-eleball-text-tertiary cursor-pointer">模块元数据</summary>
+                        <pre className="mt-1 px-3 py-2 rounded-lg bg-gray-50 text-eleball-text-secondary overflow-auto max-h-32 text-[11px] whitespace-pre-wrap">{JSON.stringify(manifest.metadata, null, 2)}</pre>
+                      </details>
+                    )}
+                  </div>
+                )}
+
+                {/* 系统提示词（折叠） */}
+                {agent.system_prompt && (
+                  <details className="text-xs">
+                    <summary className="text-eleball-text-tertiary cursor-pointer">系统提示词</summary>
+                    <pre className="mt-1 px-3 py-2 rounded-lg bg-gray-50 text-eleball-text-secondary overflow-auto max-h-48 whitespace-pre-wrap">{agent.system_prompt}</pre>
+                  </details>
+                )}
+
+                {/* 用户评价（仅本地秘技；云端已购未安装卡片无评价接口） */}
+                {!agent.cloud_not_installed && (
+                  <div className="space-y-2">
+                    <div className="text-xs font-semibold text-eleball-text-tertiary uppercase tracking-wide">用户评价</div>
+                    {detailReviewsLoading && <div className="text-sm text-eleball-text-secondary text-center py-2">加载中...</div>}
+                    {!detailReviewsLoading && detailReviews.length === 0 && (
+                      <div className="text-sm text-eleball-text-secondary text-center py-2">暂无评价</div>
+                    )}
+                    {detailReviews.map((r) => (
+                      <div key={r.id} className="rounded-lg bg-eleball-surface-variant p-2 text-xs">
+                        <div className="flex items-center gap-1.5 mb-0.5">
+                          <span className="font-medium text-eleball-text">{r.user_name || '匿名'}</span>
+                          <span className="text-eleball-primary flex items-center gap-0.5">
+                            {Array.from({ length: r.rating || 0 }).map((_, i) => <Star key={i} className="w-2.5 h-2.5 fill-current" />)}
+                          </span>
+                        </div>
+                        {r.comment && <div className="text-eleball-text-secondary">{r.comment}</div>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* 底部动作区：凭证 / 依赖 + 价格与主操作（与卡片共用 renderAgentActions） */}
+              <div className="p-4 border-t border-eleball-outline">
+                {(hasCreds || (agent.has_deps && !agent.deps_installed)) && (
+                  <div className="flex items-center gap-2 mb-3">
+                    {hasCreds && (
+                      <button
+                        onClick={() => openCredentialModal(agent)}
+                        className="text-xs px-3 py-1.5 rounded-full border border-eleball-outline text-eleball-text-secondary hover:bg-eleball-surface-variant transition-colors flex items-center gap-1.5"
+                      >
+                        <Settings className="w-3.5 h-3.5" /> 配置凭证
+                      </button>
+                    )}
+                    {agent.has_deps && !agent.deps_installed && (
+                      <button
+                        onClick={() => openDepsModal(agent)}
+                        className="text-xs px-3 py-1.5 rounded-full border border-eleball-outline text-orange-600 hover:bg-orange-50 transition-colors flex items-center gap-1.5"
+                      >
+                        <Package className="w-3.5 h-3.5" /> 安装依赖
+                      </button>
+                    )}
+                  </div>
+                )}
+                {renderAgentActions(agent)}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
     </div>
   )
 }

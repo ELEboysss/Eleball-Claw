@@ -70,6 +70,12 @@ func TestDeriveSKUs_CreatesAndSyncs(t *testing.T) {
 	require.Equal(t, "echo", mf.Actions[0].Name)
 	require.Equal(t, "object", mf.Parameters["type"])
 
+	// S1：派生 SKU 的 Name 应为工具名（非描述），Description 仍为工具描述。
+	require.Equal(t, "echo", echo.Name, "AgentItem.Name 应为工具名")
+	require.Equal(t, "echo", mf.Name, "manifest.Name 应为工具名")
+	require.Equal(t, "echo tool", echo.Description, "AgentItem.Description 应为工具描述")
+	require.Equal(t, "echo tool", mf.Description, "manifest.Description 应为工具描述")
+
 	_, err = repo.GetByID("mcp-stdio-echo-ping")
 	require.NoError(t, err)
 }

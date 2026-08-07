@@ -1,6 +1,8 @@
 package service
 
 import (
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,8 +28,8 @@ func sampleStdioDir() string {
 	return filepath.Join("..", "..", "marketplace", "mcp-stdio-echo")
 }
 
-// firecrawlStdioDir firecrawl stdio MCP 模块目录（首模块迁移 E1，测试从 gateway/internal/service/ 运行）
-func firecrawlStdioDir() string {
+// firecrawlModuleDir firecrawl MCP HTTP 模块目录（测试从 gateway/internal/service/ 运行）
+func firecrawlModuleDir() string {
 	return filepath.Join("..", "..", "marketplace", "firecrawl")
 }
 
@@ -232,18 +234,55 @@ func TestSkillRuntimeManager_StdioAutoSKU(t *testing.T) {
 	require.Equal(t, model.AgentStatusApproved, ping.Status)
 }
 
-// TestSkillRuntimeManager_StdioFirecrawlAutoSKU E2E：firecrawl 首模块迁移验证（E1）。
-// auto_sku stdio 模块探活后派生 scrape/crawl/extract 三 SKU，且 manifest 透传 module.json 的
-// credentials 声明（firecrawl_api_key, scope=module），供 web 提示用户填写、env 模板 ${credentials.KEY} 引用。
-// tools/list 不需 API Key，故无需真实凭证即可验证派生 + 凭证透传链路。
-func TestSkillRuntimeManager_StdioFirecrawlAutoSKU(t *testing.T) {
+// startFirecrawlHTTP 启动 firecrawl main.py（HTTP 模式）于空闲端口，轮询 /health 就绪后返回 endpoint。
+// t.Cleanup 自动终止子进程。firecrawl 已从 stdio 迁移为 docker mcp_http，测试随之改为 HTTP E2E。
+func startFirecrawlHTTP(t *testing.T) string {
+	t.Helper()
 	if !pythonAvailable() {
-		t.Skip("python 不在 PATH，跳过 stdio E2E 测试")
+		t.Skip("python 不在 PATH，跳过 firecrawl HTTP E2E 测试")
 	}
-	dir := firecrawlStdioDir()
+	dir := firecrawlModuleDir()
 	if _, err := os.Stat(filepath.Join(dir, "main.py")); err != nil {
 		t.Skipf("firecrawl 模块不存在: %v", err)
 	}
+	// 取空闲端口（listen :0 后立即关闭复用）
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := l.Addr().String()
+	_, port, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	l.Close()
+	endpoint := "http://" + addr
+
+	cmd := exec.Command("python", "main.py")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PORT="+port)
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+
+	// 轮询 /health 就绪
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(endpoint + "/health")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return endpoint
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("firecrawl HTTP 未在 10s 内就绪 (%s)", endpoint)
+	return endpoint
+}
+
+// TestSkillRuntimeManager_HTTPFirecrawlAutoSKU E2E：firecrawl stdio->docker mcp_http 迁移验证。
+// auto_sku mcp_http 模块探活（initialize + tools/list）后派生 scrape/crawl/extract 三 SKU，且 manifest
+// 透传 module.json 的 credentials 声明（firecrawl_api_key, scope=module），供 web 提示用户填写、
+// mcp_server_config.headers 模板 ${credentials.firecrawl_api_key} 引用同名 key。tools/list 不需 API Key，
+// 故无需真实凭证即可验证派生 + 凭证透传链路。
+func TestSkillRuntimeManager_HTTPFirecrawlAutoSKU(t *testing.T) {
+	endpoint := startFirecrawlHTTP(t)
 
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
@@ -251,23 +290,21 @@ func TestSkillRuntimeManager_StdioFirecrawlAutoSKU(t *testing.T) {
 	agentRepo := repository.NewAgentRepo(db)
 
 	reg := NewSkillRuntimeRegistry(&config.AgentReachConfig{})
-	mcpStdio := NewMCPStdioProtocol(nil)
-	reg.SetMCPStdioProtocol(mcpStdio)
-	mgr := NewSkillRuntimeManager(reg, nil)
-	mgr.SetMCPStdioProtocol(mcpStdio)
-	mgr.SetSKUService(NewSkillRuntimeSKUService(agentRepo, nil))
+	reg.SetSKUService(NewSkillRuntimeSKUService(agentRepo, nil))
 
 	rt := &model.SkillRuntime{
 		ID:         "firecrawl",
 		Name:       "Firecrawl 网页抓取",
 		DriverID:   "firecrawl",
-		Transport:  model.SkillRuntimeTransportMCPStdio,
-		Deployment: model.SkillRuntimeDeploymentProcess,
-		Command:    "python",
-		WorkDir:    dir,
+		Transport:  model.SkillRuntimeTransportMCPHTTP,
+		Deployment: model.SkillRuntimeDeploymentDocker,
+		Endpoint:   endpoint,
 		AutoSKU:    true,
 	}
-	rt.SetArgs([]string{"main.py"})
+	rt.SetMCPServerConfig(&model.MCPServerConfig{
+		URL:     endpoint,
+		Headers: map[string]string{"X-Firecrawl-Key": "${credentials.firecrawl_api_key}"},
+	})
 	rt.SetCredentials(map[string]model.CredentialDef{
 		"firecrawl_api_key": {
 			Type:     model.CredentialTypeAPIKey,
@@ -277,8 +314,6 @@ func TestSkillRuntimeManager_StdioFirecrawlAutoSKU(t *testing.T) {
 		},
 	})
 	require.NoError(t, reg.Register(rt))
-	require.NoError(t, mgr.Start(rt.ID))
-	defer mgr.Stop(rt.ID)
 
 	waitOnline(t, reg, rt.ID, 10*time.Second)
 
@@ -309,7 +344,7 @@ func TestSkillRuntimeManager_StdioFirecrawlAutoSKU(t *testing.T) {
 		require.NoError(t, err, name+" manifest 解析失败")
 		require.Equal(t, model.ToolDriverType("firecrawl"), mf.Driver, name+" driver 不符")
 		require.Equal(t, "firecrawl", mf.Metadata["module"], name+" module 元数据不符")
-		// 凭证声明透传：web 据此提示用户填 API Key，env 模板 ${credentials.firecrawl_api_key} 引用同名 key
+		// 凭证声明透传：web 据此提示用户填 API Key，header 模板 ${credentials.firecrawl_api_key} 引用同名 key
 		require.Contains(t, mf.Credentials, "firecrawl_api_key", name+" 缺凭证声明")
 		require.True(t, mf.Credentials["firecrawl_api_key"].Required, name+" 凭证应必填")
 		require.Equal(t, model.CredentialScopeModule, mf.Credentials["firecrawl_api_key"].Scope, name+" 凭证应 module 级")

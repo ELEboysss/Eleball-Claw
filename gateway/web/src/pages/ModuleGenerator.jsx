@@ -218,6 +218,9 @@ export default function ModuleGenerator() {
         main_py_content: mainPy,
       })
       setResult(data)
+      // T6：生成后回填 module_id，使同会话「修改脚本后重新生成」走显式 ID -> 覆盖+重启，
+      // 而非再次 sanitize 出新 uuid8 另建模块（会破坏重新生成语义、留下旧进程跑旧代码）。
+      if (data?.module_id) setModuleId(data.module_id)
     } catch (e) {
       setGenError({ message: e.message, data: e.data })
     } finally {
@@ -290,7 +293,7 @@ export default function ModuleGenerator() {
             <input
               className="input text-sm"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => { setName(e.target.value); setModuleId('') }}
               placeholder="如：我的翻译工具"
             />
           </div>

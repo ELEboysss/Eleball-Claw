@@ -95,9 +95,9 @@ export const moduleApi = {
   deleteDriver: (id) => client.delete(`/claw-console/drivers/${id}`),
   // P4：把云端已购模块元数据安装到本地（拉镜像+签名校验+激活）
   install: (installMeta) => client.post('/claw-console/modules/install', installMeta),
-  // P4：本地秘技提交云端审核（转发云端 register）
-  submitForReview: (payload, authToken) =>
-    client.post('/claw-console/modules/submit-review', payload, authToken ? { headers: { 'X-Module-Auth-Token': authToken } } : {}),
+  // T8：本地秘技分享到云端审核（handler 打包 tarball + 元数据转发云端暂存；免 auth_token 鸡生蛋）
+  submitForReview: (moduleId) =>
+    client.post('/claw-console/modules/submit-review', { module_id: moduleId }),
 }
 
 // ====== claw 云端秘技拉取（已购列表，安装到本地）======

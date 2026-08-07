@@ -123,6 +123,7 @@ func main() {
 	}
 
 	migrator := db.Migrator()
+	hadSourceOriginColumn := migrator.HasColumn(&model.SkillRuntime{}, "source_origin")
 
 	// 自动迁移：保留云端全表（claw 复用既有模型；裁剪在路由层）。
 	// claw 不迁移 users 表：账户统一走云端，本地无 user 行（VIPService.SetUnrestricted + agent SetUnrestricted 均不查本地 user）。
@@ -161,6 +162,16 @@ func main() {
 		&model.VisualConversation{},
 	); err != nil {
 		logger.Fatal("数据库迁移失败", zap.Error(err))
+	}
+
+	// 兼容迁移：skill_runtimes.source_origin 为本次新增列时，回填存量 mcp_remote 运行时为 mcp。
+	// AutoMigrate 加列默认值（eleball_builtin）对所有存量行生效，内置集市模块正确；但 mcp_remote（MCP 安装）
+	// 应为 mcp，需显式修正。仅加列当次执行（幂等）；后续由各写入点显式设置 source_origin，Register 兜底默认。
+	// 注：云端下载模块（type3，应为 eleball_cloud）由下载写入点显式设置，不在此回填范围。
+	if !hadSourceOriginColumn {
+		if err := db.Exec("UPDATE skill_runtimes SET source_origin = ? WHERE source = ?", "mcp", "mcp_remote").Error; err != nil {
+			logger.Warn("回填 skill_runtimes.source_origin 失败", zap.Error(err))
+		}
 	}
 
 	// 兼容迁移：modules/drivers 旧字段 runtime_type -> transport_type（复用云端 DB时生效）

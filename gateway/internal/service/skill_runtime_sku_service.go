@@ -204,10 +204,7 @@ func (s *SkillRuntimeSKUService) deriveAndSync(rt *model.SkillRuntime, tools []M
 // - Actions=[{Name:tool.Name}]：buildToolFunc 取首个 action 作为 tools/call 的 name。
 // - Credentials=rt.CredentialsMap()：从 module.json 透传，供 web 提示用户填写；env 模板 ${credentials.KEY} 引用同名 key。
 func buildDerivedManifest(rt *model.SkillRuntime, t MCPTool) model.ToolManifest {
-	name := t.Description
-	if name == "" {
-		name = t.Name
-	}
+	name := t.Name
 	desc := t.Description
 	if desc == "" {
 		desc = t.Name
