@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go.uber.org/zap"
 
@@ -57,6 +58,17 @@ const functionGetName = "FunctionGet"
 // 超过后返回「已在上文提供，勿重复请求」，不再塞工具列表。AR-26。
 const maxFunctionGetCalls = 2
 
+// defaultSparseResultThreshold 默认工具结果稀疏检测阈值（生产默认开启）：
+// 单次工具返回内容（compactToolResult 后的字符串）rune 数低于此值时，判定为稀疏，
+// 在该工具结果后追加一次 system nudge，提示 agent 信息有限、仅基于返回内容作答。
+// 取 200：既能覆盖 stub/空返回等明显稀疏场景，又不误伤真实搜索/抓取的丰富返回
+// （8 条搜索结果通常 > 500 rune）；nudge 为 advisory，配合规则 6 忠实性约束，
+// 降低模型用稀疏返回编造可证伪事实（具体数值/版本号/特性）的概率。0 表示禁用。
+const defaultSparseResultThreshold = 200
+
+// sparseResultNudgePrompt 工具结果稀疏时紧随工具结果注入的提示（advisory，非硬约束）
+const sparseResultNudgePrompt = "（系统提示）以上工具返回的信息较为有限。请仅基于工具实际返回的内容作答；如需补充背景知识，请明确标注为你的补充说明而非工具返回；信息不足以支撑结论时，如实说明“工具未返回该信息”，不要用编造的具体事实补全。"
+
 // ToolCallingLoop Function Calling 循环
 type ToolCallingLoop struct {
 	registry *ToolRegistry
@@ -70,6 +82,10 @@ type ToolCallingLoop struct {
 	logger *zap.Logger
 	// compactor C4：对话级上下文压缩器；nil 时不启用自动压缩。
 	compactor *ContextCompactor
+	// sparseResultThreshold 工具结果稀疏检测阈值（生产默认开启）：
+	// 单次工具返回内容（compactToolResult 后的字符串）rune 数低于此值时，在该工具结果后
+	// 追加一次 system nudge，提示 agent 信息有限、仅基于返回内容作答。0 表示禁用。
+	sparseResultThreshold int
 }
 
 // SetLogger 设置调试日志（用于诊断内联工具调用解析路径）。临时排查用，可后续移除。
@@ -82,12 +98,26 @@ func (l *ToolCallingLoop) SetCompactor(c *ContextCompactor) {
 	l.compactor = c
 }
 
+// SetSparseResultThreshold 设置工具结果稀疏检测阈值（生产默认 defaultSparseResultThreshold）。
+// 传 0 或负数禁用。用于在工具返回稀疏内容时提示 agent 仅基于返回内容作答，降低幻觉风险。
+func (l *ToolCallingLoop) SetSparseResultThreshold(n int) {
+	if n < 0 {
+		n = 0
+	}
+	l.sparseResultThreshold = n
+}
+
 // NewToolCallingLoop 创建循环控制器
 func NewToolCallingLoop(registry *ToolRegistry, maxSteps int) *ToolCallingLoop {
 	if maxSteps <= 0 {
 		maxSteps = 500
 	}
-	return &ToolCallingLoop{registry: registry, maxSteps: maxSteps, maxRetries: defaultUpstreamMaxAttempts}
+	return &ToolCallingLoop{
+		registry:              registry,
+		maxSteps:              maxSteps,
+		maxRetries:            defaultUpstreamMaxAttempts,
+		sparseResultThreshold: defaultSparseResultThreshold,
+	}
 }
 
 // SetMaxRetries 设置上游可重试错误的最大尝试次数（对应 llm.max_retries 配置）
@@ -490,12 +520,22 @@ func (l *ToolCallingLoop) RunWithRegistry(
 			// 注意：OpenAI 标准 tool message 只需要 role/tool_call_id/content，
 			// 不传递 name 字段，避免某些严格的上游因额外字段拒绝请求。
 			// AR-01：tool 结果经 compactToolResult 提炼后回灌，避免长输出撑爆上下文。
+			toolContent := compactToolResult(record.Output, record.Error)
 			result.Messages = append(result.Messages, llm.Message{
 				Role:       "tool",
 				ToolCallID: tc.ID,
-				Content:    compactToolResult(record.Output, record.Error),
+				Content:    toolContent,
 			})
 			msgIDs = append(msgIDs, "")
+			// 稀疏检测：工具返回内容过短时，追加 system nudge 提示 agent 仅基于返回内容作答（advisory）。
+			// 配合规则 6 忠实性约束，降低模型用稀疏返回编造可证伪事实的概率。
+			if l.sparseResultThreshold > 0 && record.Error == "" && utf8.RuneCountInString(toolContent) < l.sparseResultThreshold {
+				result.Messages = append(result.Messages, llm.Message{
+					Role:    "system",
+					Content: sparseResultNudgePrompt,
+				})
+				msgIDs = append(msgIDs, "")
+			}
 			toolCallCount++
 
 		}

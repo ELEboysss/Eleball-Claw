@@ -958,17 +958,18 @@ func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecut
 	msgIDs := make([]string, 0, len(req.History)+2)
 	systemContent := "你是一个有用的 AI 助手。\n" +
 		"规则：\n" +
-		"1. 当用户问题涉及实时信息、搜索网络、读取文件、处理图片/OCR 或生成视频时，你必须调用对应工具获取结果，禁止只回复“我要查询/请稍等”而不调用工具。\n" +
-		"2. 请直接输出工具调用，拿到工具结果后再给出最终回答。\n" +
+		"1. 当用户问题涉及实时信息、搜索网络、读取文件、处理图片/OCR 、生成视频，或需要委派子 agent 进行方案对比/调研/多步骤任务时，你必须调用对应工具获取结果，禁止只回复“我要查询/请稍等”而不调用工具。\n" +
+		"2. 请直接输出工具调用，拿到工具结果后再给出最终回答。若任务要求使用工具但你认为信息不足，仍应先调用工具（将已有信息传入），在工具返回结果后如确需补充再向用户说明；禁止在调用任何工具之前就向用户提问，也不得以“需要澄清”为由跳过工具调用。\n" +
 		"3. 如果工具返回失败或没有有效结果，如实告知用户，不要编造。\n" +
 		"4. 必须使用工具列表中的准确工具名（区分大小写），不得自创或变形；若返回未知工具，按其列出的可用工具名重新调用。\n" +
 		"5. 调用工具前，先查看可用工具列表及其描述，确认工具能力与用户需求匹配后再调用；不确定时查看工具描述而非猜测。\n"
+	systemContent += "6. 回答应优先基于工具返回的内容：可对返回内容作转述、归纳与必要的背景解释以使回答更易理解；若你补充了工具未明确返回的技术细节、原因分析或背景知识，应明确这是你的补充说明，不要表述为工具或页面返回了这些内容。不得编造工具未返回的可证伪事实（如具体数值、百分比、发布日期、版本号、人名机构、未宣布的特性）；信息不足以支撑某项结论时，如实说明“工具未返回该信息”，不要用编造的具体事实补全。\n"
 	if toolsEnabled {
 		// AR-26：优先 function calling；不支持时引导模型用内嵌标记调 FunctionGet 主动拉取工具列表，
 		// 拿到后再用内嵌标记调具体工具。不预设工具列表（按需拉取，对应 assistant 当下工具能力）。
-		systemContent += "6. 优先使用结构化工具调用（function calling / tool_calls）调用工具。若你的环境不支持 function calling，可发送内联标记 <|FunctionCallBegin|>[{\"name\":\"FunctionGet\",\"parameters\":{}}]<|FunctionCallEnd|> 获取可用工具列表及用法，拿到后用同样的内联标记 <|FunctionCallBegin|>[{\"name\":\"工具名\",\"parameters\":{...}}]<|FunctionCallEnd|> 调用具体工具。禁止用 [工具名]参数[/工具名] 方括号标签或裸 JSON 形式调用工具。"
+		systemContent += "7. 优先使用结构化工具调用（function calling / tool_calls）调用工具。若你的环境不支持 function calling，可发送内联标记 <|FunctionCallBegin|>[{\"name\":\"FunctionGet\",\"parameters\":{}}]<|FunctionCallEnd|> 获取可用工具列表及用法，拿到后用同样的内联标记 <|FunctionCallBegin|>[{\"name\":\"工具名\",\"parameters\":{...}}]<|FunctionCallEnd|> 调用具体工具。禁止用 [工具名]参数[/工具名] 方括号标签或裸 JSON 形式调用工具。"
 	} else {
-		systemContent += "6. 必须使用结构化工具调用（function calling / tool_calls）调用工具，禁止在回复正文里用 [工具名]参数[/工具名] 等文本标签或 {\"name\":\"...\",\"parameters\":{...}} 形式的 JSON 文本来描述或发起工具调用；工具参数以 JSON 对象经 tool_calls 字段提供。"
+		systemContent += "7. 必须使用结构化工具调用（function calling / tool_calls）调用工具，禁止在回复正文里用 [工具名]参数[/工具名] 等文本标签或 {\"name\":\"...\",\"parameters\":{...}} 形式的 JSON 文本来描述或发起工具调用；工具参数以 JSON 对象经 tool_calls 字段提供。"
 	}
 	// Agent Team P2：组共享记忆注入（区块预算 4000 字符 ≈ 2000 tokens，超出按相关度截断）
 	if teamID != "" && s.teamMemorySvc != nil {

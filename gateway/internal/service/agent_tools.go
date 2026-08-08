@@ -384,7 +384,7 @@ func (r *ToolRegistry) registerDefaults() {
 			"properties": map[string]interface{}{
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "相对于当前工作目录的文件路径，可用绝对路径",
+					"description": "相对于当前工作目录的文件路径，可用绝对路径。若从 Grep 结果获取路径，请用 matches 匹配行中的文件路径，勿传入 Grep 返回的 abs_path（为搜索根目录，非文件路径）",
 				},
 				"offset": map[string]interface{}{
 					"type":        "integer",
