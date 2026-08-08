@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -164,22 +163,6 @@ func (s *ModuleService) ListInstalledModulesForUser(userID string, since *time.T
 		out = append(out, meta)
 	}
 	return out, nil
-}
-
-// mcpModuleBaseURL 从 MCP Server URL 中提取基础地址（scheme://host:port）
-func mcpModuleBaseURL(endpoint string) string {
-	if endpoint == "" {
-		return ""
-	}
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return endpoint
-	}
-	u.Path = ""
-	u.RawPath = ""
-	u.RawQuery = ""
-	u.Fragment = ""
-	return u.String()
 }
 
 // parseImageRef 把容器镜像引用解析为 registry/repository/tag 结构
@@ -397,7 +380,7 @@ func (s *ModuleService) RegisterModuleFromPlugin(req *model.ModuleRegisterReques
 				rt.Endpoint = existing.Endpoint
 			}
 			if existing.TransportType == string(model.ModuleTransportTypeMCP) && existing.MCPServerConfig != nil {
-				rt.Endpoint = mcpModuleBaseURL(existing.MCPServerConfig.URL)
+				rt.Endpoint = existing.MCPServerConfig.URL
 				rt.SetMCPServerConfig(existing.MCPServerConfig)
 			}
 		}
@@ -953,7 +936,7 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 		deployment := parseSkillRuntimeDeployment(m.GetDeployment())
 		endpoint := m.GetEndpoint()
 		if transport == model.SkillRuntimeTransportMCPHTTP && m.MCPServerConfig != nil {
-			endpoint = mcpModuleBaseURL(m.MCPServerConfig.URL)
+			endpoint = m.MCPServerConfig.URL
 		}
 
 		existing, err := s.repo.GetByID(moduleID)
@@ -1172,6 +1155,51 @@ func (s *ModuleService) InstallMCPRuntime(req *MCPInstallRequest, tools []MCPToo
 		Tools:     tools,
 		SKUCount:  skuCount,
 	}, nil
+}
+
+// mcpDesktopServer Claude Desktop（claude_desktop_config.json）/ Cursor / .mcp.json 单个 MCP server 配置。
+// stdio（command/args/env）或 http（url/headers）二选一；不认识的字段（type/alwaysAllow 等）忽略不报错。
+type mcpDesktopServer struct {
+	Command string            `json:"command"` // stdio 启动命令（如 npx）
+	Args    []string          `json:"args"`    // stdio 参数
+	Env     map[string]string `json:"env"`     // stdio 环境变量
+	URL     string            `json:"url"`     // http MCP 地址（Cursor/.mcp.json 用 url 而非 command）
+	Headers map[string]string `json:"headers"` // http MCP 请求头
+}
+
+// mcpDesktopConfig Claude Desktop / Cursor / .mcp.json 通用 MCP 配置根结构。
+type mcpDesktopConfig struct {
+	McpServers map[string]mcpDesktopServer `json:"mcpServers"`
+}
+
+// ParseMCPConfig 解析标准 MCP client 配置（Claude Desktop / Cursor / .mcp.json 通用格式，M4），
+// 把每个 mcpServers 条目映射为 MCPInstallRequest 供调用方逐个 InstallMCPRuntime。
+// 有 url -> mcp_http（endpoint=url, headers）；有 command -> mcp_stdio（command/args/env）；
+// 两者皆无则跳过（不报错，便于兼容含纯声明条目的配置）。Name 取 mcpServers 的 key。
+// 纯结构化解析，不执行任何命令；命令执行仍由 InstallMCPRuntime 经 G3 受控 spawn。
+func ParseMCPConfig(raw []byte) ([]*MCPInstallRequest, error) {
+	var cfg mcpDesktopConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, fmt.Errorf("解析 MCP 配置失败: %w", err)
+	}
+	reqs := make([]*MCPInstallRequest, 0, len(cfg.McpServers))
+	for name, srv := range cfg.McpServers {
+		req := &MCPInstallRequest{Name: name}
+		if srv.URL != "" {
+			req.Transport = "mcp_http"
+			req.Endpoint = srv.URL
+			req.Headers = srv.Headers
+		} else if srv.Command != "" {
+			req.Transport = "mcp_stdio"
+			req.Command = srv.Command
+			req.Args = srv.Args
+			req.Env = srv.Env
+		} else {
+			continue // 无 command 也无 url，跳过（不报错）
+		}
+		reqs = append(reqs, req)
+	}
+	return reqs, nil
 }
 
 // UnregisterDriver 注销驱动映射

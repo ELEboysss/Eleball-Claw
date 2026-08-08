@@ -58,7 +58,8 @@ func TestModuleService_RescanMarketplace_MCP(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, rt)
 	assert.Equal(t, model.SkillRuntimeTransportMCPHTTP, rt.Transport)
-	assert.Equal(t, "http://mcp-hello:8080", rt.Endpoint)
+	// rt.Endpoint 保留 mcp_server_config.url 完整 path（/mcp 不被剥光），网关据此 POST JSON-RPC
+	assert.Equal(t, "http://mcp-hello:8080/mcp", rt.Endpoint)
 	assert.True(t, rt.Official)
 	assert.Equal(t, "mcp_hello", rt.DriverID)
 	cfg := rt.GetMCPServerConfig()
@@ -74,7 +75,7 @@ func TestModuleService_RescanMarketplace_MCP(t *testing.T) {
 }
 
 // TestModuleService_RescanMarketplace_AgentReachMCP 验证 G1：agent-reach 从 execute 迁移到
-// mcp_http + auto_sku 后，rescan 能正确创建 mcp_http 运行时（端点经 mcpModuleBaseURL 收敛为根路径、
+// mcp_http + auto_sku 后，rescan 能正确创建 mcp_http 运行时（端点取 mcp_server_config.url 原值、
 // auto_sku=true、mcp_server_config.headers 含 6 个 ${credentials.KEY} 凭证模板、credentials 声明 6 个
 // module 级凭证；exa 搜索经 mcporter 零配置接入，不占凭证槽）。读取真实 marketplace/agent-reach/module.json，守护 G1 配置不被回退。
 func TestModuleService_RescanMarketplace_AgentReachMCP(t *testing.T) {
@@ -114,7 +115,7 @@ func TestModuleService_RescanMarketplace_AgentReachMCP(t *testing.T) {
 	require.NotNil(t, rt)
 	assert.Equal(t, model.SkillRuntimeTransportMCPHTTP, rt.Transport)
 	assert.True(t, rt.AutoSKU, "auto_sku 应为 true（G1 迁移后免手写 SKU）")
-	// mcpModuleBaseURL 把 mcp_server_config.url 收敛为根路径（无 /mcp），网关据此 POST JSON-RPC
+	// rt.Endpoint 取 mcp_server_config.url 原值（agent-reach url 无 path，故为根路径），网关据此 POST JSON-RPC
 	assert.Equal(t, "http://localhost:8094", rt.Endpoint)
 	assert.Equal(t, "agent_reach", rt.DriverID)
 
@@ -500,4 +501,71 @@ func TestInstallMCPRuntime_HTTP(t *testing.T) {
 	skus, err := agentRepo.ListByModuleSKUs(result.RuntimeID)
 	require.NoError(t, err)
 	assert.Len(t, skus, 2)
+}
+
+// TestParseMCPConfig 验证标准 MCP 配置解析（M4）：Claude Desktop / Cursor / .mcp.json 通用格式，
+// 有 url -> mcp_http，有 command -> mcp_stdio，两者皆无跳过；Name 取 key；不认识字段忽略不报错。
+func TestParseMCPConfig(t *testing.T) {
+	raw := []byte(`{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+      "env": {"FOO": "bar"}
+    },
+    "git": {
+      "command": "uvx",
+      "args": ["mcp-server-git", "--repository", "/repo"]
+    },
+    "remote-api": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": {"Authorization": "Bearer xxx"}
+    },
+    "empty-entry": {},
+    "type-only": {"type": "stdio", "alwaysAllow": ["fs"]}
+  }
+}`)
+	reqs, err := ParseMCPConfig(raw)
+	require.NoError(t, err)
+	require.Len(t, reqs, 3, "empty-entry 与 type-only（无 command/url）应跳过，剩 2 stdio + 1 http")
+
+	// map 迭代顺序不确定，按 Name 归类校验
+	byName := map[string]*MCPInstallRequest{}
+	for _, r := range reqs {
+		byName[r.Name] = r
+	}
+
+	fs := byName["filesystem"]
+	require.NotNil(t, fs)
+	assert.Equal(t, "mcp_stdio", fs.Transport)
+	assert.Equal(t, "npx", fs.Command)
+	assert.Equal(t, []string{"-y", "@modelcontextprotocol/server-filesystem", "/tmp"}, fs.Args)
+	assert.Equal(t, map[string]string{"FOO": "bar"}, fs.Env)
+
+	git := byName["git"]
+	require.NotNil(t, git)
+	assert.Equal(t, "mcp_stdio", git.Transport)
+	assert.Equal(t, "uvx", git.Command)
+	assert.Equal(t, []string{"mcp-server-git", "--repository", "/repo"}, git.Args)
+
+	remote := byName["remote-api"]
+	require.NotNil(t, remote)
+	assert.Equal(t, "mcp_http", remote.Transport)
+	assert.Equal(t, "https://mcp.example.com/mcp", remote.Endpoint)
+	assert.Equal(t, map[string]string{"Authorization": "Bearer xxx"}, remote.Headers)
+
+	// type-only 条目有 type 但无 command/url，应被跳过（不出现在结果中）
+	_, hasTypeOnly := byName["type-only"]
+	assert.False(t, hasTypeOnly, "无 command/url 的条目应跳过")
+	_, hasEmpty := byName["empty-entry"]
+	assert.False(t, hasEmpty, "空条目应跳过")
+
+	// 无效 JSON 报错
+	_, err = ParseMCPConfig([]byte(`{not json`))
+	assert.Error(t, err)
+
+	// 空 mcpServers 返回空切片（不报错）
+	reqs, err = ParseMCPConfig([]byte(`{"mcpServers": {}}`))
+	require.NoError(t, err)
+	assert.Empty(t, reqs)
 }

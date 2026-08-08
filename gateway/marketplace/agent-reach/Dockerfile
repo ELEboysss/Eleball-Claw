@@ -9,14 +9,13 @@ FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/debian:bookworm-
 RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl python3 python3-pip python3-venv nodejs npm git gh && \
+        ca-certificates curl python3 python3-pip python3-venv git gh && \
     rm -rf /var/lib/apt/lists/*
 
 # 默认使用清华 PyPI 与 npmmirror 加速，避免官方源连接超时
 ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
     PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
-    PIP_TIMEOUT=300 \
-    NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
+    PIP_TIMEOUT=300
 
 # 全局配置 pip 使用清华镜像并延长超时，避免单个 wheel 下载失败导致整个构建中断
 RUN pip3 config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
@@ -33,11 +32,10 @@ RUN git clone --depth 1 https://atomgit.com/Panniantong/Agent-Reach.git /opt/age
       "agent-reach @ file:///opt/agent-reach" && \
     rm -rf /opt/agent-reach
 
-# 2. 安装上游 CLI 工具
-# bilibili-cli 来自 PyPI；npm 包走国内镜像。
-RUN pip3 install --break-system-packages --no-cache-dir "bilibili-cli" "yt-dlp" && \
-    npm install -g --no-cache mcporter @jackwener/opencli && \
-    mcporter config add exa https://mcp.exa.ai/mcp --scope home
+# 2. 安装上游 CLI 工具（bilibili-cli / yt-dlp 来自 PyPI）
+# web_read / search 已迁至网关内置（ExaSearchProvider / WebRead 经 mcporter 调 Exa），
+# 本模块不再依赖 mcporter / node 运行时，仅保留 Python CLI。
+RUN pip3 install --break-system-packages --no-cache-dir "bilibili-cli" "yt-dlp"
 
 # 3. 安装社交 CLI
 # 这些工具已从 GitHub-only 的子模块改为从清华 PyPI 镜像直接安装，

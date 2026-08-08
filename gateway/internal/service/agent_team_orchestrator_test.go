@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -96,6 +97,55 @@ func setupOrchestratorTest(t *testing.T) *orchestratorTestEnv {
 		db: db, assistant: assistantSvc, teamSvc: teamSvc,
 		agentSvc: agentSvc, sessionRepo: sessionRepo, convSvc: convSvc,
 	}
+}
+
+// TestAgentToolLoader_LoadActivePromptSkills S3：LoadActivePromptSkills 只返回已购买且激活的
+// driver=none 且 SystemPrompt 非空的 AgentItem；停用/可执行型/空 prompt 均排除。
+func TestAgentToolLoader_LoadActivePromptSkills(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, _ := db.DB()
+	sqlDB.SetMaxOpenConns(1)
+	require.NoError(t, db.AutoMigrate(&model.AgentItem{}, &model.AgentPurchase{}, &model.AgentUserTool{}))
+
+	agentRepo := repository.NewAgentRepo(db)
+	loader := NewAgentToolLoader(agentRepo, NewToolDriverRegistry(), nil)
+	now := time.Now()
+
+	mkItem := func(id, name, sysPrompt string, driver model.ToolDriverType) *model.AgentItem {
+		mf, _ := json.Marshal(&model.ToolManifest{ID: id, Name: name, Driver: driver})
+		return &model.AgentItem{
+			ID: id, Name: name, Status: model.AgentStatusApproved,
+			SystemPrompt: sysPrompt, ManifestJSON: string(mf),
+			CreatorID: "official", CreatorName: "官方", CreatedAt: now,
+		}
+	}
+	seed := func(item *model.AgentItem, active bool) {
+		require.NoError(t, agentRepo.Create(item))
+		require.NoError(t, agentRepo.CreatePurchase(&model.AgentPurchase{ID: "p-" + item.ID, AgentID: item.ID, BuyerID: "u1"}))
+		require.NoError(t, agentRepo.CreateUserTool(&model.AgentUserTool{ID: "t-" + item.ID, UserID: "u1", AgentID: item.ID, ToolName: item.ID, Active: active, CreatedAt: now}))
+	}
+
+	// 1) 激活的 prompt-only skill（应返回）
+	seed(mkItem("skillmd-copy", "文案", "你是文案专家", model.ToolDriverNone), true)
+	// 2) 已停用的 prompt-only skill（不返回）—— gorm default:true 会把零值 false 回填 true，须显式 update
+	seed(mkItem("skillmd-off", "停用", "不应注入", model.ToolDriverNone), true)
+	require.NoError(t, db.Model(&model.AgentUserTool{}).Where("agent_id = ?", "skillmd-off").Update("active", false).Error)
+	// 3) 激活的可执行型 skill（driver=mcp，不返回）
+	seed(mkItem("exec-1", "执行型", "不应注入", model.ToolDriverMCP), true)
+	// 4) 激活但 SystemPrompt 为空的 prompt-only skill（不返回）
+	seed(mkItem("skillmd-empty", "空prompt", "", model.ToolDriverNone), true)
+
+	got, err := loader.LoadActivePromptSkills("u1")
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "skillmd-copy", got[0].ID)
+	assert.Equal(t, "你是文案专家", got[0].SystemPrompt)
+
+	// 未购买/未激活的用户：空
+	got2, err := loader.LoadActivePromptSkills("nobody")
+	require.NoError(t, err)
+	assert.Empty(t, got2)
 }
 
 // createAssistant 直接落一条助手记录（gorm default:true 在零值时回填 shared，故显式 update 目标值）

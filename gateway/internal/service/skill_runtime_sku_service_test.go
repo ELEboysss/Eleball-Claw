@@ -202,3 +202,36 @@ func TestFilterTools(t *testing.T) {
 	require.Len(t, FilterTools(nil, tools), 4)
 	require.Len(t, FilterTools(rt, nil), 0)
 }
+
+// TestDeriveSKUs_PseudoToolMetadata 验证 read_resource/get_prompt 伪工具派生的 SKU
+// manifest.metadata 标注 pseudo_tool（M5，供 UI 区分「资源读取器/提示获取器」）。
+func TestDeriveSKUs_PseudoToolMetadata(t *testing.T) {
+	repo := newSKUServiceTestDB(t)
+	svc := NewSkillRuntimeSKUService(repo, nil)
+	rt := autoSKUTestRuntime("mod-res", "drv_res")
+
+	tools := []MCPTool{
+		{Name: "echo", Description: "echo tool"},
+		mcpReadResourcePseudoTool([]MCPResource{{URI: "file:///a", Name: "A"}}),
+		mcpGetPromptPseudoTool([]MCPPrompt{{Name: "greet"}}),
+	}
+	svc.DeriveSKUs(rt, tools)
+
+	rr, err := repo.GetByID("mod-res-read_resource")
+	require.NoError(t, err)
+	mf, err := rr.Manifest()
+	require.NoError(t, err)
+	require.Equal(t, "resource", mf.Metadata["pseudo_tool"])
+
+	gp, err := repo.GetByID("mod-res-get_prompt")
+	require.NoError(t, err)
+	mf2, err := gp.Manifest()
+	require.NoError(t, err)
+	require.Equal(t, "prompt", mf2.Metadata["pseudo_tool"])
+
+	// 普通工具无 pseudo_tool 标注
+	echo, _ := repo.GetByID("mod-res-echo")
+	mfE, _ := echo.Manifest()
+	_, hasPseudo := mfE.Metadata["pseudo_tool"]
+	require.False(t, hasPseudo)
+}

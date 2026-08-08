@@ -11,7 +11,8 @@
   "capabilities": [
     "list_sources",
     "search",
-    "fetch"
+    "fetch",
+    "web_read"
   ],
   "driver": {
     "driver_id": "search_web",

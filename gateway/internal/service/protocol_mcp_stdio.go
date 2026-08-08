@@ -33,20 +33,23 @@ type MCPStdioProtocol struct {
 
 // stdioSession 一个 stdio MCP 子进程的通信会话。
 type stdioSession struct {
-	runtimeID   string
-	stdin       io.WriteCloser
-	stdout      io.Reader
-	writeMu     sync.Mutex // 串行化 stdin 写入
-	pendingMu   sync.Mutex // 保护 nextID 与 pending
-	nextID      int
-	pending     map[int]chan *mcpResponse // request id -> 响应通道
-	initMu      sync.Mutex
-	initialized bool
-	toolsMu     sync.RWMutex
-	toolsCache  []MCPTool // 最近一次 tools/list 结果（内存 schema 缓存）
-	done        chan struct{}
-	once        sync.Once
-	readErr     error
+	runtimeID       string
+	stdin           io.WriteCloser
+	stdout          io.Reader
+	logger          *zap.Logger
+	writeMu         sync.Mutex // 串行化 stdin 写入
+	pendingMu       sync.Mutex // 保护 nextID 与 pending
+	nextID          int
+	pending         map[int]chan *mcpResponse // request id -> 响应通道
+	initMu          sync.Mutex
+	initialized     bool
+	protocolVersion string                 // 协商回的协议版本（server 可能回退旧版）
+	capabilities    map[string]interface{} // server 声明的 capabilities（resources/prompts 等，M5 伪工具合成依据）
+	toolsMu         sync.RWMutex
+	toolsCache      []MCPTool // 最近一次 tools/list 结果（内存 schema 缓存）
+	done            chan struct{}
+	once            sync.Once
+	readErr         error
 }
 
 // NewMCPStdioProtocol 创建 stdio MCP 协议适配器
@@ -73,16 +76,17 @@ func (p *MCPStdioProtocol) SetLogger(logger *zap.Logger) {
 // RegisterSession 注册一个 runtime 的 stdio 会话并启动 reader 协程。
 // 若该 runtime 已有旧会话，先关闭旧会话（用于重连场景）。
 func (p *MCPStdioProtocol) RegisterSession(runtimeID string, stdin io.WriteCloser, stdout io.Reader) {
+	p.mu.Lock()
+	if old := p.sessions[runtimeID]; old != nil {
+		old.close()
+	}
 	s := &stdioSession{
 		runtimeID: runtimeID,
 		stdin:     stdin,
 		stdout:    stdout,
+		logger:    p.logger,
 		pending:   make(map[int]chan *mcpResponse),
 		done:      make(chan struct{}),
-	}
-	p.mu.Lock()
-	if old := p.sessions[runtimeID]; old != nil {
-		old.close()
 	}
 	p.sessions[runtimeID] = s
 	p.mu.Unlock()
@@ -145,6 +149,42 @@ func (p *MCPStdioProtocol) Execute(runtimeID, action string, params map[string]i
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	return s.execute(ctx, action, params)
+}
+
+// ListResources 获取 MCP 资源列表（resources/list）。
+func (p *MCPStdioProtocol) ListResources(ctx context.Context, runtimeID string) ([]MCPResource, error) {
+	s, err := p.session(runtimeID)
+	if err != nil {
+		return nil, err
+	}
+	return s.listResources(ctx)
+}
+
+// ReadResource 读取指定资源内容（resources/read）。
+func (p *MCPStdioProtocol) ReadResource(ctx context.Context, runtimeID, uri string) (map[string]interface{}, error) {
+	s, err := p.session(runtimeID)
+	if err != nil {
+		return nil, err
+	}
+	return s.readResource(ctx, uri)
+}
+
+// ListPrompts 获取 MCP 提示列表（prompts/list）。
+func (p *MCPStdioProtocol) ListPrompts(ctx context.Context, runtimeID string) ([]MCPPrompt, error) {
+	s, err := p.session(runtimeID)
+	if err != nil {
+		return nil, err
+	}
+	return s.listPrompts(ctx)
+}
+
+// GetPrompt 获取指定提示渲染结果（prompts/get）。
+func (p *MCPStdioProtocol) GetPrompt(ctx context.Context, runtimeID, name string, arguments map[string]interface{}) (map[string]interface{}, error) {
+	s, err := p.session(runtimeID)
+	if err != nil {
+		return nil, err
+	}
+	return s.getPrompt(ctx, name, arguments)
 }
 
 // ProbeStdio 一次性探测候选 stdio MCP server（未注册）：spawn 子进程 -> initialize ->
@@ -210,16 +250,18 @@ func (s *stdioSession) initialize(ctx context.Context) error {
 		return nil
 	}
 	params := map[string]interface{}{
-		"protocolVersion": "2024-11-05",
-		"capabilities":    map[string]interface{}{},
-		"clientInfo": map[string]interface{}{
-			"name":    "eleball-gateway",
-			"version": "1.0.0",
-		},
+		"protocolVersion": mcpProtocolVersion,
+		"capabilities":    mcpClientCapabilities(),
+		"clientInfo":      mcpClientInfo(),
 	}
-	if _, err := s.call(ctx, "initialize", params); err != nil {
+	resp, err := s.call(ctx, "initialize", params)
+	if err != nil {
 		return fmt.Errorf("MCP stdio initialize 失败: %w", err)
 	}
+	// 协商协议版本：server 可能回退到旧版，采用 server 版本并记录。
+	s.protocolVersion = negotiateMCPVersion(resp.Result, mcpProtocolVersion, s.logger)
+	// M5：捕获 server capabilities（resources/prompts 等），供 listTools 合成伪工具。
+	s.capabilities = parseMCPServerCapabilities(resp.Result)
 	// 发送 initialized notification（无 id，无响应）
 	notif := &mcpRequest{
 		JSONRPC: "2.0",
@@ -258,10 +300,119 @@ func (s *stdioSession) listTools(ctx context.Context, force bool) ([]MCPTool, er
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
 		return nil, fmt.Errorf("MCP stdio tools/list 解析失败: %w", err)
 	}
+	// M5：据 server capabilities 合成 read_resource/get_prompt 伪工具。
+	result.Tools = s.synthesizePseudoTools(ctx, result.Tools)
 	s.toolsMu.Lock()
 	s.toolsCache = result.Tools
 	s.toolsMu.Unlock()
 	return result.Tools, nil
+}
+
+// synthesizePseudoTools 据 server capabilities + resources/prompts 清单合成伪工具追加到 tools。
+// 已存在同名真实工具时不合成；resources/list 或 prompts/list 拉取失败则跳过对应伪工具（仅记录日志）。
+func (s *stdioSession) synthesizePseudoTools(ctx context.Context, tools []MCPTool) []MCPTool {
+	existing := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		existing[t.Name] = true
+	}
+	if s.hasCapability("resources") && !existing[mcpPseudoToolReadResource] {
+		if resources, err := s.listResources(ctx); err == nil {
+			tools = append(tools, mcpReadResourcePseudoTool(resources))
+		} else if s.logger != nil {
+			s.logger.Warn("MCP stdio resources/list 拉取失败，跳过 read_resource 伪工具",
+				zap.String("runtime_id", s.runtimeID), zap.Error(err))
+		}
+	}
+	if s.hasCapability("prompts") && !existing[mcpPseudoToolGetPrompt] {
+		if prompts, err := s.listPrompts(ctx); err == nil {
+			tools = append(tools, mcpGetPromptPseudoTool(prompts))
+		} else if s.logger != nil {
+			s.logger.Warn("MCP stdio prompts/list 拉取失败，跳过 get_prompt 伪工具",
+				zap.String("runtime_id", s.runtimeID), zap.Error(err))
+		}
+	}
+	return tools
+}
+
+// hasCapability 判断 server capabilities 是否声明了某能力（resources/prompts）。
+func (s *stdioSession) hasCapability(capability string) bool {
+	if s.capabilities == nil {
+		return false
+	}
+	_, ok := s.capabilities[capability]
+	return ok
+}
+
+// listResources 获取资源列表（resources/list）。
+func (s *stdioSession) listResources(ctx context.Context) ([]MCPResource, error) {
+	if err := s.initialize(ctx); err != nil {
+		return nil, err
+	}
+	resp, err := s.call(ctx, "resources/list", nil)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Resources []MCPResource `json:"resources"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		return nil, fmt.Errorf("MCP stdio resources/list 解析失败: %w", err)
+	}
+	return result.Resources, nil
+}
+
+// readResource 读取指定资源内容（resources/read）。
+func (s *stdioSession) readResource(ctx context.Context, uri string) (map[string]interface{}, error) {
+	if err := s.initialize(ctx); err != nil {
+		return nil, err
+	}
+	resp, err := s.call(ctx, "resources/read", map[string]interface{}{"uri": uri})
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		return nil, fmt.Errorf("MCP stdio resources/read 解析失败: %w", err)
+	}
+	return result, nil
+}
+
+// listPrompts 获取提示列表（prompts/list）。
+func (s *stdioSession) listPrompts(ctx context.Context) ([]MCPPrompt, error) {
+	if err := s.initialize(ctx); err != nil {
+		return nil, err
+	}
+	resp, err := s.call(ctx, "prompts/list", nil)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Prompts []MCPPrompt `json:"prompts"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		return nil, fmt.Errorf("MCP stdio prompts/list 解析失败: %w", err)
+	}
+	return result.Prompts, nil
+}
+
+// getPrompt 获取指定提示渲染结果（prompts/get）。
+func (s *stdioSession) getPrompt(ctx context.Context, name string, arguments map[string]interface{}) (map[string]interface{}, error) {
+	if err := s.initialize(ctx); err != nil {
+		return nil, err
+	}
+	params := map[string]interface{}{"name": name}
+	if arguments != nil {
+		params["arguments"] = arguments
+	}
+	resp, err := s.call(ctx, "prompts/get", params)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		return nil, fmt.Errorf("MCP stdio prompts/get 解析失败: %w", err)
+	}
+	return result, nil
 }
 
 // execute 调用 tools/call
@@ -270,17 +421,23 @@ func (s *stdioSession) execute(ctx context.Context, action string, params map[st
 		return nil, err
 	}
 	arguments := mcpCallArguments(params)
-	callParams := map[string]interface{}{
+	// M5：伪工具拦截 -> resources/read / prompts/get（不进 tools/call）。
+	switch action {
+	case mcpPseudoToolReadResource:
+		uri, _ := arguments["uri"].(string)
+		return s.readResource(ctx, uri)
+	case mcpPseudoToolGetPrompt:
+		name, _ := arguments["name"].(string)
+		var promptArgs map[string]interface{}
+		if a, ok := arguments["arguments"].(map[string]interface{}); ok {
+			promptArgs = a
+		}
+		return s.getPrompt(ctx, name, promptArgs)
+	}
+	resp, err := s.call(ctx, "tools/call", map[string]interface{}{
 		"name":      action,
 		"arguments": arguments,
-	}
-	// per-call 凭证注入：把用户已配置的模块凭证经 MCP _meta 透传给子进程，子进程每次调用读取，
-	// 不再在 spawn 时烤进 env（凭证随调用走，换 key 即时生效、无需 respawn）。mcpCallArguments
-	// 仍把 credentials 从 arguments 剥离，工具入参保持干净；仅 _meta 携带凭证。
-	if creds, ok := params["credentials"].(map[string]string); ok && len(creds) > 0 {
-		callParams["_meta"] = map[string]interface{}{"credentials": creds}
-	}
-	resp, err := s.call(ctx, "tools/call", callParams)
+	})
 	if err != nil {
 		return nil, err
 	}

@@ -3,8 +3,10 @@ package handler
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/eleball/gateway/internal/service"
@@ -181,6 +183,82 @@ type mcpInstallRequest struct {
 	Description string `json:"description"`
 }
 
+// mcpInstallOutcome 单个 server 探测+安装结果（M4 批量导入返回项）。
+// OK=true 时 Result 非 nil；OK=false 时 ErrorCode/Message 描述失败（interpreter_missing 带 Interpreter/Hint）。
+type mcpInstallOutcome struct {
+	Name        string                    `json:"name"`
+	Transport   string                    `json:"transport"`
+	OK          bool                      `json:"ok"`
+	Result      *service.MCPInstallResult `json:"result,omitempty"`
+	ErrorCode   string                    `json:"error_code,omitempty"`
+	Message     string                    `json:"message,omitempty"`
+	Interpreter string                    `json:"interpreter,omitempty"`
+	Hint        string                    `json:"hint,omitempty"`
+}
+
+// probeAndInstallMCP 探测 + 安装单个 MCP server（InstallMCP 与 ImportMCPConfig 共用，G3）。
+// 复用 ProbeMCP 的 stdio/http 探测逻辑校验 server 可用并拿工具列表，
+// -> moduleService.InstallMCPRuntime 创建 source=mcp_remote 的 SkillRuntime 并派生 SKU。
+// 成功时 fail=nil；失败时 result=nil，fail 描述原因（interpreter_missing 带 Interpreter/Hint）。
+func (h *ClawConsoleHandler) probeAndInstallMCP(ctx context.Context, req mcpInstallRequest) (*service.MCPInstallResult, *mcpInstallOutcome) {
+	if req.Transport == "" {
+		req.Transport = "mcp_stdio"
+	}
+	fail := func(code, msg string) *mcpInstallOutcome {
+		return &mcpInstallOutcome{Name: req.Name, Transport: req.Transport, ErrorCode: code, Message: msg}
+	}
+
+	var tools []service.MCPTool
+	var err error
+	switch req.Transport {
+	case "mcp_stdio":
+		if h.mcpStdio == nil {
+			return nil, fail("probe_failed", "stdio MCP 协议未初始化")
+		}
+		if vErr := h.validateProbeWorkDir(req.WorkDir); vErr != nil {
+			return nil, fail("probe_failed", vErr.Error())
+		}
+		tools, err = h.mcpStdio.ProbeStdio(ctx, req.Command, req.Args, req.Env, req.WorkDir)
+	case "mcp_http":
+		if req.Endpoint == "" {
+			return nil, fail("probe_failed", "endpoint 不能为空")
+		}
+		tools, err = service.NewMCPHTTPProtocol(nil).ListTools(ctx, req.Endpoint, req.Headers)
+	default:
+		return nil, fail("probe_failed", "不支持的 transport: "+req.Transport)
+	}
+	if err != nil {
+		// D3：解释器缺失返回结构化信息，供 web 展示安装引导按钮。
+		var ime *service.InterpreterMissingError
+		if errors.As(err, &ime) {
+			oc := fail("interpreter_missing", ime.Error())
+			oc.Interpreter = ime.Command
+			oc.Hint = ime.Hint
+			return nil, oc
+		}
+		return nil, fail("probe_failed", "MCP 探测失败: "+err.Error())
+	}
+	if len(tools) == 0 {
+		return nil, fail("empty_tools", "探测到的工具为空，无法安装")
+	}
+	installReq := &service.MCPInstallRequest{
+		Transport:   req.Transport,
+		Name:        req.Name,
+		Description: req.Description,
+		Command:     req.Command,
+		Args:        req.Args,
+		Env:         req.Env,
+		WorkDir:     req.WorkDir,
+		Endpoint:    req.Endpoint,
+		Headers:     req.Headers,
+	}
+	result, err := h.moduleService.InstallMCPRuntime(installReq, tools)
+	if err != nil {
+		return nil, fail("install_failed", "安装失败: "+err.Error())
+	}
+	return result, nil
+}
+
 // InstallMCP 动态安装远端 MCP server（G3，Smithery 式）。
 // 先探测（复用 ProbeMCP 的 stdio/http 探测逻辑，校验 server 可用并拿到工具列表）
 // -> moduleService.InstallMCPRuntime 创建 source=mcp_remote 的 SkillRuntime 并派生 SKU。
@@ -197,9 +275,6 @@ func (h *ClawConsoleHandler) InstallMCP(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "name 不能为空"})
 		return
 	}
-	if req.Transport == "" {
-		req.Transport = "mcp_stdio"
-	}
 	if h.moduleService == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 2002, "message": "模块服务未初始化"})
 		return
@@ -208,73 +283,110 @@ func (h *ClawConsoleHandler) InstallMCP(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
-	var tools []service.MCPTool
-	var err error
-	switch req.Transport {
-	case "mcp_stdio":
-		if h.mcpStdio == nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"code": 2002, "message": "stdio MCP 协议未初始化"})
-			return
-		}
-		if vErr := h.validateProbeWorkDir(req.WorkDir); vErr != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": vErr.Error()})
-			return
-		}
-		tools, err = h.mcpStdio.ProbeStdio(ctx, req.Command, req.Args, req.Env, req.WorkDir)
-	case "mcp_http":
-		if req.Endpoint == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "endpoint 不能为空"})
-			return
-		}
-		tools, err = service.NewMCPHTTPProtocol(nil).ListTools(ctx, req.Endpoint, req.Headers)
-	default:
-		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "不支持的 transport: " + req.Transport})
-		return
-	}
-
-	if err != nil {
-		// D3：解释器缺失返回结构化错误，供 web 展示安装引导按钮。
-		var ime *service.InterpreterMissingError
-		if errors.As(err, &ime) {
+	result, fail := h.probeAndInstallMCP(ctx, req)
+	if fail != nil {
+		if fail.ErrorCode == "interpreter_missing" {
 			c.JSON(http.StatusOK, gin.H{
 				"code":    2002,
-				"message": ime.Error(),
+				"message": fail.Message,
 				"data": gin.H{
 					"error_code":  "interpreter_missing",
-					"interpreter": ime.Command,
-					"hint":        ime.Hint,
+					"interpreter": fail.Interpreter,
+					"hint":        fail.Hint,
 				},
 			})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": "MCP 探测失败: " + err.Error()})
-		return
-	}
-	if len(tools) == 0 {
-		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": "探测到的工具为空，无法安装"})
-		return
-	}
-
-	installReq := &service.MCPInstallRequest{
-		Transport:   req.Transport,
-		Name:        req.Name,
-		Description: req.Description,
-		Command:     req.Command,
-		Args:        req.Args,
-		Env:         req.Env,
-		WorkDir:     req.WorkDir,
-		Endpoint:    req.Endpoint,
-		Headers:     req.Headers,
-	}
-	result, err := h.moduleService.InstallMCPRuntime(installReq, tools)
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": "安装失败: " + err.Error()})
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": fail.Message})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "success",
 		"data":    result,
+	})
+}
+
+// ImportMCPConfig 批量导入标准 MCP 配置文件（M4）。
+// POST /v1/claw-console/mcp/import-config：接受 Claude Desktop（claude_desktop_config.json）
+// / Cursor / .mcp.json 通用配置（{"mcpServers": {name: {command, args, env | url, headers}}}），
+// 支持粘贴 JSON（application/json）或上传文件（multipart/form-data，file 字段）。
+// 逐 server 走 probeAndInstallMCP（G3 探测 + InstallMCPRuntime + DeriveSKUs），返回每个 server 结果。
+// 不执行任意命令（仅经 G3 受控 spawn）；不认识字段忽略。单个 server 失败不中断其余。
+func (h *ClawConsoleHandler) ImportMCPConfig(c *gin.Context) {
+	if h.moduleService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 2002, "message": "模块服务未初始化"})
+		return
+	}
+
+	var raw []byte
+	var err error
+	if strings.HasPrefix(c.ContentType(), "multipart/") {
+		file, ferr := c.FormFile("file")
+		if ferr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "读取上传文件失败: " + ferr.Error()})
+			return
+		}
+		f, ferr := file.Open()
+		if ferr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "打开上传文件失败: " + ferr.Error()})
+			return
+		}
+		defer f.Close()
+		raw, err = io.ReadAll(f)
+	} else {
+		raw, err = io.ReadAll(c.Request.Body)
+	}
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "读取请求体失败: " + err.Error()})
+		return
+	}
+
+	reqs, err := service.ParseMCPConfig(raw)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": err.Error()})
+		return
+	}
+	if len(reqs) == 0 {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": "配置中无可导入的 MCP server（需 command 或 url）"})
+		return
+	}
+
+	// 多 server 顺序探测+安装；每 server 最长 30s，整体上限按数量线性放宽。
+	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(len(reqs))*30*time.Second)
+	defer cancel()
+
+	outcomes := make([]mcpInstallOutcome, 0, len(reqs))
+	for _, rq := range reqs {
+		one := mcpInstallRequest{
+			mcpProbeRequest: mcpProbeRequest{
+				Transport: rq.Transport,
+				Command:   rq.Command,
+				Args:      rq.Args,
+				Env:       rq.Env,
+				Endpoint:  rq.Endpoint,
+				Headers:   rq.Headers,
+			},
+			Name:        rq.Name,
+			Description: rq.Description,
+		}
+		result, fail := h.probeAndInstallMCP(ctx, one)
+		oc := mcpInstallOutcome{Name: rq.Name, Transport: rq.Transport}
+		if fail != nil {
+			oc.ErrorCode = fail.ErrorCode
+			oc.Message = fail.Message
+			oc.Interpreter = fail.Interpreter
+			oc.Hint = fail.Hint
+		} else {
+			oc.OK = true
+			oc.Result = result
+		}
+		outcomes = append(outcomes, oc)
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "success",
+		"data":    gin.H{"results": outcomes},
 	})
 }
 

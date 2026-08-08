@@ -6,7 +6,15 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# 先装依赖（利用层缓存）
+# 装 Node + mcporter 并注册 Exa（keyless，无需 API Key）
+# Exa 搜索/web_read 经 mcporter 调用，与纯 Python 的 baidu/bing/searxng/duckduckgo 互补
+ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
+    && npm install -g mcporter \
+    && mcporter config add exa https://mcp.exa.ai/mcp --scope home \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 再装 Python 依赖（利用层缓存）
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

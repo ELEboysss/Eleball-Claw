@@ -1170,6 +1170,30 @@ export default function AgentMarket() {
                       </div>
                     )}
 
+                    {/* M5：伪工具的资源/提示清单（read_resource/get_prompt 伪工具暴露的可读资源/可用提示，只读） */}
+                    {manifest.metadata?.pseudo_tool === 'resource' && (
+                      <div className="space-y-1.5">
+                        <div className="text-eleball-text-tertiary text-xs">可读资源</div>
+                        {(manifest.parameters?.properties?.uri?.enum || []).map((uri) => (
+                          <div key={uri} className="rounded-lg bg-eleball-surface-variant p-2 text-xs font-mono text-eleball-text break-all">{uri}</div>
+                        ))}
+                        {(!manifest.parameters?.properties?.uri?.enum || manifest.parameters.properties.uri.enum.length === 0) && (
+                          <div className="text-xs text-eleball-text-secondary">该 server 暂无可读资源</div>
+                        )}
+                      </div>
+                    )}
+                    {manifest.metadata?.pseudo_tool === 'prompt' && (
+                      <div className="space-y-1.5">
+                        <div className="text-eleball-text-tertiary text-xs">可用提示</div>
+                        {(manifest.parameters?.properties?.name?.enum || []).map((name) => (
+                          <div key={name} className="rounded-lg bg-eleball-surface-variant p-2 text-xs font-mono text-eleball-text">{name}</div>
+                        ))}
+                        {(!manifest.parameters?.properties?.name?.enum || manifest.parameters.properties.name.enum.length === 0) && (
+                          <div className="text-xs text-eleball-text-secondary">该 server 暂无可用提示</div>
+                        )}
+                      </div>
+                    )}
+
                     {/* 参数 schema（折叠） */}
                     {manifest.parameters && Object.keys(manifest.parameters).length > 0 && (
                       <details className="text-xs">

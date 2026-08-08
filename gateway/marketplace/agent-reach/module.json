@@ -72,8 +72,6 @@
     }
   },
   "capabilities": [
-    "web_read",
-    "search",
     "youtube_subtitles",
     "bilibili_search",
     "github_repo",

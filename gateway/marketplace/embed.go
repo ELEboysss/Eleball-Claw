@@ -15,8 +15,10 @@ import (
 // FS 官方模块目录（stt / search-web / firecrawl / agent-reach / mcp-hello / mcp-stdio-echo），含 module.json、
 // docker-compose.yml、Dockerfile 与服务源码，足够在用户机器上 docker compose up。
 // mcp-stdio-echo 例外：它是 stdio MCP 示例，仅含 module.json + main.py（python 子进程），无容器。
+// skill-maker / copywriting 例外：它们是 prompt-only skill（Anthropic 标准 SKILL.md），仅含 SKILL.md
+// 无 module.json/源码--1 SKILL.md = 1 SKU（driver=none），body 作 SystemPrompt 注入，不建运行时。
 //
-//go:embed all:stt all:search-web all:firecrawl all:agent-reach all:mcp-hello all:mcp-stdio-echo
+//go:embed all:stt all:search-web all:firecrawl all:agent-reach all:mcp-hello all:mcp-stdio-echo all:skill-maker all:copywriting
 var FS embed.FS
 
 // SeedOfficial 把内嵌官方模块写入 root，只补缺失文件，绝不覆盖用户已有修改。

@@ -3,11 +3,13 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
@@ -231,6 +233,43 @@ func TestAgentService_buildInitialMessages_ToolsEnabled(t *testing.T) {
 	msgs2, _ := agentSvc.buildInitialMessages(context.Background(), AgentExecuteRequest{Message: "hi"}, nil, "u1", "", "", false, false, model.PermissionModeDefault, "")
 	sys2, _ := msgs2[0].Content.(string)
 	assert.NotContains(t, sys2, "FunctionGet")
+}
+
+// TestAgentService_buildInitialMessages_PromptSkillInjected S3：用户激活的 prompt-only skill
+// 其 SystemPrompt 注入单 Agent 主路径 system 消息；停用（Active=false）后不注入。
+func TestAgentService_buildInitialMessages_PromptSkillInjected(t *testing.T) {
+	agentSvc, _, _ := setupAgentService(t)
+
+	// 独立 db 装载 AgentToolLoader（setupAgentService 未装配），seed 一个激活的 prompt-only skill
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, _ := db.DB()
+	sqlDB.SetMaxOpenConns(1)
+	require.NoError(t, db.AutoMigrate(&model.AgentItem{}, &model.AgentPurchase{}, &model.AgentUserTool{}))
+	agentRepo := repository.NewAgentRepo(db)
+	agentSvc.SetAgentToolLoader(NewAgentToolLoader(agentRepo, NewToolDriverRegistry(), nil))
+
+	mf, _ := json.Marshal(&model.ToolManifest{ID: "skillmd-copy", Name: "文案", Driver: model.ToolDriverNone})
+	require.NoError(t, agentRepo.Create(&model.AgentItem{
+		ID: "skillmd-copy", Name: "文案", Status: model.AgentStatusApproved,
+		SystemPrompt: "你是文案撰写专家，输出有感染力的营销文案。",
+		ManifestJSON: string(mf), CreatorID: "official", CreatorName: "官方", CreatedAt: time.Now(),
+	}))
+	require.NoError(t, agentRepo.CreatePurchase(&model.AgentPurchase{ID: "p1", AgentID: "skillmd-copy", BuyerID: "u1"}))
+	require.NoError(t, agentRepo.CreateUserTool(&model.AgentUserTool{ID: "t1", UserID: "u1", AgentID: "skillmd-copy", ToolName: "skillmd-copy", Active: true, CreatedAt: time.Now()}))
+
+	msgs, _ := agentSvc.buildInitialMessages(context.Background(), AgentExecuteRequest{Message: "写一句 slogan"}, nil, "u1", "", "", false, false, model.PermissionModeDefault, "")
+	require.NotEmpty(t, msgs)
+	sys, ok := msgs[0].Content.(string)
+	require.True(t, ok)
+	assert.Contains(t, sys, "技能提示（文案）")
+	assert.Contains(t, sys, "你是文案撰写专家")
+
+	// 停用后不再注入
+	require.NoError(t, db.Model(&model.AgentUserTool{}).Where("agent_id = ?", "skillmd-copy").Update("active", false).Error)
+	msgs2, _ := agentSvc.buildInitialMessages(context.Background(), AgentExecuteRequest{Message: "再写一句"}, nil, "u1", "", "", false, false, model.PermissionModeDefault, "")
+	sys2, _ := msgs2[0].Content.(string)
+	assert.NotContains(t, sys2, "你是文案撰写专家")
 }
 
 func TestAgentService_normalizeRequest(t *testing.T) {

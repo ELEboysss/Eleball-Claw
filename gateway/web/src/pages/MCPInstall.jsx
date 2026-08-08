@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import useSEO from '../hooks/useSEO'
-import { Loader2, Plus, Trash2, FolderOpen, Play, DownloadCloud, CheckCircle2, Server, Globe, Terminal } from 'lucide-react'
+import { Loader2, Plus, Trash2, FolderOpen, Play, DownloadCloud, CheckCircle2, Server, Globe, Terminal, Upload, FileText } from 'lucide-react'
 import { moduleGeneratorApi } from '../api/client'
 import DirectoryPicker from '../components/DirectoryPicker'
 import InterpreterMissingBanner from '../components/InterpreterMissingBanner'
@@ -67,6 +67,12 @@ export default function MCPInstall() {
   const [installError, setInstallError] = useState(null)
   const [result, setResult] = useState(null)
 
+  // M4：批量导入标准 MCP 配置（粘贴 Claude Desktop / Cursor / .mcp.json）
+  const [importText, setImportText] = useState('')
+  const [importing, setImporting] = useState(false)
+  const [importResult, setImportResult] = useState(null)
+  const [importError, setImportError] = useState(null)
+
   const args = useMemo(() => argsText.split(/\s+/).filter(Boolean), [argsText])
 
   const addEnv = () => setEnv([...env, { name: '', value: '' }])
@@ -130,10 +136,119 @@ export default function MCPInstall() {
     }
   }
 
+  // M4：批量导入标准 MCP 配置（粘贴 JSON）。客户端先校验 JSON 合法性给出可读错误，再 POST 原对象。
+  // 后端逐 server 探测+安装，返回 {results:[{name,transport,ok,result,error_code,message,interpreter,hint}]}。
+  const onImport = async () => {
+    const text = importText.trim()
+    if (!text) {
+      setImportError({ message: '请粘贴配置内容' })
+      return
+    }
+    let body
+    try {
+      body = JSON.parse(text)
+    } catch (e) {
+      setImportError({ message: '配置不是合法 JSON：' + e.message })
+      return
+    }
+    setImporting(true)
+    setImportError(null)
+    setImportResult(null)
+    try {
+      const data = await moduleGeneratorApi.importConfig(body)
+      setImportResult(data)
+    } catch (e) {
+      setImportError({ message: e.message, data: e.data })
+    } finally {
+      setImporting(false)
+    }
+  }
+
   const isStdio = transport === 'mcp_stdio'
 
   return (
     <div>
+      {/* M4：批量导入标准 MCP 配置文件 */}
+      <div className="card mb-4">
+        <SectionTitle
+          icon={FileText}
+          desc="粘贴 Claude Desktop / Cursor / .mcp.json 配置，一次导入多个 server（stdio: command/args/env；http: url/headers）。"
+        >
+          导入配置文件
+        </SectionTitle>
+        <textarea
+          className="input text-xs font-mono w-full"
+          rows={8}
+          value={importText}
+          onChange={(e) => setImportText(e.target.value)}
+          placeholder={'{\n  "mcpServers": {\n    "filesystem": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"]\n    },\n    "remote": { "url": "https://mcp.example.com/mcp" }\n  }\n}'}
+        />
+        <div className="flex flex-wrap items-center gap-3 mt-3">
+          <button
+            type="button"
+            onClick={onImport}
+            disabled={importing}
+            className="btn-primary text-sm px-5 py-2.5 disabled:opacity-50"
+          >
+            {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+            导入
+          </button>
+          <span className="text-xs text-eleball-text-tertiary">
+            逐 server 探测并安装为本地秘技；单个失败不中断其余。
+          </span>
+        </div>
+
+        {importError && (
+          <div className="mt-4 text-sm px-3 py-2 rounded-xl bg-red-50 text-red-600">{importError.message}</div>
+        )}
+
+        {importResult && (
+          <div className="mt-4 space-y-2">
+            <h3 className="text-xs font-semibold text-eleball-text-secondary">
+              导入结果（{importResult.results?.length || 0} 个 server）
+            </h3>
+            {(importResult.results || []).map((r) => (
+              <div
+                key={r.name}
+                className={`rounded-xl border p-3 ${
+                  r.ok ? 'border-emerald-300 bg-emerald-50' : 'border-red-200 bg-red-50'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  {r.ok ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  ) : (
+                    <span className="text-red-500 font-bold text-sm leading-none">✕</span>
+                  )}
+                  <span className="font-mono text-xs font-semibold text-eleball-text">{r.name}</span>
+                  <span className="text-[11px] text-eleball-text-tertiary">{r.transport}</span>
+                  {!r.ok && r.error_code && (
+                    <span className="ml-auto text-[11px] font-mono text-red-500">{r.error_code}</span>
+                  )}
+                </div>
+                {r.ok ? (
+                  <div className="mt-1.5 pl-6 text-xs text-eleball-text space-y-0.5">
+                    <div>运行时：<span className="font-mono break-all">{r.result?.runtime_id}</span></div>
+                    <div>派生秘技：<span className="font-mono">{r.result?.sku_count}</span> 个</div>
+                  </div>
+                ) : (
+                  <div className="mt-1.5 pl-6 space-y-2">
+                    <div className="text-xs text-red-600">{r.message}</div>
+                    {r.error_code === 'interpreter_missing' && (
+                      <InterpreterMissingBanner
+                        data={{ error_code: 'interpreter_missing', interpreter: r.interpreter, hint: r.hint }}
+                        message={r.message}
+                        onResolved={onImport}
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* transport 选择 */}
       <div className="card mb-4">
         <SectionTitle icon={Server} desc="stdio 启动本地进程；http 连接远端服务。">

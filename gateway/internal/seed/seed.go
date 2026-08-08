@@ -86,7 +86,13 @@ func SyncOfficialSKUs(repo *repository.AgentRepo, side string, logger *zap.Logge
 		modName := modEntry.Name()
 		scope, ok := readModuleSKUScope(filepath.Join(root, modName, "module.json"))
 		if !ok {
-			continue // 无 module.json 或解析失败，非官方模块目录
+			// 无 module.json：尝试 SKILL.md prompt-only skill（Anthropic 标准，
+			// 1 SKILL.md = 1 SKU，body 即 SystemPrompt，不建 SkillRuntime）。
+			c, sy, sk := syncPromptSkillSKU(repo, root, modName, adminID, now, logger)
+			created += c
+			synced += sy
+			skipped += sk
+			continue
 		}
 		if !scopeIncluded(scope, side) {
 			continue
@@ -228,4 +234,89 @@ func shouldSyncManifest(existing, fromFile string) bool {
 		return false
 	}
 	return strings.TrimSpace(existing) != strings.TrimSpace(fromFile)
+}
+
+// syncPromptSkillSKU 处理「只有 SKILL.md 无 module.json」的 prompt-only skill 目录。
+//
+// Anthropic 标准 SKILL.md 直接丢进 marketplace/ 即用：1 SKILL.md = 1 SKU，
+// body 作为 SystemPrompt 注入对话，不建 SkillRuntime（纯 prompt 无进程/docker）。
+// 派生 SKU ID = skillmd-<frontmatter.name>，driver=none（checkModuleOnline/
+// checkDriverRegistered 对 none 一律返回 可用/已注册，故可展示可购买）。
+//
+// side 不过滤：SKILL.md 出现在哪一侧的 marketplace 就在哪一侧注册
+// （cloud/claw 的 marketplace 目录内容不同，自然区分；Anthropic 标准无 sku_scope 概念）。
+// frontmatter metadata.category 可覆盖默认分类「提示」。
+//
+// 返回 (created, synced, skipped) 计数，由调用方累加。无 SKILL.md 或解析失败时全 0（跳过）。
+func syncPromptSkillSKU(repo *repository.AgentRepo, root, modName, adminID string, now time.Time, logger *zap.Logger) (int, int, int) {
+	skillmd, err := service.ParseSkillMD(filepath.Join(root, modName, "SKILL.md"))
+	if err != nil {
+		// 无 SKILL.md 或 frontmatter 不合法：非 prompt-only skill 目录，静默跳过。
+		return 0, 0, 0
+	}
+	agentID := "skillmd-" + strings.TrimSpace(skillmd.Name)
+	body := skillmd.Body
+	category := "提示"
+	if skillmd.Metadata != nil {
+		if c, ok := skillmd.Metadata["category"].(string); ok && strings.TrimSpace(c) != "" {
+			category = c
+		}
+	}
+	// 极简 ToolManifest：driver=none 标识 prompt-only，SystemPrompt 存 AgentItem 字段
+	// （ToolManifest 无 system_prompt 字段，SKILL.md 是 prompt-only SKU 的源格式，并行于 skus/*.json）。
+	manifest := &model.ToolManifest{
+		ID:          agentID,
+		Name:        skillmd.Name,
+		Description: skillmd.Description,
+		Driver:      model.ToolDriverNone,
+		Category:    category,
+		Parameters:  map[string]interface{}{},
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("序列化 prompt-only skill manifest 失败", zap.String("id", agentID), zap.Error(err))
+		}
+		return 0, 0, 0
+	}
+	manifestStr := string(manifestJSON)
+
+	existing, err := repo.GetByID(agentID)
+	if err == nil && existing != nil {
+		// SKILL.md 是源格式：body/name/desc 任一变化即同步（不同于 shouldSyncManifest 比 manifest_json）。
+		if existing.SystemPrompt == body && existing.Name == skillmd.Name && existing.Description == skillmd.Description {
+			return 0, 0, 1
+		}
+		existing.ManifestJSON = manifestStr
+		existing.Name = skillmd.Name
+		existing.Description = skillmd.Description
+		existing.Category = category
+		existing.SystemPrompt = body
+		if err := repo.Update(existing); err != nil {
+			if logger != nil {
+				logger.Warn("同步 prompt-only skill 失败", zap.String("id", agentID), zap.Error(err))
+			}
+			return 0, 0, 0
+		}
+		return 0, 1, 0
+	}
+	item := &model.AgentItem{
+		ID:           agentID,
+		Name:         skillmd.Name,
+		Description:  skillmd.Description,
+		Category:     category,
+		SystemPrompt: body,
+		ManifestJSON: manifestStr,
+		Status:       model.AgentStatusApproved,
+		CreatorID:    adminID,
+		CreatorName:  "官方",
+		CreatedAt:    now,
+	}
+	if err := repo.Create(item); err != nil {
+		if logger != nil {
+			logger.Warn("创建 prompt-only skill SKU 失败", zap.String("id", agentID), zap.Error(err))
+		}
+		return 0, 0, 0
+	}
+	return 1, 0, 0
 }

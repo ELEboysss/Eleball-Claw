@@ -1,0 +1,35 @@
+{
+  "$schema": "../../../specs/tool-manifest-schema.json",
+  "id": "com.eleball.tools.search_web.exa",
+  "name": "Exa 语义搜索",
+  "description": "基于本地 search-web 模块的 Exa 语义搜索。搜索源固定为 exa（provider=exa），经 mcporter 调用 Exa，无需 API Key（keyless 兜底源）。",
+  "driver": "search_web",
+  "runtime_type": "remote",
+  "category": "搜索",
+  "level": 1,
+  "price_danwan": 0,
+  "permissions": ["network"],
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "搜索关键词"
+      }
+    },
+    "required": ["query"]
+  },
+  "actions": [
+    { "name": "search", "description": "按关键词进行 Exa 语义搜索（keyless，无需配置）" }
+  ],
+  "metadata": { "module": "search-web", "provider": "exa" },
+  "timeout_seconds": 45,
+  "error_codes": [
+    "credential_missing",
+    "upstream_error",
+    "upstream_timeout",
+    "parameter_invalid",
+    "unsupported_action",
+    "module_internal_error"
+  ]
+}

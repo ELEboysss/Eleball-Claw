@@ -1,0 +1,35 @@
+{
+  "$schema": "../../../specs/tool-manifest-schema.json",
+  "id": "com.eleball.tools.search_web.web_read",
+  "name": "网页阅读",
+  "description": "基于本地 search-web 模块的网页正文阅读。经 mcporter 调用 Exa web_fetch_exa，将网页正文转为 markdown，无需 API Key（keyless）。适合公众号/新闻/文档等需渲染的页面，与 fetch（纯 HTTP）互补。",
+  "driver": "search_web",
+  "runtime_type": "remote",
+  "category": "搜索",
+  "level": 1,
+  "price_danwan": 0,
+  "permissions": ["network"],
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "网页 URL"
+      }
+    },
+    "required": ["url"]
+  },
+  "actions": [
+    { "name": "web_read", "description": "读取网页正文为 markdown（keyless，无需配置）" }
+  ],
+  "metadata": { "module": "search-web", "provider": "exa" },
+  "timeout_seconds": 35,
+  "error_codes": [
+    "credential_missing",
+    "upstream_error",
+    "upstream_timeout",
+    "parameter_invalid",
+    "unsupported_action",
+    "module_internal_error"
+  ]
+}

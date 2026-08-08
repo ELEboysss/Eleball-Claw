@@ -79,6 +79,9 @@ func (r *SkillRuntimeRegistry) SetLogger(logger *zap.Logger) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.logger = logger
+	if r.mcpHTTP != nil {
+		r.mcpHTTP.SetLogger(logger)
+	}
 }
 
 // SetMCPStdioProtocol 注入共享的 stdio MCP 协议实例（与 SkillRuntimeManager 共享）。

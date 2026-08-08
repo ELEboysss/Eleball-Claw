@@ -5,7 +5,7 @@ Eleball 集市技能模块标准接口：
 - GET  /health           健康检查与能力声明
 - POST /execute          执行指定 action（execute 传输，凭证经 params.credentials 注入）
 - POST /mcp              MCP Streamable HTTP JSON-RPC（mcp_http 传输，凭证经请求头注入）
-- POST /                 同 /mcp（网关 mcp_http 经 mcpModuleBaseURL 把端点收敛为根路径）
+- POST /                 同 /mcp（网关保留 mcp_server_config.url 完整 path，url 无 path 时落根路径）
 
 凭证来源随传输协议不同：
 - execute：网关把 SKU manifest 声明的凭证注入 params.credentials（多用户按 user_id 隔离 cookie）。
@@ -32,9 +32,8 @@ MODULE_ID = "agent-reach"
 VERSION = "1.0.0"
 
 # 模块支持的能力清单（与 ToolManifest actions / MCP 工具名对应）
+# web_read / search 已迁至网关内置（ExaSearchProvider / WebRead 经 mcporter 调 Exa），本模块仅保留 CLI 能力
 CAPABILITIES = [
-    "web_read",
-    "search",
     "youtube_subtitles",
     "bilibili_search",
     "github_repo",
@@ -64,31 +63,10 @@ CREDENTIAL_HEADERS = {
     "X-Github-Token": "github_token",
 }
 
-# MCP 工具清单（9 个，name 即 action，与 CAPABILITIES 对应）。
+# MCP 工具清单（7 个，name 即 action，与 CAPABILITIES 对应）。
+# web_read / search 已迁至网关内置，此处不再暴露。
 # inputSchema 透传给网关 DeriveSKUs 合成 SKU 的 parameters。
 MCP_TOOLS = [
-    {
-        "name": "web_read",
-        "description": "读取任意网页正文为 markdown（经 Exa 渲染，适合公众号/新闻/文档）",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "网页 URL 或域名"}},
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "search",
-        "description": "全网语义搜索（Exa，经 mcporter 零配置接入，无需 API Key）；platform=bilibili 时走B站视频搜索",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "搜索关键词"},
-                "limit": {"type": "integer", "description": "返回条数", "default": 5},
-                "platform": {"type": "string", "enum": ["bilibili"], "description": "可选，指定 bilibili 走B站搜索"},
-            },
-            "required": ["query"],
-        },
-    },
     {
         "name": "youtube_subtitles",
         "description": "提取 YouTube 视频字幕（en/zh-CN/zh-TW/ja）",
@@ -187,18 +165,10 @@ def shell_safe(value: str) -> None:
         raise ValueError("参数包含非法 shell 字符")
 
 
-def run(cmd: list[str], user_id: str, timeout: int = 60, github_token: str = "", use_user_home: bool = True) -> dict:
-    """在隔离的 HOME 目录下执行命令。
-
-    use_user_home=False 时把 HOME 指向容器 /root--
-    供 keyless 工具（如经 mcporter 调用的 Exa 搜索）使用构建期以 root 注册的 mcporter 配置，
-    这些工具不需要任何用户凭证/Cookie。容器以 root 运行（Dockerfile 无 USER 指令）。
-    """
+def run(cmd: list[str], user_id: str, timeout: int = 60, github_token: str = "") -> dict:
+    """在隔离的 HOME 目录下执行命令（用户 Cookie 目录即 HOME，供上游 CLI 读取凭证）。"""
     env = os.environ.copy()
-    if use_user_home:
-        env["HOME"] = str(user_cookie_dir(user_id))
-    else:
-        env["HOME"] = "/root"
+    env["HOME"] = str(user_cookie_dir(user_id))
     if github_token:
         env["GH_TOKEN"] = github_token
     try:
@@ -318,25 +288,6 @@ def build_command(action: str, params: dict, user_id: str) -> list[str]:
     shell_safe(query)
     limit = int(params.get("limit", 5))
 
-    if action == "web_read":
-        url = query if query.startswith("http://") or query.startswith("https://") else f"https://{query}"
-        # 经 Exa web_fetch 读取网页正文为 markdown（mcporter 零配置接入，同 search 通道，国内可达）。
-        # 旧方案 curl https://r.jina.ai/{url}：r.jina.ai（Jina Reader，Cloudflare）国内 TCP 不可达，
-        # 表现为 exit=7 或网关 30s 超时；search 走 mcp.exa.ai 可达，故 web_read 改走同一通道。
-        urls_json = json.dumps([url])
-        call = f"exa.web_fetch_exa(urls: {urls_json}, maxCharacters: 20000)"
-        return ["mcporter", "call", call]
-
-    if action == "search":
-        # 兼容 LLM 直接指定 platform 的情况（如B站视频搜索）
-        platform = str(params.get("platform", "")).lower()
-        if platform == "bilibili":
-            return ["bili", "search", query, "--type", "video", "-n", str(limit)]
-        # 默认走 Exa MCP（经 mcporter 零配置接入，无需 API Key；exa server 在镜像构建期注册）
-        q = json.dumps(query)
-        call = f"exa.web_search_exa(query: {q}, numResults: {limit})"
-        return ["mcporter", "call", call]
-
     if action == "youtube_subtitles":
         cookies_file = user_cookie_dir(user_id) / "youtube_cookies.txt"
         cmd = [
@@ -419,10 +370,8 @@ def execute(req: ExecuteRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # search / web_read 经 mcporter 调 Exa（keyless，无需用户凭证），用容器默认 HOME 以读取构建期注册的 mcporter 配置
-    use_user_home = req.action not in ("search", "web_read")
     timeout = 120 if req.action in ("youtube_subtitles", "social_search", "social_read") else 60
-    result = run(cmd, req.user_id, timeout, github_token=github_token, use_user_home=use_user_home)
+    result = run(cmd, req.user_id, timeout, github_token=github_token)
     return result
 
 
@@ -494,10 +443,8 @@ def _handle_tool_call(req_id: Any, name: str, arguments: dict, request: Request)
     except ValueError as e:
         return _mcp_result(req_id, {"isError": True, "content": [{"type": "text", "text": str(e)}]})
 
-    # search / web_read 经 mcporter 调 Exa（keyless，无需用户凭证），用容器默认 HOME 以读取构建期注册的 mcporter 配置
-    use_user_home = name not in ("search", "web_read")
     timeout = 120 if name in ("youtube_subtitles", "social_search", "social_read") else 60
-    result = run(cmd, MCP_USER_ID, timeout, github_token=github_token, use_user_home=use_user_home)
+    result = run(cmd, MCP_USER_ID, timeout, github_token=github_token)
     return _result_to_mcp(req_id, result)
 
 
@@ -532,7 +479,7 @@ async def mcp_rpc(request: Request) -> JSONResponse:
     return _mcp_error(req_id, -32601, f"Method not found: {method}")
 
 
-# 网关 mcp_http 经 mcpModuleBaseURL 把端点收敛为根路径，故根路径与 /mcp 均挂同一处理函数。
+# 网关 mcp_http 保留 mcp_server_config.url 完整 path；为兼容 url 含/不含 path 两种配置，根路径与 /mcp 均挂同一处理函数。
 app.add_api_route("/mcp", mcp_rpc, methods=["POST"])
 app.add_api_route("/", mcp_rpc, methods=["POST"])
 

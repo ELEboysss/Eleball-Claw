@@ -223,6 +223,19 @@ func buildDerivedManifest(rt *model.SkillRuntime, t MCPTool) model.ToolManifest 
 		runtimeType = "sidecar"
 	}
 
+	metadata := map[string]string{
+		"module":          rt.ID,
+		"auto_sku_module": rt.ID,
+	}
+	// M5：伪工具标注（read_resource/get_prompt 由协议层据 resources/prompts capability 合成），
+	// 供 UI 区分展示「资源读取器/提示获取器」而非普通工具。
+	switch t.Name {
+	case mcpPseudoToolReadResource:
+		metadata["pseudo_tool"] = "resource"
+	case mcpPseudoToolGetPrompt:
+		metadata["pseudo_tool"] = "prompt"
+	}
+
 	return model.ToolManifest{
 		ID:          moduleSKUID(rt.ID, t.Name),
 		Name:        name,
@@ -234,10 +247,7 @@ func buildDerivedManifest(rt *model.SkillRuntime, t MCPTool) model.ToolManifest 
 		PriceDanwan: 0,
 		Parameters:  params,
 		Actions:     []model.ToolAction{{Name: t.Name, Description: desc}},
-		Metadata: map[string]string{
-			"module":          rt.ID,
-			"auto_sku_module": rt.ID,
-		},
+		Metadata:    metadata,
 		Credentials: rt.CredentialsMap(),
 	}
 }

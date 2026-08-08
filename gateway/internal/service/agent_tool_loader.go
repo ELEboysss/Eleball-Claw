@@ -236,10 +236,11 @@ func (l *AgentToolLoader) ActivateToolOnPurchase(userID, agentID string) error {
 	if err != nil {
 		return err
 	}
-	if manifest == nil || manifest.Driver == model.ToolDriverNone {
+	if manifest == nil {
 		return nil
 	}
-
+	// prompt-only skill（driver=none）不经 function-calling（buildTool 返回 nil），但仍建
+	// AgentUserTool{Active:true}：复用购买/启停 UI，并供主路径 buildInitialMessages 注入其 SystemPrompt。
 	toolName := manifest.ID
 	if toolName == "" {
 		toolName = fmt.Sprintf("Agent_%s", agentID)
@@ -259,6 +260,28 @@ func (l *AgentToolLoader) ActivateToolOnPurchase(userID, agentID string) error {
 		Active:    true,
 		CreatedAt: time.Now(),
 	})
+}
+
+// LoadActivePromptSkills 返回用户已购买且激活（AgentUserTool.active=true）的 prompt-only
+// 秘技（driver=none）AgentItem，供单 Agent 主路径 buildInitialMessages 注入其 SystemPrompt。
+// 复用 ListPurchasedExecutableTools（已含 已购买+active+approved+manifest 非空 过滤），内存筛
+// driver=none 且 SystemPrompt 非空。停用（Active=false）或未购买的不返回，故不注入。
+func (l *AgentToolLoader) LoadActivePromptSkills(userID string) ([]*model.AgentItem, error) {
+	items, err := l.agentRepo.ListPurchasedExecutableTools(userID)
+	if err != nil {
+		return nil, err
+	}
+	prompt := make([]*model.AgentItem, 0, len(items))
+	for _, item := range items {
+		manifest, err := item.Manifest()
+		if err != nil || manifest == nil {
+			continue
+		}
+		if manifest.Driver == model.ToolDriverNone && strings.TrimSpace(item.SystemPrompt) != "" {
+			prompt = append(prompt, item)
+		}
+	}
+	return prompt, nil
 }
 
 // ValidateManifest 校验 ToolManifest 是否合法
@@ -336,7 +359,7 @@ func (l *AgentToolLoader) ResolveDriver(driverName string) (*model.DriverRecord,
 // ResolveModuleID 从 manifest 或动态驱动记录中解析模块 ID。
 // 优先读取 metadata.module（兼容旧写法），其次根据 driver 字段查找动态驱动记录的 ModuleID。
 // 注意：driverRegistry 命中 SkillRuntimeDriver 别名时 resolveDriver 返回 rec=nil（别名本身
-// 无 DriverRecord），此时手写 SKU（无 metadata.module，如 agent-reach/web.json）会解析失败
+// 无 DriverRecord），此时手写 SKU（无 metadata.module，如 agent-reach/github.json）会解析失败
 // -> 卡片误判离线（而按 runtime ID 探活却在线）。故 rec 为空时回退 moduleService 查 DB
 // 拿 DriverRecord.ModuleID，与 ModuleService.resolveModuleIDFromManifest 同语义。
 func (l *AgentToolLoader) ResolveModuleID(manifest *model.ToolManifest) string {

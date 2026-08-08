@@ -262,6 +262,9 @@ func NewClawRouter(
 				// G3：动态安装远端 MCP server（Smithery 式，probe -> 建 source=mcp_remote runtime -> DeriveSKUs）
 				console.POST("/mcp/install", clawConsoleHandler.InstallMCP)
 
+				// M4：批量导入标准 MCP 配置（Claude Desktop/Cursor/.mcp.json，逐 server 走 G3 probe+install+DeriveSKUs）
+				console.POST("/mcp/import-config", clawConsoleHandler.ImportMCPConfig)
+
 				// F1 收尾：skill-maker AI 起草 main.py 草稿（能力描述 + 凭证声明 -> 对话模型生成 stdio MCP 脚本）
 				console.POST("/mcp/draft-main", clawConsoleHandler.DraftMainPy)
 

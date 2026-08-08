@@ -6,7 +6,7 @@ Eleball-claw 内置模块：search-web（联网搜索）
 2. 开发者范例：可借鉴本模块源码开发自己的秘技（标准 /health + /execute）。
 
 复用上游 builtin SearchWeb 的搜索逻辑（gateway/internal/service/search_provider.go），
-支持 baidu / bing / searxng / duckduckgo 四个搜索源。
+支持 baidu / bing / searxng / duckduckgo / exa 五个搜索源（exa 经 mcporter 调用 Exa，keyless 兜底）。
 
 **选源契约**（不写死源）：
 上游先调 `action=list_sources`（或读 /health 的 providers 字段）获取可用源列表，
@@ -15,11 +15,15 @@ Eleball-claw 内置模块：search-web（联网搜索）
 
 标准接口（见 docs/tool-driver-guide.md §9）：
 - GET  /health  上报状态、能力与可用源
-- POST /execute 执行 action（list_sources / search / fetch）
+- POST /execute 执行 action（list_sources / search / fetch / web_read）
 """
 
 import os
+import re
+import json
+import shutil
 import logging
+import subprocess
 from typing import Any
 from urllib.parse import urlparse, parse_qs
 
@@ -36,7 +40,7 @@ app = FastAPI(title="Eleball search-web Module", version="1.0.0")
 
 MODULE_ID = "search-web"
 VERSION = "1.0.0"
-CAPABILITIES = ["list_sources", "search", "fetch"]
+CAPABILITIES = ["list_sources", "search", "fetch", "web_read"]
 
 
 class ModuleError(Exception):
@@ -91,6 +95,9 @@ def _is_available(name: str) -> bool:
     if n == "duckduckgo":
         # 无需 key，国际网络可用；国内服务器不稳定，不作为推荐项但始终 available
         return True
+    if n == "exa":
+        # keyless，经 mcporter 调用 Exa MCP；可用性取决于容器内是否预装 mcporter 并注册 exa
+        return shutil.which("mcporter") is not None
     return False
 
 
@@ -104,6 +111,8 @@ _SOURCES = [
      "description": "自建 SearXNG 实例（需 SEARXNG_URL）"},
     {"name": "duckduckgo", "label": "DuckDuckGo", "recommended": False,
      "description": "DuckDuckGo Lite，无需 key，国际网络可用"},
+    {"name": "exa", "label": "Exa", "recommended": False,
+     "description": "Exa 语义搜索，经 mcporter 接入，无需 API Key（keyless 兜底源）"},
 ]
 
 
@@ -141,7 +150,7 @@ def _first_available_provider_with_credentials(credentials: dict[str, str] | Non
 # ====== 请求/响应模型 ======
 
 class ExecuteRequest(BaseModel):
-    action: str = Field(..., description="操作名：list_sources / search / fetch")
+    action: str = Field(..., description="操作名：list_sources / search / fetch / web_read")
     params: dict[str, Any] = Field(default_factory=dict, description="业务参数")
     user_id: str = Field(default="", description="当前用户 ID（本模块不使用）")
 
@@ -186,6 +195,7 @@ def _provider_key_available(name: str, credentials: dict[str, str] | None) -> bo
 _KEY_MISSING_HINTS = {
     "baidu": "未配置百度千帆 API Key，请在秘技卡片配置凭证（baidu_api_key）",
     "bing": "未配置必应 Bing Search API Key，请在秘技卡片配置凭证（bing_search_api_key）",
+    "exa": "Exa 搜索不可用：容器未预装 mcporter（keyless 源，无需 API Key）",
 }
 
 
@@ -306,6 +316,62 @@ def _search_duckduckgo(query: str) -> list[SearchResult]:
     return results
 
 
+# Exa 结果块分隔行（mcporter --output text 中独占一行的 ---）
+_EXA_SEP = re.compile(r"(?m)^\s*---\s*$")
+
+
+def _parse_exa_results(text: str) -> list[SearchResult]:
+    """解析 mcporter --output text 的 Exa 搜索输出（Title/URL/Highlights 块，--- 分隔）。"""
+    results: list[SearchResult] = []
+    for block in _EXA_SEP.split(text):
+        block = block.strip()
+        if not block:
+            continue
+        title = url = ""
+        snippet_parts: list[str] = []
+        in_highlights = False
+        for line in block.split("\n"):
+            if line.startswith("Title: "):
+                title = line[len("Title: "):]
+                in_highlights = False
+            elif line.startswith("URL: "):
+                url = line[len("URL: "):]
+                in_highlights = False
+            elif line.startswith("Published: ") or line.startswith("Author: "):
+                in_highlights = False
+            elif line.startswith("Highlights:"):
+                in_highlights = True
+            elif in_highlights:
+                snippet_parts.append(line)
+        if not title and not url:
+            continue
+        results.append(SearchResult(title=title, url=url, snippet="\n".join(snippet_parts).strip()))
+    return results
+
+
+def _search_exa(query: str) -> list[SearchResult]:
+    """Exa 语义搜索（经 mcporter 调用 Exa MCP，keyless）。"""
+    if not shutil.which("mcporter"):
+        raise ModuleError("credential_missing", _KEY_MISSING_HINTS["exa"])
+    args = json.dumps({"query": query, "numResults": 5})
+    try:
+        proc = subprocess.run(
+            ["mcporter", "call", "exa.web_search_exa", "--args", args, "--output", "text"],
+            capture_output=True, text=True, timeout=SEARCH_TIMEOUT + 15,
+        )
+    except subprocess.TimeoutExpired:
+        raise ModuleError("upstream_timeout", "Exa 搜索调用超时")
+    if proc.returncode != 0:
+        raise ModuleError("upstream_error", f"Exa 搜索调用失败：{proc.stderr.strip() or proc.stdout}")
+    results = _parse_exa_results(proc.stdout)
+    if not results:
+        results.append(SearchResult(
+            title="未找到结果", url="",
+            snippet=f"Exa 未返回有效结果，query={query}",
+        ))
+    return results
+
+
 def do_search(query: str, provider: str | None = None,
               credentials: dict[str, str] | None = None) -> list[SearchResult]:
     """按指定源搜索；provider 为空时兜底选第一个可用源（上游应显式传 provider）。
@@ -328,6 +394,8 @@ def do_search(query: str, provider: str | None = None,
         return _search_searxng(query)
     if name == "duckduckgo":
         return _search_duckduckgo(query)
+    if name == "exa":
+        return _search_exa(query)
     raise ModuleError("unsupported_provider", f"不支持的搜索源: {name}")
 
 
@@ -341,6 +409,29 @@ def do_fetch(url: str) -> dict[str, Any]:
     title = soup.title.get_text(strip=True) if soup.title else ""
     text = soup.get_text(separator="\n", strip=True)
     return {"title": title, "url": url, "content": text[:4000]}
+
+
+def do_web_read(url: str) -> dict[str, Any]:
+    """读取网页正文为 markdown（经 mcporter 调用 Exa web_fetch_exa，keyless）。
+    与 fetch（纯 HTTP + BeautifulSoup）互补：适合公众号/新闻/文档等需渲染的页面。"""
+    if not shutil.which("mcporter"):
+        raise ModuleError("credential_missing", "WebRead 不可用：容器未预装 mcporter（keyless，无需 API Key）")
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = f"https://{url}"
+    args = json.dumps({"urls": [url], "maxCharacters": 20000})
+    try:
+        proc = subprocess.run(
+            ["mcporter", "call", "exa.web_fetch_exa", "--args", args, "--output", "text"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        raise ModuleError("upstream_timeout", "WebRead 调用超时")
+    if proc.returncode != 0:
+        raise ModuleError("upstream_error", f"WebRead 调用失败：{proc.stderr.strip() or proc.stdout}")
+    content = proc.stdout.strip()
+    if not content:
+        raise ModuleError("upstream_error", f"WebRead 未返回内容，url={url}")
+    return {"url": url, "content": content}
 
 
 # ====== 标准接口 ======
@@ -376,6 +467,11 @@ def execute(req: ExecuteRequest) -> dict[str, Any]:
             if not url:
                 raise ModuleError("parameter_invalid", "fetch 需要参数 url")
             return do_fetch(str(url))
+        if action == "web_read":
+            url = params.get("url") or params.get("query")
+            if not url:
+                raise ModuleError("parameter_invalid", "web_read 需要参数 url")
+            return do_web_read(str(url))
         raise ModuleError("unsupported_action", f"不支持的 action: {action}")
     except ModuleError as e:
         # 返回结构化错误码（error_code/error_message/upstream_status），网关透传给 LLM 与调试者

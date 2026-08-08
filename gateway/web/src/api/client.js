@@ -225,6 +225,10 @@ export const moduleGeneratorApi = {
   // 入参 = probe 字段（stdio: command/args/env/work_dir；http: endpoint/headers）+ name + description。
   // 后端先探测校验再建 source=mcp_remote 的 SkillRuntime 并派生 SKU。
   install: (body) => client.post('/claw-console/mcp/install', body, { timeout: 35000 }),
+  // M4：批量导入标准 MCP 配置（Claude Desktop/Cursor/.mcp.json）-> { results: [{name,transport,ok,result,error_code,message,interpreter,hint}] }
+  // 接受粘贴 JSON 对象或 FormData(file 字段)；逐 server 走 G3 probe+install+DeriveSKUs，单 server 失败不中断其余。
+  importConfig: (body, opts = {}) =>
+    client.post('/claw-console/mcp/import-config', body, { timeout: 120000, ...opts }),
   // H1：安装托管解释器（python/node，SHA-256 校验）-> { interpreter, path, version, source, reused }
   // 解释器缺失横幅「自动安装」按钮调用；系统已有则直接返回（source=system）。下载 ~30MB，超时放宽到 5 分钟。
   installInterpreter: (body) => client.post('/claw-console/tools/install-interpreter', body, { timeout: 300000 }),
