@@ -32,15 +32,35 @@ MODULE_ID = "agent-reach"
 VERSION = "1.0.0"
 
 # 模块支持的能力清单（与 ToolManifest actions / MCP 工具名对应）
-# web_read / search 已迁至网关内置（ExaSearchProvider / WebRead 经 mcporter 调 Exa），本模块仅保留 CLI 能力
+# web_read / search 已迁至网关内置（ExaSearchProvider / WebRead 经 mcporter 调 Exa），本模块仅保留 CLI 能力。
+# 能力来源：agent-reach 官方 skill references（social.md/video.md/dev.md）已核对的 CLI 语法。
 CAPABILITIES = [
-    "youtube_subtitles",
+    # B站（bili-cli，只读无需登录）
     "bilibili_search",
+    "bilibili_hot",
+    "bilibili_rank",
+    # YouTube（yt-dlp，免登录）
+    "youtube_subtitles",
+    "youtube_search",
+    "youtube_comments",
+    # GitHub（gh，token 可选）
     "github_repo",
     "github_search",
+    "github_search_code",
+    "github_issues",
+    "github_prs",
+    "github_runs",
+    "github_releases",
+    # RSS（feedparser，免登录）
     "rss_read",
+    # 社媒（twitter-cli / rdt-cli / xhs-cli，需登录态）
     "social_search",
     "social_read",
+    "social_hot",
+    "social_user",
+    "twitter_article",
+    "xhs_comments",
+    "reddit_subreddit",
 ]
 
 # 需要 Cookie 的平台（社交 + B站 + YouTube）
@@ -63,10 +83,42 @@ CREDENTIAL_HEADERS = {
     "X-Github-Token": "github_token",
 }
 
-# MCP 工具清单（7 个，name 即 action，与 CAPABILITIES 对应）。
+# MCP 工具清单（name 即 action，与 CAPABILITIES 对应；每工具在 claw 侧派生 1 个 auto SKU）。
 # web_read / search 已迁至网关内置，此处不再暴露。
 # inputSchema 透传给网关 DeriveSKUs 合成 SKU 的 parameters。
 MCP_TOOLS = [
+    # --- B站（bili-cli，免登录）---
+    {
+        "name": "bilibili_search",
+        "description": "搜索B站视频（关键词搜索，非热门榜）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "搜索关键词"},
+                "limit": {"type": "integer", "description": "返回条数", "default": 5},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "bilibili_hot",
+        "description": "获取 B站 热门视频榜（全站热门，非关键词搜索，无需登录）。用户问「B站今日热门/排行」用这个，不要用 bilibili_search。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "description": "返回条数", "default": 10}},
+            "required": [],
+        },
+    },
+    {
+        "name": "bilibili_rank",
+        "description": "获取 B站 视频排行榜（与热门榜略有差异，含排名，无需登录）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "description": "返回条数", "default": 10}},
+            "required": [],
+        },
+    },
+    # --- YouTube（yt-dlp，免登录）---
     {
         "name": "youtube_subtitles",
         "description": "提取 YouTube 视频字幕（en/zh-CN/zh-TW/ja）",
@@ -77,8 +129,8 @@ MCP_TOOLS = [
         },
     },
     {
-        "name": "bilibili_search",
-        "description": "搜索B站视频",
+        "name": "youtube_search",
+        "description": "搜索 YouTube 视频（返回标题/ID/链接，轻量元数据）",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -88,6 +140,19 @@ MCP_TOOLS = [
             "required": ["query"],
         },
     },
+    {
+        "name": "youtube_comments",
+        "description": "提取 YouTube 视频评论（best-effort，yt-dlp 抓取，可能不全）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "YouTube 视频 URL"},
+                "limit": {"type": "integer", "description": "返回评论数", "default": 20},
+            },
+            "required": ["query"],
+        },
+    },
+    # --- GitHub（gh，token 可选）---
     {
         "name": "github_repo",
         "description": "查看 GitHub 仓库信息（名称/描述/星数/语言/默认分支）",
@@ -110,6 +175,67 @@ MCP_TOOLS = [
         },
     },
     {
+        "name": "github_search_code",
+        "description": "在 GitHub 搜索代码（按仓库/路径/文本匹配）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "搜索关键词"},
+                "limit": {"type": "integer", "description": "返回条数", "default": 5},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "github_issues",
+        "description": "列出 GitHub 仓库的 open Issues",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "仓库名 owner/repo"},
+                "limit": {"type": "integer", "description": "返回条数", "default": 10},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "github_prs",
+        "description": "列出 GitHub 仓库的 open Pull Requests",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "仓库名 owner/repo"},
+                "limit": {"type": "integer", "description": "返回条数", "default": 10},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "github_runs",
+        "description": "列出 GitHub 仓库最近的 Actions 运行（CI）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "仓库名 owner/repo"},
+                "limit": {"type": "integer", "description": "返回条数", "default": 10},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "github_releases",
+        "description": "列出 GitHub 仓库的 Release",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "仓库名 owner/repo"},
+                "limit": {"type": "integer", "description": "返回条数", "default": 10},
+            },
+            "required": ["query"],
+        },
+    },
+    # --- RSS（feedparser，免登录）---
+    {
         "name": "rss_read",
         "description": "读取 RSS/Atom 订阅源（返回最近 20 条标题/链接/摘要）",
         "inputSchema": {
@@ -118,9 +244,10 @@ MCP_TOOLS = [
             "required": ["query"],
         },
     },
+    # --- 社媒语义操作（按 social_platform 派发；twitter/xiaohongshu/reddit 需登录态）---
     {
         "name": "social_search",
-        "description": "搜索社媒内容（Twitter/小红书/Reddit/B站）",
+        "description": "搜索社媒内容（Twitter/小红书/Reddit/B站 关键词搜索，非实时热门榜）",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -133,15 +260,71 @@ MCP_TOOLS = [
     },
     {
         "name": "social_read",
-        "description": "读取社媒帖子详情（Twitter/小红书/Reddit/B站）",
+        "description": "读取社媒帖子/视频详情（传 URL 或 ID；bilibili 传 BV号或视频链接）",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "帖子链接或关键词"},
+                "query": {"type": "string", "description": "帖子/视频 URL 或 ID（bilibili 可传 BV号或链接）"},
                 "social_platform": {"type": "string", "enum": ["twitter", "xiaohongshu", "reddit", "bilibili"], "description": "社交平台"},
                 "limit": {"type": "integer", "description": "返回条数", "default": 5},
             },
             "required": ["query", "social_platform"],
+        },
+    },
+    {
+        "name": "social_hot",
+        "description": "获取社媒热门/趋势榜（bilibili=热门视频榜、xiaohongshu=热门笔记、reddit=popular；twitter 不支持，改用 social_search/social_user）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "social_platform": {"type": "string", "enum": ["bilibili", "xiaohongshu", "reddit"], "description": "社交平台（不支持 twitter）"},
+                "limit": {"type": "integer", "description": "返回条数", "default": 10},
+            },
+            "required": ["social_platform"],
+        },
+    },
+    {
+        "name": "social_user",
+        "description": "读取社媒用户主页/最近发布（仅支持 twitter）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "用户名（@username 或 username）"},
+                "social_platform": {"type": "string", "enum": ["twitter"], "description": "社交平台（仅 twitter）"},
+                "limit": {"type": "integer", "description": "返回条数", "default": 20},
+            },
+            "required": ["query", "social_platform"],
+        },
+    },
+    # --- 平台专属 action ---
+    {
+        "name": "twitter_article",
+        "description": "读取 Twitter/X 长文（X Article）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "X Article URL 或 ID"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "xhs_comments",
+        "description": "读取小红书笔记评论",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "笔记 URL 或 ID（用 social_search 结果中的完整 URL）"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "reddit_subreddit",
+        "description": "浏览指定 Reddit subreddit 的帖子",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "subreddit 名（不带 r/）"},
+                "limit": {"type": "integer", "description": "返回条数", "default": 20},
+            },
+            "required": ["query"],
         },
     },
 ]
@@ -281,12 +464,91 @@ def save_cookies(user_id: str, cookies: dict[str, str]) -> None:
             _write_netscape_cookies(home, ".youtube.com", cookie, "youtube_cookies.txt")
 
 
+def _extract_bvid(query: str) -> str:
+    """从 B站 视频 URL 或裸 BV 号提取 BV 号；未命中则原样返回。"""
+    m = re.search(r"BV[0-9A-Za-z]{10}", query)
+    return m.group(0) if m else query
+
+
+def _social_dispatch(action: str, params: dict, query: str, limit: int) -> list[str]:
+    """社媒语义操作（search/read/hot/user）按 social_platform 派发到各平台原生 CLI。
+
+    不支持的平台组合 raise ValueError，给 LLM 清晰错误而非静默跑错命令。
+    """
+    platform = params.get("social_platform", "")
+    if action == "social_search":
+        if platform == "bilibili":
+            return ["bili", "search", query, "--type", "video", "-n", str(limit), "--json"]
+        if platform == "twitter":
+            return ["twitter", "search", query, "-n", str(limit)]
+        if platform == "reddit":
+            return ["rdt", "search", query, "--limit", str(limit)]
+        if platform in ("xiaohongshu", "xhs"):
+            return ["xhs", "search", query, "--limit", str(limit)]
+        raise ValueError(f"social_search 不支持平台: {platform}")
+    if action == "social_read":
+        if platform == "bilibili":
+            return ["bili", "video", _extract_bvid(query), "--json"]
+        if platform == "twitter":
+            return ["twitter", "tweet", query]
+        if platform == "reddit":
+            return ["rdt", "read", query]
+        if platform in ("xiaohongshu", "xhs"):
+            return ["xhs", "read", query]
+        raise ValueError(f"social_read 不支持平台: {platform}")
+    if action == "social_hot":
+        if platform == "bilibili":
+            return ["bili", "hot", "-n", str(limit), "--json"]
+        if platform in ("xiaohongshu", "xhs"):
+            return ["xhs", "hot"]
+        if platform == "reddit":
+            return ["rdt", "popular", "--limit", str(limit)]
+        raise ValueError(f"social_hot 不支持平台 {platform}（twitter 无热门榜，改用 social_search/social_user）")
+    if action == "social_user":
+        if platform == "twitter":
+            return ["twitter", "user-posts", query, "-n", str(limit)]
+        raise ValueError(f"social_user 不支持平台 {platform}（仅 twitter）")
+    raise ValueError(f"不支持的社媒操作: {action}")
+
+
+def _youtube_comments_script(query: str, limit: int) -> str:
+    """yt-dlp 把评论写入 /tmp/yt_<id>.info.json，读取后精简输出；抓取失败时 ok:false。"""
+    return (
+        "import subprocess, json, glob, os\n"
+        "try:\n"
+        "    subprocess.run(['yt-dlp','--write-comments','--skip-download','--write-info-json',"
+        "'--extractor-args','youtube:max_comments=" + str(limit) + "',"
+        "'-o','/tmp/yt_%(id)s'," + json.dumps(query) + "],"
+        "capture_output=True, text=True, timeout=120, check=False)\n"
+        "except Exception:\n"
+        "    pass\n"
+        "fs = sorted(glob.glob('/tmp/yt_*.info.json'), key=os.path.getmtime)\n"
+        "info = json.load(open(fs[-1], encoding='utf-8')) if fs else {}\n"
+        "cs = (info.get('comments') or [])[: " + str(limit) + "]\n"
+        "print(json.dumps({'ok': bool(fs), 'count': len(cs), 'comments': ["
+        "{'id': c.get('id'), 'author': c.get('author'), 'text': c.get('text'), 'likes': c.get('like_count')}"
+        " for c in cs]}, ensure_ascii=False))"
+    )
+
+
 def build_command(action: str, params: dict, user_id: str) -> list[str]:
+    # 榜单/热门类默认 10 条，其余默认 5
+    default_limit = 10 if action in ("bilibili_hot", "bilibili_rank", "social_hot") else 5
+    limit = int(params.get("limit", default_limit))
+
+    # --- 无 query 的 action：榜单/热门（公开，免登录）---
+    if action == "bilibili_hot":
+        return ["bili", "hot", "-n", str(limit), "--json"]
+    if action == "bilibili_rank":
+        return ["bili", "rank", "-n", str(limit), "--json"]
+    if action == "social_hot":
+        return _social_dispatch(action, params, "", limit)
+
+    # --- 其余 action 均需 query ---
     query = str(params.get("query", ""))
     if not query:
         raise ValueError("query 不能为空")
     shell_safe(query)
-    limit = int(params.get("limit", 5))
 
     if action == "youtube_subtitles":
         cookies_file = user_cookie_dir(user_id) / "youtube_cookies.txt"
@@ -303,6 +565,12 @@ def build_command(action: str, params: dict, user_id: str) -> list[str]:
         cmd.append(query)
         return cmd
 
+    if action == "youtube_search":
+        return ["yt-dlp", "--flat-playlist", "--dump-json", f"ytsearch{limit}:{query}"]
+
+    if action == "youtube_comments":
+        return ["python3", "-c", _youtube_comments_script(query, limit)]
+
     if action == "bilibili_search":
         return ["bili", "search", query, "--type", "video", "-n", str(limit)]
 
@@ -311,6 +579,21 @@ def build_command(action: str, params: dict, user_id: str) -> list[str]:
 
     if action == "github_search":
         return ["gh", "search", "repos", query, "--sort", "stars", "--limit", str(limit), "--json", "name,owner,description,url,stargazerCount"]
+
+    if action == "github_search_code":
+        return ["gh", "search", "code", query, "--limit", str(limit), "--json", "repository,path,textMatches"]
+
+    if action == "github_issues":
+        return ["gh", "issue", "list", "-R", query, "--limit", str(limit), "--json", "number,title,state,author,createdAt"]
+
+    if action == "github_prs":
+        return ["gh", "pr", "list", "-R", query, "--limit", str(limit), "--json", "number,title,state,author,headRefName"]
+
+    if action == "github_runs":
+        return ["gh", "run", "list", "--repo", query, "--limit", str(limit), "--json", "databaseId,status,conclusion,name,headBranch"]
+
+    if action == "github_releases":
+        return ["gh", "release", "list", "-R", query, "--limit", str(limit)]
 
     if action == "rss_read":
         script = (
@@ -321,17 +604,17 @@ def build_command(action: str, params: dict, user_id: str) -> list[str]:
         )
         return ["python3", "-c", script]
 
-    if action in ("social_search", "social_read"):
-        platform = params.get("social_platform", "")
-        if platform == "bilibili":
-            return ["bili", "search", query, "--type", "video", "-n", str(limit), "--json"]
-        if platform == "twitter":
-            return ["twitter", "search", query, "-n", str(limit)]
-        if platform == "reddit":
-            return ["rdt", "search", query, "--limit", str(limit)]
-        if platform in ("xiaohongshu", "xhs"):
-            return ["xhs", "search", query, "--limit", str(limit)]
-        raise ValueError(f"不支持的社交平台: {platform}")
+    # --- 社媒语义操作（需 query）：按 social_platform 派发 ---
+    if action in ("social_search", "social_read", "social_user"):
+        return _social_dispatch(action, params, query, limit)
+
+    # --- 平台专属 action ---
+    if action == "twitter_article":
+        return ["twitter", "article", query]
+    if action == "xhs_comments":
+        return ["xhs", "comments", query]
+    if action == "reddit_subreddit":
+        return ["rdt", "sub", query, "--limit", str(limit)]
 
     raise ValueError(f"不支持的 action: {action}")
 
@@ -370,7 +653,17 @@ def execute(req: ExecuteRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    timeout = 120 if req.action in ("youtube_subtitles", "social_search", "social_read") else 60
+    if req.action == "youtube_comments":
+        timeout = 180  # 评论抓取耗时，放宽
+    elif req.action in (
+        "youtube_subtitles", "youtube_search",
+        "social_search", "social_read", "social_hot", "social_user",
+        "twitter_article", "xhs_comments", "reddit_subreddit",
+        "bilibili_hot", "bilibili_rank", "github_runs",
+    ):
+        timeout = 120
+    else:
+        timeout = 60
     result = run(cmd, req.user_id, timeout, github_token=github_token)
     return result
 
@@ -443,7 +736,17 @@ def _handle_tool_call(req_id: Any, name: str, arguments: dict, request: Request)
     except ValueError as e:
         return _mcp_result(req_id, {"isError": True, "content": [{"type": "text", "text": str(e)}]})
 
-    timeout = 120 if name in ("youtube_subtitles", "social_search", "social_read") else 60
+    if name == "youtube_comments":
+        timeout = 180  # 评论抓取耗时，放宽
+    elif name in (
+        "youtube_subtitles", "youtube_search",
+        "social_search", "social_read", "social_hot", "social_user",
+        "twitter_article", "xhs_comments", "reddit_subreddit",
+        "bilibili_hot", "bilibili_rank", "github_runs",
+    ):
+        timeout = 120
+    else:
+        timeout = 60
     result = run(cmd, MCP_USER_ID, timeout, github_token=github_token)
     return _result_to_mcp(req_id, result)
 

@@ -72,13 +72,27 @@
     }
   },
   "capabilities": [
-    "youtube_subtitles",
     "bilibili_search",
+    "bilibili_hot",
+    "bilibili_rank",
+    "youtube_subtitles",
+    "youtube_search",
+    "youtube_comments",
     "github_repo",
     "github_search",
+    "github_search_code",
+    "github_issues",
+    "github_prs",
+    "github_runs",
+    "github_releases",
     "rss_read",
     "social_search",
-    "social_read"
+    "social_read",
+    "social_hot",
+    "social_user",
+    "twitter_article",
+    "xhs_comments",
+    "reddit_subreddit"
   ],
   "driver": {
     "driver_id": "agent_reach",
