@@ -35,7 +35,8 @@ def tools_list():
     return [
         {
             "name": "scrape",
-            "description": "将单个网页转换为干净 Markdown，返回标题、URL、描述等元数据",
+            "title": "Firecrawl Scrape",
+            "description": "基于 Firecrawl 的网页抓取：将单个网页转换为干净 Markdown，返回标题、URL、描述等元数据",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -53,7 +54,8 @@ def tools_list():
         },
         {
             "name": "crawl",
-            "description": "对指定网站启动批量爬取任务，返回任务 ID",
+            "title": "Firecrawl Crawl",
+            "description": "基于 Firecrawl 的批量爬取：对指定网站启动批量爬取任务，返回任务 ID",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -65,7 +67,8 @@ def tools_list():
         },
         {
             "name": "extract",
-            "description": "按 JSON Schema 从网页中提取结构化数据",
+            "title": "Firecrawl Extract",
+            "description": "基于 Firecrawl 的结构化提取：按 JSON Schema 从网页中提取结构化数据",
             "inputSchema": {
                 "type": "object",
                 "properties": {

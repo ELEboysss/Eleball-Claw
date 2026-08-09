@@ -205,6 +205,9 @@ func (s *SkillRuntimeSKUService) deriveAndSync(rt *model.SkillRuntime, tools []M
 // - Credentials=rt.CredentialsMap()：从 module.json 透传，供 web 提示用户填写；env 模板 ${credentials.KEY} 引用同名 key。
 func buildDerivedManifest(rt *model.SkillRuntime, t MCPTool) model.ToolManifest {
 	name := t.Name
+	if t.Title != "" {
+		name = t.Title
+	}
 	desc := t.Description
 	if desc == "" {
 		desc = t.Name

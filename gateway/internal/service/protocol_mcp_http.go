@@ -82,6 +82,7 @@ func parseMCPServerCapabilities(result json.RawMessage) map[string]interface{} {
 // MCPTool MCP 工具描述
 type MCPTool struct {
 	Name        string                 `json:"name"`
+	Title       string                 `json:"title,omitempty"`
 	Description string                 `json:"description,omitempty"`
 	InputSchema map[string]interface{} `json:"inputSchema,omitempty"`
 }

@@ -235,3 +235,31 @@ func TestDeriveSKUs_PseudoToolMetadata(t *testing.T) {
 	_, hasPseudo := mfE.Metadata["pseudo_tool"]
 	require.False(t, hasPseudo)
 }
+
+// TestDeriveSKUs_TitleAsDisplayName MCP 工具的 title 字段作为 SKU 显示名（Name），
+// identifier name 仍用于 Actions[0].Name 与 manifest.ID（dispatch/LLM 调用名不变）。
+// 无 title 时回退工具名（TestDeriveSKUs_CreatesAndSyncs 已覆盖）。
+func TestDeriveSKUs_TitleAsDisplayName(t *testing.T) {
+	repo := newSKUServiceTestDB(t)
+	svc := NewSkillRuntimeSKUService(repo, nil)
+	rt := autoSKUTestRuntime("firecrawl", "firecrawl")
+
+	tools := []MCPTool{{
+		Name:        "scrape",
+		Title:       "Firecrawl Scrape",
+		Description: "基于 Firecrawl 的网页抓取：将单个网页转换为干净 Markdown",
+		InputSchema: map[string]interface{}{"type": "object"},
+	}}
+	svc.DeriveSKUs(rt, tools)
+
+	item, err := repo.GetByID("firecrawl-scrape")
+	require.NoError(t, err)
+	require.Equal(t, "Firecrawl Scrape", item.Name, "AgentItem.Name 应取 title")
+	require.Equal(t, "基于 Firecrawl 的网页抓取：将单个网页转换为干净 Markdown", item.Description)
+
+	mf, err := item.Manifest()
+	require.NoError(t, err)
+	require.Equal(t, "Firecrawl Scrape", mf.Name, "manifest.Name 应取 title")
+	require.Equal(t, "scrape", mf.Actions[0].Name, "Actions[0].Name 仍为 identifier name")
+	require.Equal(t, "firecrawl-scrape", mf.ID, "manifest.ID 用 identifier name 派生，不含 title")
+}
