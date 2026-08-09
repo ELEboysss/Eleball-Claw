@@ -209,3 +209,41 @@ func TestSyncPromptSkillSKU(t *testing.T) {
 	assert.Equal(t, 0, sy)
 	assert.Equal(t, 0, sk)
 }
+
+// TestSyncOfficialSKUs_DelistsStaleHandwritten 验证 prune：手写官方 SKU 的源 skus/*.json
+// 被删除后，重跑 SyncOfficialSKUs 自动下架对应 DB 行（delisted，保留购买记录不硬删）。
+// claw agent-reach 无 skus 目录（纯 auto_sku），但 DB 残留 refactor 前的手写 agent-reach-web 行
+// -> seenFiles 为空 -> 手写行被下架；auto 派生行（auto_sku_module 标记）由 DeriveSKUs 管，此处跳过。
+func TestSyncOfficialSKUs_DelistsStaleHandwritten(t *testing.T) {
+	repo := setupSeedTestRepo(t)
+	logger := zap.NewNop()
+	adminID := "00000000-0000-0000-0000-000000000000"
+
+	require.NoError(t, SyncOfficialSKUs(repo, "claw", logger))
+
+	// 注入陈旧手写 SKU：claw agent-reach 无 skus 目录（纯 auto_sku），但 DB 残留旧手写行
+	stale := &model.AgentItem{
+		ID:           "agent-reach-web",
+		Name:         "全网洞察",
+		ManifestJSON: `{"id":"com.eleball.tools.agent_reach.web","name":"全网洞察","driver":"agent_reach","actions":[{"name":"search"},{"name":"web_read"}],"parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}`,
+		Status:       model.AgentStatusApproved,
+		CreatorID:    adminID,
+		CreatorName:  "官方",
+		CreatedAt:    time.Now(),
+	}
+	require.NoError(t, repo.Create(stale))
+
+	require.NoError(t, SyncOfficialSKUs(repo, "claw", logger))
+
+	got, err := repo.GetByID("agent-reach-web")
+	require.NoError(t, err)
+	assert.Equal(t, model.AgentStatusDelisted, got.Status)
+
+	// 无误伤：claw 手写 search-web SKU（含新增 exa/web_read）仍 approved
+	baidu, err := repo.GetByID("search-web-baidu")
+	require.NoError(t, err)
+	assert.Equal(t, model.AgentStatusApproved, baidu.Status)
+	exa, err := repo.GetByID("search-web-exa")
+	require.NoError(t, err)
+	assert.Equal(t, model.AgentStatusApproved, exa.Status)
+}

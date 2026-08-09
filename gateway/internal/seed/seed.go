@@ -72,7 +72,7 @@ func SyncOfficialSKUs(repo *repository.AgentRepo, side string, logger *zap.Logge
 	}
 	adminID := "00000000-0000-0000-0000-000000000000"
 	now := time.Now()
-	created, synced, skipped := 0, 0, 0
+	created, synced, skipped, delisted := 0, 0, 0, 0
 
 	modEntries, err := os.ReadDir(root)
 	if err != nil {
@@ -100,12 +100,15 @@ func SyncOfficialSKUs(repo *repository.AgentRepo, side string, logger *zap.Logge
 		skuDir := filepath.Join(root, modName, "skus")
 		skuEntries, err := os.ReadDir(skuDir)
 		if err != nil {
-			continue // 无 skus/ 目录（如 stt）跳过
+			// 无 skus/ 目录（如 stt / auto_sku 模块）：跳过 upsert，但仍下架陈旧手写 SKU。
+			skuEntries = nil
 		}
+		seenFiles := map[string]bool{}
 		for _, sf := range skuEntries {
 			if sf.IsDir() || !strings.HasSuffix(sf.Name(), ".json") {
 				continue
 			}
+			seenFiles[strings.TrimSuffix(sf.Name(), ".json")] = true
 			agentID := modName + "-" + strings.TrimSuffix(sf.Name(), ".json")
 			path := filepath.Join(skuDir, sf.Name())
 			data, err := os.ReadFile(path)
@@ -164,11 +167,60 @@ func SyncOfficialSKUs(repo *repository.AgentRepo, side string, logger *zap.Logge
 				created++
 			}
 		}
+		// 下架源 skus/*.json 已删除的手写 SKU（auto 派生由 DeriveSKUs 管理，此处跳过）。
+		delisted += delistStaleHandwrittenSKUs(repo, modName, seenFiles, logger)
 	}
 	logger.Info("已同步官方 SKU",
 		zap.String("side", side),
-		zap.Int("created", created), zap.Int("synced", synced), zap.Int("skipped", skipped))
+		zap.Int("created", created), zap.Int("synced", synced),
+		zap.Int("skipped", skipped), zap.Int("delisted", delisted))
 	return nil
+}
+
+// delistStaleHandwrittenSKUs 下架源 skus/*.json 已删除的手写官方 SKU（保留购买记录不硬删）。
+// 与 DeriveSKUs 对称：auto 派生 SKU 在工具消失时由 SkillRuntimeSKUService.DeriveSKUs 下架，
+// 手写 SKU 在源文件删除时由此处下架。仅处理 approved 状态、且 manifest 无 auto_sku_module
+// 标记的手写 SKU（auto 派生的 metadata.auto_sku_module 指向所属模块，由 DeriveSKUs 精确管理）。
+//
+// 安全前提：模块名之间不存在「A 是 B 的前缀 + '-'」关系（marketplace 模块名已校验无碰撞），
+// 故 ListByModuleSKUs 的 id LIKE '<mod>-%' 粗筛不会命中间名前缀的其他模块 SKU（与 DeriveSKUs
+// 同样依赖前缀粗筛 + 精确标记二次判定的模式）。
+func delistStaleHandwrittenSKUs(repo *repository.AgentRepo, modName string, seenFiles map[string]bool, logger *zap.Logger) int {
+	existing, err := repo.ListByModuleSKUs(modName)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("查询模块现有 SKU 失败，跳过下架", zap.String("module", modName), zap.Error(err))
+		}
+		return 0
+	}
+	n := 0
+	for _, it := range existing {
+		if it.Status != model.AgentStatusApproved {
+			continue
+		}
+		mf, err := it.Manifest()
+		if err != nil || mf == nil {
+			continue
+		}
+		if mf.Metadata["auto_sku_module"] != "" {
+			continue // auto 派生 SKU，由 DeriveSKUs 管理
+		}
+		fileBase := strings.TrimPrefix(it.ID, modName+"-")
+		if seenFiles[fileBase] {
+			continue // 源文件仍存在
+		}
+		if err := repo.UpdateStatus(it.ID, model.AgentStatusDelisted); err != nil {
+			if logger != nil {
+				logger.Warn("下架陈旧手写 SKU 失败", zap.String("id", it.ID), zap.Error(err))
+			}
+			continue
+		}
+		n++
+		if logger != nil {
+			logger.Info("下架陈旧手写 SKU（源文件已删除）", zap.String("id", it.ID), zap.String("module", modName))
+		}
+	}
+	return n
 }
 
 // resolveMarketplaceRoot 用候选路径定位 marketplace 根目录（纯磁盘，cloud/claw 通用）。

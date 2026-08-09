@@ -2,7 +2,7 @@
   "$schema": "../../../specs/tool-manifest-schema.json",
   "id": "com.eleball.tools.search_web.web_read",
   "name": "网页阅读",
-  "description": "基于本地 search-web 模块的网页正文阅读。经 mcporter 调用 Exa web_fetch_exa，将网页正文转为 markdown，无需 API Key（keyless）。适合公众号/新闻/文档等需渲染的页面，与 fetch（纯 HTTP）互补。",
+  "description": "基于本地 search-web 模块的网页正文阅读。经 mcporter 调用 Exa web_fetch_exa，将网页正文转为 markdown，无需 API Key（keyless）。适合公众号/新闻/文档等需渲染的页面，与 fetch（纯 HTTP）互补。注意：不执行 JavaScript，bilibili/微博/小红书 等 JS 动态渲染站点只会返回页脚或框架，此类平台请改用 bilibili_search / social_search 等平台搜索工具。",
   "driver": "search_web",
   "runtime_type": "remote",
   "category": "搜索",

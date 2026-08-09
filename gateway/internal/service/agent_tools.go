@@ -336,7 +336,7 @@ func (r *ToolRegistry) RegisterBuiltinSearchWeb() {
 func (r *ToolRegistry) registerDefaults() {
 	r.Register(&Tool{
 		Name:        "FetchURL",
-		Description: "抓取指定网页的正文内容，用于深度阅读搜索结果页面",
+		Description: "抓取指定网页的正文内容（纯 HTTP，不执行 JS），用于深度阅读搜索结果页面。bilibili/微博/小红书 等 JS 动态渲染站点只会返回页脚或框架，此类平台请改用 bilibili_search / social_search 等平台搜索工具",
 		ServerSide:  false,
 		ReadOnly:    true,
 		Driver:      string(model.ToolDriverBuiltin),

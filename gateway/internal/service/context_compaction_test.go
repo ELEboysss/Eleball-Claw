@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -24,6 +25,27 @@ func TestCompactToolResult_SearchWeb(t *testing.T) {
 	}
 	if !strings.Contains(got, "视频生成 API 文档") {
 		t.Fatalf("SearchWeb 提炼应保留 snippet，got: %s", got)
+	}
+}
+
+// TestCompactToolResult_SearchWebMaxItems 验证搜索结果上限：超过 maxItems(=10) 条
+// 只保留前 10 条并标 truncated:true（与常见 top-N 如 top10 请求对齐）。
+func TestCompactToolResult_SearchWebMaxItems(t *testing.T) {
+	results := make([]map[string]interface{}, 12)
+	for i := range results {
+		results[i] = map[string]interface{}{"title": fmt.Sprintf("R%d", i), "url": fmt.Sprintf("https://example.com/%d", i)}
+	}
+	got := compactToolResult(map[string]interface{}{"results": results}, "")
+	for i := 0; i < 10; i++ {
+		if !strings.Contains(got, fmt.Sprintf("R%d", i)) {
+			t.Fatalf("前 10 条应保留，缺 R%d", i)
+		}
+	}
+	if strings.Contains(got, "R10") || strings.Contains(got, "R11") {
+		t.Fatalf("第 11/12 条应被丢弃，got: %s", got)
+	}
+	if !strings.Contains(got, `"truncated":true`) {
+		t.Fatalf("超限应标 truncated:true，got: %s", got)
 	}
 }
 

@@ -21,7 +21,8 @@ import (
 
 // compactToolResultBudget 单个工具结果回灌到循环上下文的字符预算。
 // 超过即按工具类型提炼或截断，避免长输出（FetchURL 正文、Shell 输出）撑爆上下文。
-const compactToolResultBudget = 4000
+// 8000：兼顾 top-N 列表/长正文可见性与上下文成本（旧值 4000 会把约 3 条结果即截断）。
+const compactToolResultBudget = 8000
 
 // compactToolResult 将工具执行结果提炼为回灌循环上下文的字符串（默认预算）。
 func compactToolResult(output map[string]interface{}, errStr string) string {
@@ -65,7 +66,7 @@ func compactSearchWeb(output map[string]interface{}) string {
 	if results == nil {
 		return ""
 	}
-	const maxItems = 8
+	const maxItems = 10 // 与常见 top-N（如 top10）请求对齐
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf(`{"results":[`))
 	for i, r := range results {
