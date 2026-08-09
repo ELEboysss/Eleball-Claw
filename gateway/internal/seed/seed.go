@@ -133,17 +133,16 @@ func SyncOfficialSKUs(repo *repository.AgentRepo, side string, logger *zap.Logge
 					skipped++
 					continue
 				}
-				existing.ManifestJSON = fileStr
-				existing.Name = m.Name
-				existing.Description = m.Description
-				existing.Category = m.Category
-				existing.Level = model.AgentLevel(m.Level)
-				existing.PriceDanwan = m.PriceDanwan
-				existing.PriceElegant = m.PriceElegant
-				if err := repo.Update(existing); err != nil {
-					logger.Warn("同步官方 SKU manifest 失败", zap.String("id", agentID), zap.Error(err))
+				// per-field pin：admin 钉住的展示字段(name/desc/price/level)不被覆写，保留 admin 改的值；
+				// manifest_json(派生源) 与 Category 始终同步。与 DeriveSKUs 共用 SyncDerivedDisplay 不变量。
+				if existing.SyncDerivedDisplay(fileStr, &m) {
+					if err := repo.Update(existing); err != nil {
+						logger.Warn("同步官方 SKU manifest 失败", zap.String("id", agentID), zap.Error(err))
+					} else {
+						synced++
+					}
 				} else {
-					synced++
+					skipped++
 				}
 				continue
 			}

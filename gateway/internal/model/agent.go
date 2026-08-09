@@ -57,6 +57,7 @@ type AgentItem struct {
 	PriceDanwan   int64       `json:"price_danwan"`
 	PriceElegant  *int64      `json:"price_elegant"`
 	Level         AgentLevel  `json:"level"`
+	PinnedFields  string      `gorm:"type:text" json:"pinned_fields,omitempty"` // admin 覆盖保护：JSON 数组 ["name","price_danwan",...]，派生同步(DeriveSKUs/SyncOfficialSKUs)跳过这些字段，保留 admin 改的展示值
 	PurchaseCount int64       `json:"purchase_count"`
 	AvgRating     float64     `json:"avg_rating"`
 	FavoriteCount int64       `json:"favorite_count"`
@@ -65,15 +66,15 @@ type AgentItem struct {
 	CreatedAt     time.Time   `json:"created_at"`
 	UpdatedAt     time.Time   `json:"updated_at"`
 	// 以下字段不在数据库中，由列表接口根据当前用户动态填充
-	IsActive         bool  `gorm:"-" json:"is_active"`
-	IsFavorited      bool  `gorm:"-" json:"is_favorited"`
-	ActiveCount      int64 `gorm:"-" json:"active_count"`
-	DriverRegistered   bool  `gorm:"-" json:"driver_registered"`   // 是否已注册对应驱动别名（仅对非内置驱动有效）
-	CredentialComplete bool  `gorm:"-" json:"credential_complete"` // 当前用户是否已配齐该 SKU 声明的必填凭证（缺则不可激活）
-	ModuleOnline       *bool `gorm:"-" json:"module_online,omitempty"` // nil 表示无模块依赖，false 表示模块离线/未注册，true 表示在线
-	HasDeps            bool  `gorm:"-" json:"has_deps,omitempty"`      // stdio+process 模块是否有第三方依赖（requirements.txt/package.json）
-	DepsInstalled      bool  `gorm:"-" json:"deps_installed,omitempty"` // 依赖是否已装（venv/node_modules 存在）
-	DepsType           string `gorm:"-" json:"deps_type,omitempty"`    // "python" | "node"（has_deps 时）
+	IsActive           bool   `gorm:"-" json:"is_active"`
+	IsFavorited        bool   `gorm:"-" json:"is_favorited"`
+	ActiveCount        int64  `gorm:"-" json:"active_count"`
+	DriverRegistered   bool   `gorm:"-" json:"driver_registered"`        // 是否已注册对应驱动别名（仅对非内置驱动有效）
+	CredentialComplete bool   `gorm:"-" json:"credential_complete"`      // 当前用户是否已配齐该 SKU 声明的必填凭证（缺则不可激活）
+	ModuleOnline       *bool  `gorm:"-" json:"module_online,omitempty"`  // nil 表示无模块依赖，false 表示模块离线/未注册，true 表示在线
+	HasDeps            bool   `gorm:"-" json:"has_deps,omitempty"`       // stdio+process 模块是否有第三方依赖（requirements.txt/package.json）
+	DepsInstalled      bool   `gorm:"-" json:"deps_installed,omitempty"` // 依赖是否已装（venv/node_modules 存在）
+	DepsType           string `gorm:"-" json:"deps_type,omitempty"`      // "python" | "node"（has_deps 时）
 }
 
 // Manifest 解析 ManifestJSON 为 ToolManifest
@@ -86,6 +87,155 @@ func (a *AgentItem) Manifest() (*ToolManifest, error) {
 		return nil, err
 	}
 	return &manifest, nil
+}
+
+// 可被 admin 覆盖保护（pin）的展示字段名。与 IsPinned/AddPin/RemovePin 及派生同步路径
+// (DeriveSKUs / SyncOfficialSKUs) 配合：pin 住的字段在派生同步时不被覆写，保留 admin 改的值；
+// 未 pin 的字段仍随 manifest 派生值刷新。空 PinnedFields = 全部跟随派生（向后兼容）。
+const (
+	pinFieldName         = "name"
+	pinFieldDescription  = "description"
+	pinFieldPriceDanwan  = "price_danwan"
+	pinFieldPriceElegant = "price_elegant"
+	pinFieldLevel        = "level"
+)
+
+// pinnedFieldNames 返回所有可 pin 字段（固定顺序，供序列化稳定输出/测试可重复）。
+func pinnedFieldNames() []string {
+	return []string{pinFieldName, pinFieldDescription, pinFieldPriceDanwan, pinFieldPriceElegant, pinFieldLevel}
+}
+
+// IsPinned 判断某展示字段是否被 admin 钉住（派生同步跳过该字段）。
+func (a *AgentItem) IsPinned(field string) bool {
+	if a == nil || a.PinnedFields == "" {
+		return false
+	}
+	var pins []string
+	if err := json.Unmarshal([]byte(a.PinnedFields), &pins); err != nil {
+		return false
+	}
+	for _, p := range pins {
+		if p == field {
+			return true
+		}
+	}
+	return false
+}
+
+// AddPin 将字段加入钉住集合（去重；仅收录已知可 pin 字段，未知名静默丢弃）。
+func (a *AgentItem) AddPin(fields ...string) {
+	if a == nil || len(fields) == 0 {
+		return
+	}
+	set := a.pinSet()
+	for _, f := range fields {
+		for _, known := range pinnedFieldNames() {
+			if f == known {
+				set[f] = true
+				break
+			}
+		}
+	}
+	a.writePins(set)
+}
+
+// RemovePin 从钉住集合移除字段。
+func (a *AgentItem) RemovePin(fields ...string) {
+	if a == nil {
+		return
+	}
+	set := a.pinSet()
+	for _, f := range fields {
+		delete(set, f)
+	}
+	a.writePins(set)
+}
+
+// pinSet 反序列化 PinnedFields 为集合；空/非法时返回空集合。
+func (a *AgentItem) pinSet() map[string]bool {
+	set := make(map[string]bool)
+	if a == nil || a.PinnedFields == "" {
+		return set
+	}
+	var pins []string
+	if err := json.Unmarshal([]byte(a.PinnedFields), &pins); err != nil {
+		return set
+	}
+	for _, p := range pins {
+		set[p] = true
+	}
+	return set
+}
+
+// writePins 按固定顺序序列化钉住字段为 JSON 数组写入 PinnedFields（空集合写空串）。
+func (a *AgentItem) writePins(set map[string]bool) {
+	if a == nil {
+		return
+	}
+	if len(set) == 0 {
+		a.PinnedFields = ""
+		return
+	}
+	pins := make([]string, 0, len(set))
+	for _, f := range pinnedFieldNames() {
+		if set[f] {
+			pins = append(pins, f)
+		}
+	}
+	b, err := json.Marshal(pins)
+	if err != nil {
+		return
+	}
+	a.PinnedFields = string(b)
+}
+
+// SyncDerivedDisplay 用派生源(marshaled manifest JSON + 解析后的 ToolManifest)同步展示字段与 schema。
+// admin pin 住的字段(name/description/price_danwan/price_elegant/level)不被覆写，保留 admin 改的展示值；
+// manifest_json(派生源) 与 Category(组织分类) 始终同步，不受 pin 影响（非展示覆盖项）。
+// 返回是否有字段变化，调用方据此决定是否落库。Status 不在此处理（由调用方按上下文设置）。
+func (a *AgentItem) SyncDerivedDisplay(mfStr string, m *ToolManifest) bool {
+	if a == nil || m == nil {
+		return false
+	}
+	changed := false
+	if a.ManifestJSON != mfStr {
+		a.ManifestJSON = mfStr
+		changed = true
+	}
+	if a.Category != m.Category {
+		a.Category = m.Category
+		changed = true
+	}
+	if !a.IsPinned(pinFieldName) && a.Name != m.Name {
+		a.Name = m.Name
+		changed = true
+	}
+	if !a.IsPinned(pinFieldDescription) && a.Description != m.Description {
+		a.Description = m.Description
+		changed = true
+	}
+	if !a.IsPinned(pinFieldPriceDanwan) && a.PriceDanwan != m.PriceDanwan {
+		a.PriceDanwan = m.PriceDanwan
+		changed = true
+	}
+	if !a.IsPinned(pinFieldPriceElegant) && !ptrInt64Equal(a.PriceElegant, m.PriceElegant) {
+		a.PriceElegant = m.PriceElegant
+		changed = true
+	}
+	if !a.IsPinned(pinFieldLevel) && a.Level != AgentLevel(m.Level) {
+		a.Level = AgentLevel(m.Level)
+		changed = true
+	}
+	return changed
+}
+
+// ptrInt64Equal 比较 *int64：nil==nil 为真；nil vs 非 nil 为假；值相等才真。
+// 用于 PriceElegant 等可空字段，避免直接 != 比较地址导致无谓更新。
+func ptrInt64Equal(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // TableName 指定表名

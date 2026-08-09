@@ -140,20 +140,19 @@ func (s *SkillRuntimeSKUService) deriveAndSync(rt *model.SkillRuntime, tools []M
 		mfStr := string(mfJSON)
 
 		if item, ok := existingMap[skuID]; ok {
-			// 已存在：同步 manifest/名称/描述；保留 purchase_count/avg_rating 等统计与购买记录。
+			// 已存在：同步 manifest/名称/描述/价格/等级；保留 purchase_count/avg_rating 等统计与购买记录。
 			// 重新置 approved（工具曾消失被 delist，如今再次出现 -> 重新上架）。
-			changed := item.ManifestJSON != mfStr ||
-				item.Name != manifest.Name ||
-				item.Description != manifest.Description ||
-				item.Status != model.AgentStatusApproved
+			// per-field pin：admin 钉住的展示字段不被派生覆写（保留 admin 改的值）；manifest_json(派生源)
+			// 与 Category 始终同步。未 pin 的 price/level 仍随 manifest 刷新（修 firecrawl 旧手写行
+			// 迁 auto_sku 前残留 price=50 不刷新、manifest 标 0 而 DB 列仍旧值、卡片显示旧价的问题）。
+			changed := item.SyncDerivedDisplay(mfStr, &manifest)
+			if item.Status != model.AgentStatusApproved {
+				item.Status = model.AgentStatusApproved
+				changed = true
+			}
 			if !changed {
 				continue
 			}
-			item.ManifestJSON = mfStr
-			item.Name = manifest.Name
-			item.Description = manifest.Description
-			item.Category = manifest.Category
-			item.Status = model.AgentStatusApproved
 			if err := s.repo.Update(item); err != nil {
 				return fmt.Errorf("更新自动 SKU %s 失败: %w", skuID, err)
 			}

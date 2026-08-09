@@ -263,3 +263,79 @@ func TestDeriveSKUs_TitleAsDisplayName(t *testing.T) {
 	require.Equal(t, "scrape", mf.Actions[0].Name, "Actions[0].Name 仍为 identifier name")
 	require.Equal(t, "firecrawl-scrape", mf.ID, "manifest.ID 用 identifier name 派生，不含 title")
 }
+
+// TestDeriveSKUs_SyncsPriceOnUpdate 回归：已存在的 SKU 行（如 firecrawl 从手写迁移到 auto_sku
+// 前残留的 price=50 行）被 DeriveSKUs 复用时，price/level 列必须同步到 manifest 值（auto_sku 派生
+// price=0）。此前 update 路径漏同步 PriceDanwan -> DB 列残留旧价，卡片显示非免费价。
+func TestDeriveSKUs_SyncsPriceOnUpdate(t *testing.T) {
+	repo := newSKUServiceTestDB(t)
+	svc := NewSkillRuntimeSKUService(repo, nil)
+	rt := autoSKUTestRuntime("mod-p", "drv_p")
+
+	// 预置旧手写 SKU 行：price=50、旧名、已 approved（模拟 firecrawl 迁 auto_sku 前的残留行）。
+	require.NoError(t, repo.Create(&model.AgentItem{
+		ID:           "mod-p-scrape",
+		Name:         "旧手写名",
+		Description:  "旧描述",
+		PriceDanwan:  50,
+		ManifestJSON: `{"id":"mod-p-scrape","name":"旧手写名","driver":"drv_p","price_danwan":50,"parameters":{"type":"object"}}`,
+		Status:       model.AgentStatusApproved,
+	}))
+
+	tools := []MCPTool{{
+		Name:        "scrape",
+		Title:       "Firecrawl Scrape",
+		Description: "基于 Firecrawl 的网页抓取",
+		InputSchema: map[string]interface{}{"type": "object"},
+	}}
+	svc.DeriveSKUs(rt, tools)
+
+	item, err := repo.GetByID("mod-p-scrape")
+	require.NoError(t, err)
+	require.Equal(t, int64(0), item.PriceDanwan, "PriceDanwan 应同步为 manifest 的 0（auto_sku 免费），不应残留旧价 50")
+	require.Equal(t, "Firecrawl Scrape", item.Name, "Name 应取 title")
+	require.Equal(t, model.AgentStatusApproved, item.Status, "复用行应重新置 approved")
+}
+
+// TestDeriveSKUs_PinProtectsOverriddenFields 回归：admin 钉住(pinned)的展示字段(name/price)
+// 在 DeriveSKUs 派生同步时不被覆写，保留 admin 改的值；未 pin 的字段(description)仍随 manifest
+// 派生值刷新；manifest_json(派生源)始终同步（不受 pin 影响）。此为 admin-web SKU 展示管理的基础不变量。
+func TestDeriveSKUs_PinProtectsOverriddenFields(t *testing.T) {
+	repo := newSKUServiceTestDB(t)
+	svc := NewSkillRuntimeSKUService(repo, nil)
+	rt := autoSKUTestRuntime("mod-q", "drv_q")
+
+	// 预置已 approved 的 SKU：admin 已改 name+price 并 pin 住；description 未 pin（将随派生刷新）。
+	item := &model.AgentItem{
+		ID:           "mod-q-scrape",
+		Name:         "Admin自定义名",
+		Description:  "旧描述",
+		PriceDanwan:  999,
+		ManifestJSON: `{"id":"mod-q-scrape","name":"旧派生名","driver":"drv_q","price_danwan":0,"description":"旧派生描述","parameters":{"type":"object"}}`,
+		Status:       model.AgentStatusApproved,
+	}
+	item.AddPin("name", "price_danwan") // 钉住 name + price_danwan
+	require.Equal(t, `["name","price_danwan"]`, item.PinnedFields)
+	require.NoError(t, repo.Create(item))
+
+	tools := []MCPTool{{
+		Name:        "scrape",
+		Title:       "派生名",
+		Description: "派生描述",
+		InputSchema: map[string]interface{}{"type": "object"},
+	}}
+	svc.DeriveSKUs(rt, tools)
+
+	got, err := repo.GetByID("mod-q-scrape")
+	require.NoError(t, err)
+	require.Equal(t, "Admin自定义名", got.Name, "pinned name 不应被派生名覆写")
+	require.Equal(t, int64(999), got.PriceDanwan, "pinned price 不应被派生 0 覆写")
+	require.Equal(t, "派生描述", got.Description, "未 pin 的 description 应随派生刷新")
+	require.Equal(t, `["name","price_danwan"]`, got.PinnedFields, "PinnedFields 不应变")
+
+	// manifest_json(派生源)始终同步：解析后 Name/Description 为派生值（非 admin 覆盖值）。
+	mf, err := got.Manifest()
+	require.NoError(t, err)
+	require.Equal(t, "派生名", mf.Name, "manifest.Name 为派生源值，不受 pin 影响")
+	require.Equal(t, "派生描述", mf.Description)
+}
