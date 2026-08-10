@@ -82,7 +82,7 @@ func (h *AdminEleAgentModelHandler) ListConfigs(c *gin.Context) {
 	if page < 1 {
 		page = 1
 	}
-	if pageSize < 1 || pageSize > 100 {
+	if pageSize < 1 || pageSize > 500 {
 		pageSize = 20
 	}
 
@@ -264,9 +264,10 @@ func (h *AdminEleAgentModelHandler) ExportConfigs(c *gin.Context) {
 	c.Data(http.StatusOK, "application/json; charset=utf-8", indented)
 }
 
-// ImportConfigs 批量导入模型配置。
+// ImportConfigs 批量导入模型配置（全量覆盖）。
 // 请求体支持两种形式：导出的完整 JSON（含 items 字段）或纯配置数组。
-// 按 provider + model_name 匹配：存在则更新（未提供 api_key 时保留原 Key），不存在则创建（必须提供 api_key）。
+// 全量覆盖：文件中的配置存在则更新（未提供 api_key 时保留原 Key）、不存在则创建（必须提供 api_key），
+// 未在文件中的现有配置将被删除。
 func (h *AdminEleAgentModelHandler) ImportConfigs(c *gin.Context) {
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {

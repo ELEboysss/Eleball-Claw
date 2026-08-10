@@ -1373,7 +1373,7 @@ func adminListEleAgentModels(w http.ResponseWriter, r *http.Request) {
 	if page <= 0 {
 		page = 1
 	}
-	if pageSize <= 0 || pageSize > 100 {
+	if pageSize <= 0 || pageSize > 500 {
 		pageSize = 20
 	}
 
@@ -1982,9 +1982,19 @@ func adminImportEleAgentModels(w http.ResponseWriter, r *http.Request) {
 		updated++
 	}
 
+	// 全量覆盖：删除未在文件中出现的现有配置
+	deleted := 0
+	for id, cfg := range eleAgentConfigs {
+		if !seen[cfg.Provider+"/"+cfg.ModelName] {
+			delete(eleAgentConfigs, id)
+			deleted++
+		}
+	}
+
 	respondSuccess(w, map[string]interface{}{
 		"created": created,
 		"updated": updated,
+		"deleted": deleted,
 		"failed":  failures,
 	})
 }

@@ -67,11 +67,15 @@ function CapBadge({ label, cls }) {
 // 是否云端 Ele Agent 代理（经 gateway 网关，base_url 指向 api.eleball.cn）
 const isCloudProxy = (item) => (item.base_url || '').includes('api.eleball.cn')
 
+// 分页页大小：卡片按 provider 分组，每页拉取一批；超过则翻页查看
+const PAGE_SIZE = 100
+
 export default function EleAgentModels() {
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState(null) // 编辑中的配置（null=新建）
   const [isProxyPreset, setIsProxyPreset] = useState(false) // Ele Agent 云端代理快捷表单
@@ -83,8 +87,8 @@ export default function EleAgentModels() {
     setLoading(true)
     setError('')
     try {
-      // 卡片按 provider 分组，需拉取较全量
-      const data = await eleAgentModelApi.list(1, 500)
+      // 卡片按 provider 分组，分页拉取；超过 PAGE_SIZE 翻页查看
+      const data = await eleAgentModelApi.list(page, PAGE_SIZE)
       const list = Array.isArray(data?.items) ? data.items : []
       setItems(list)
       setTotal(data?.total ?? list.length)
@@ -98,7 +102,7 @@ export default function EleAgentModels() {
   useEffect(() => {
     fetchItems()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [page])
 
   // 按 provider 分组，组内按 priority 升序
   const grouped = useMemo(() => {
@@ -490,9 +494,25 @@ export default function EleAgentModels() {
         </div>
       )}
 
-      {total > items.length && (
-        <div className="text-xs text-eleball-text-tertiary text-center">
-          数据较多，仅显示前 {items.length} 条（共 {total} 条）。
+      {total > PAGE_SIZE && (
+        <div className="flex items-center justify-center gap-3 pt-2">
+          <button
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={page <= 1 || loading}
+            className="btn-ghost disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            上一页
+          </button>
+          <span className="text-sm text-eleball-text-secondary">
+            第 {page} / {Math.max(1, Math.ceil(total / PAGE_SIZE))} 页（共 {total} 条）
+          </span>
+          <button
+            onClick={() => setPage((p) => p + 1)}
+            disabled={page >= Math.ceil(total / PAGE_SIZE) || loading}
+            className="btn-ghost disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            下一页
+          </button>
         </div>
       )}
     </div>

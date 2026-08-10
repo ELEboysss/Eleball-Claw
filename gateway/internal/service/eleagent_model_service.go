@@ -726,7 +726,7 @@ type EleAgentModelExportData struct {
 }
 
 // EleAgentModelExportUsage 导出文件顶部的导入规则说明
-const EleAgentModelExportUsage = "本文件由 Ele Agent 模型配置导出，可直接用于批量导入：按 provider + model_name 匹配，已存在则只覆盖文件中出现的字段（api_key 省略=保留原 Key，提供=轮换），不存在则创建（需完整字段与 api_key）。usage 与 field_notes 仅供阅读，导入时忽略。"
+const EleAgentModelExportUsage = "本文件由 Ele Agent 模型配置导出，可直接用于批量导入（全量覆盖）：按 provider + model_name 匹配，文件中已存在则更新（只覆盖出现的字段，api_key 省略=保留原 Key，提供=轮换），不存在则创建（需完整字段与 api_key），未在文件中的现有配置将被删除。导入前请确认文件覆盖完整配置集。usage 与 field_notes 仅供阅读，导入时忽略。"
 
 // eleAgentModelFieldNotes 逐字段含义与取值范围说明，随导出文件带出，便于人工编辑
 var eleAgentModelFieldNotes = map[string]string{
@@ -765,6 +765,7 @@ type EleAgentModelImportFailure struct {
 type EleAgentModelImportResult struct {
 	Created int                          `json:"created"`
 	Updated int                          `json:"updated"`
+	Deleted int                          `json:"deleted"` // 全量覆盖：未在文件中而被删除的旧配置数
 	Failed  []EleAgentModelImportFailure `json:"failed"`
 }
 
@@ -822,14 +823,15 @@ func (s *EleAgentModelService) ExportConfigs(includeKeys bool) (*EleAgentModelEx
 	return out, nil
 }
 
-// ImportConfigs 批量导入模型配置。
-// 按 provider + model_name 匹配：
+// ImportConfigs 批量导入模型配置（全量覆盖）。
+// 导入后数据库配置集 == 文件配置集：
 //   - 已存在：只覆盖文件中出现的字段（未出现的字段保持原值；api_key 不提供时保留原 Key）；
 //     协议-能力一致性、时长范围等交叉校验按「出现取文件值、未出现取现有值」的有效值进行，
 //     避免部分更新把配置改成不一致状态；
-//   - 不存在：创建（必须提供完整字段与 api_key）。
+//   - 不存在：创建（必须提供完整字段与 api_key）；
+//   - 未在文件中的现有配置：删除（Deleted 计入返回结果）。
 //
-// 逐行处理，单行失败不影响其他行。
+// 逐行处理，单行失败不影响其他行；删除在全部 upsert 完成后统一执行。
 func (s *EleAgentModelService) ImportConfigs(items []EleAgentModelExportItem) (*EleAgentModelImportResult, error) {
 	if s.repo == nil {
 		return nil, errors.New("EleAgentModelService 未初始化存储")
@@ -1073,6 +1075,27 @@ func (s *EleAgentModelService) ImportConfigs(items []EleAgentModelExportItem) (*
 			}
 		}
 		result.Updated++
+	}
+
+	// 全量覆盖：删除未在文件中出现的现有配置。
+	// existing 为导入前预取的全量配置；导入过程中新建的配置不在其中，不会被误删。
+	// 出现在文件但校验失败的条目仍计入 seen，其现有配置保留（不删除），便于修正后重导。
+	var deletedIDs []string
+	for _, cfg := range existing {
+		if !seen[cfg.Provider+"/"+cfg.ModelName] {
+			deletedIDs = append(deletedIDs, cfg.ID)
+		}
+	}
+	if len(deletedIDs) > 0 {
+		if err := s.repo.DeleteByIDs(deletedIDs); err != nil {
+			// 删除失败不阻断已完成的 upsert，记录到失败列表末尾
+			result.Failed = append(result.Failed, EleAgentModelImportFailure{
+				Index: -1, Provider: "*", ModelName: "*",
+				Error: "清理未在文件中的旧配置失败: " + err.Error(),
+			})
+		} else {
+			result.Deleted = len(deletedIDs)
+		}
 	}
 
 	_ = s.reload()

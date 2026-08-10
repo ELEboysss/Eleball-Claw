@@ -44,6 +44,15 @@ func (r *EleAgentModelRepo) Delete(id string) error {
 	return r.db.Delete(&model.EleAgentModelConfig{}, "id = ?", id).Error
 }
 
+// DeleteByIDs 批量删除指定 ID 的配置。
+// 全量覆盖导入时用于清理「未在文件中出现的现有配置」。
+func (r *EleAgentModelRepo) DeleteByIDs(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return r.db.Where("id IN ?", ids).Delete(&model.EleAgentModelConfig{}).Error
+}
+
 // List 列表查询（支持 provider 过滤、分页）
 func (r *EleAgentModelRepo) List(provider string, page, pageSize int) ([]*model.EleAgentModelConfig, int64, error) {
 	var items []*model.EleAgentModelConfig

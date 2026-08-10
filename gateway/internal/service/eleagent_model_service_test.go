@@ -428,3 +428,63 @@ func TestListOptionsCloudProxyFlag(t *testing.T) {
 	assert.True(t, proxyOpt.CloudProxy, "指向云端的配置应标记 cloud_proxy")
 	assert.False(t, byokOpt.CloudProxy, "BYOK 配置不应标记 cloud_proxy")
 }
+
+// TestImportConfigsFullOverwriteDeletesExtras 全量覆盖：导入后配置集 == 文件集，
+// 未在文件中出现的现有配置被删除；文件中保留的配置不提供 api_key 时保留原 Key。
+func TestImportConfigsFullOverwriteDeletesExtras(t *testing.T) {
+	svc := setupEleAgentModelService(t)
+	seedEleAgentConfigs(t, svc) // kimi/k3 + volcengine/doubao-seedream
+
+	// 仅导入 kimi/k3（不提供 api_key -> 保留原 Key）；volcengine/doubao-seedream 不在文件中 -> 应被删除
+	result, err := svc.ImportConfigs([]EleAgentModelExportItem{
+		{
+			Provider:      "kimi",
+			Protocol:      "openai_compatible",
+			ModelName:     "k3",
+			DisplayName:   "Kimi K3 改名",
+			BaseURL:       "https://api.kimi.com/coding/v1",
+			PricePerCall:  88,
+			SupportsChat:  true,
+			SupportsTools: true,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.Created)
+	assert.Equal(t, 1, result.Updated)
+	assert.Equal(t, 1, result.Deleted, "未在文件中的 volcengine 配置应被删除")
+	assert.Empty(t, result.Failed)
+
+	// kimi/k3 仍在，且 Key 保留（未提供 api_key）
+	assert.True(t, svc.HasModel("kimi", "k3"))
+	cred, err := svc.GetCredential("kimi", "k3")
+	require.NoError(t, err)
+	assert.Equal(t, "sk-kimi-test", cred.APIKey, "未提供 api_key 时应保留原 Key")
+
+	// volcengine/doubao-seedream 已被删除
+	assert.False(t, svc.HasModel("volcengine", "doubao-seedream-4-0-250828"))
+
+	// 全量只剩 1 条
+	_, total, err := svc.ListConfigs("", 1, 100)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), total)
+}
+
+// TestImportConfigsFullOverwriteFailedItemKept 全量覆盖：文件中出现但校验失败的条目，
+// 其现有配置不删除（便于修正后重导），仅删除完全不在文件中的配置。
+func TestImportConfigsFullOverwriteFailedItemKept(t *testing.T) {
+	svc := setupEleAgentModelService(t)
+	seedEleAgentConfigs(t, svc) // kimi/k3 + volcengine/doubao-seedream
+
+	// kimi/k3 提供了与现有能力冲突的协议（openai_compatible + supports_image）-> 校验失败但不删除
+	items := importJSONItems(t, `[
+		{"provider": "kimi", "model_name": "k3", "supports_image": true, "base_url": "https://api.kimi.com/coding/v1"}
+	]`)
+	result, err := svc.ImportConfigs(items)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.Updated)
+	require.Len(t, result.Failed, 1)
+	assert.Contains(t, result.Failed[0].Error, "视觉生成模型协议")
+	// 失败条目仍计入 seen -> 其现有配置保留；volcengine 不在文件 -> 删除
+	assert.Equal(t, 1, result.Deleted)
+	assert.True(t, svc.HasModel("kimi", "k3"), "文件中出现但失败的条目不应被删除")
+}
