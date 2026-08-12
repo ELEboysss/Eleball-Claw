@@ -194,6 +194,10 @@ func NewRouter(
 		auth.GET("/space", agentHandler.GetUserSpace)
 		auth.GET("/capabilities", agentHandler.GetCapabilities)
 
+		// 云端模块目录与下载（claw 从云端拉取 marketplace 元数据包，#5 L1）
+		auth.GET("/market/cloud/catalog", moduleHandler.ListCloudCatalog)
+		auth.POST("/market/cloud/modules/:id/download", moduleHandler.DownloadCloudModule)
+
 		// 插件自助注册（无需登录，需 auth_token）
 		v1.POST("/market/modules/register", moduleHandler.RegisterModuleFromPlugin)
 

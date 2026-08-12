@@ -318,3 +318,86 @@ func (h *ModuleHandler) SubmitForReview(c *gin.Context) {
 	_ = json.NewDecoder(resp.Body).Decode(&cloudResp)
 	c.JSON(resp.StatusCode, cloudResp)
 }
+
+// ListCloudCatalog 拉取云端社区模块目录（转发云端 GET /v1/market/modules/catalog）。
+// claw web 据此展示「云端模块」tab + 比对本地（module_id + updated_at）决定下载/更新。
+// 透传用户 Authorization（云端 catalog 为 auth 端点）。
+func (h *ModuleHandler) ListCloudCatalog(c *gin.Context) {
+	if h.cloudAPIBase == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 3001, "message": "未配置云端 API Base"})
+		return
+	}
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet,
+		h.cloudAPIBase+"/market/modules/catalog", nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 3001, "message": "构造云端请求失败: " + err.Error()})
+		return
+	}
+	req.Header.Set("Authorization", c.GetHeader("Authorization"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"code": 3001, "message": "拉取云端目录失败: " + err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	var cloudResp struct {
+		Code int `json:"code"`
+		Data struct {
+			Items []model.ModuleCatalogItem `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&cloudResp); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"code": 3001, "message": "解析云端响应失败: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": gin.H{"items": cloudResp.Data.Items}})
+}
+
+// DownloadCloudModule 从云端下载模块元数据包并落盘（云端 GET /v1/market/modules/:id/package
+// -> moduleService.ApplyCloudPackage）。手动触发（D4：不自动拉取，用户主动点「下载到本地」）。
+// 透传用户 Authorization。返回落盘后的本地模块记录。
+func (h *ModuleHandler) DownloadCloudModule(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "缺少模块 id"})
+		return
+	}
+	if h.cloudAPIBase == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 3001, "message": "未配置云端 API Base"})
+		return
+	}
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet,
+		h.cloudAPIBase+"/market/modules/"+id+"/package", nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 3001, "message": "构造云端请求失败: " + err.Error()})
+		return
+	}
+	req.Header.Set("Authorization", c.GetHeader("Authorization"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"code": 3001, "message": "下载云端模块包失败: " + err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var errResp map[string]interface{}
+		_ = json.NewDecoder(resp.Body).Decode(&errResp)
+		c.JSON(resp.StatusCode, errResp)
+		return
+	}
+	var cloudResp struct {
+		Code int                 `json:"code"`
+		Data model.ModulePackage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&cloudResp); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"code": 3001, "message": "解析云端模块包失败: " + err.Error()})
+		return
+	}
+	rec, err := h.moduleService.ApplyCloudPackage(cloudResp.Data)
+	if err != nil {
+		h.logger.Warn("应用云端模块包失败", zap.String("module_id", id), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 5000, "message": "落盘失败: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": rec})
+}

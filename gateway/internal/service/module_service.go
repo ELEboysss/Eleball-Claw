@@ -628,6 +628,59 @@ func (s *ModuleService) WriteUserModule(req UserModuleGenerateRequest, tools []M
 	}, nil
 }
 
+// ApplyCloudPackage 将云端下载的模块元数据包落盘到 marketplace/<id>/ 并 rescan 注册。
+// 写 module.json + skus/*.json + docker-compose.claw.yml（image 引用，走 ACR pull_first），
+// 不写 main.py/Dockerfile（社区模块产物走 ACR 镜像，见 plan cloud-claw-module-download-sync D2）。
+//
+// 手动下载语义（D4：不自动拉取，用户主动触发）：已存在则覆盖 module.json/skus/compose，
+// 不删本地额外文件（如用户改过的 main.py / 凭证）。探活与容器拉起由后续 serve 的 pull_first
+// 机制 + 前端 refresh 触发（#6 L2）。
+func (s *ModuleService) ApplyCloudPackage(pkg model.ModulePackage) (*model.ModuleRecord, error) {
+	if pkg.ModuleID == "" || len(pkg.ModuleJSON) == 0 {
+		return nil, errors.New("模块包缺少 module_id 或 module_json")
+	}
+	root := ResolveMarketplaceRoot()
+	if root == "" {
+		return nil, errors.New("无法定位 marketplace 目录（设 CLAW_MARKETPLACE_DIR 或在仓库内运行）")
+	}
+	moduleDir := filepath.Join(root, pkg.ModuleID)
+	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
+		return nil, fmt.Errorf("创建模块目录失败: %w", err)
+	}
+	// module.json（云端原文，含 source_origin 显式标记，ensureMarketplaceModules 据此标 Official）
+	if err := os.WriteFile(filepath.Join(moduleDir, "module.json"), pkg.ModuleJSON, 0o644); err != nil {
+		return nil, fmt.Errorf("写 module.json 失败: %w", err)
+	}
+	// skus/*.json（手写 SKU；auto_sku 模块云端不打 skus，留空由 rescan + DeriveSKUs 派生）
+	if len(pkg.SKUs) > 0 {
+		skuDir := filepath.Join(moduleDir, "skus")
+		if err := os.MkdirAll(skuDir, 0o755); err != nil {
+			return nil, fmt.Errorf("创建 skus 目录失败: %w", err)
+		}
+		for _, sku := range pkg.SKUs {
+			name := strings.TrimSuffix(sku.FileName, ".json") + ".json"
+			if err := os.WriteFile(filepath.Join(skuDir, name), sku.Content, 0o644); err != nil {
+				return nil, fmt.Errorf("写 SKU %s 失败: %w", sku.FileName, err)
+			}
+		}
+	}
+	// docker-compose.claw.yml（image 引用，serve 拉起时 pull_first 从 ACR 拉）
+	if pkg.ComposeContent != "" {
+		if err := os.WriteFile(filepath.Join(moduleDir, "docker-compose.claw.yml"), []byte(pkg.ComposeContent), 0o644); err != nil {
+			return nil, fmt.Errorf("写 docker-compose.claw.yml 失败: %w", err)
+		}
+	}
+	// rescan 注册 SkillRuntime
+	if err := s.RescanMarketplace(nil); err != nil {
+		return nil, fmt.Errorf("rescan 失败: %w", err)
+	}
+	rec, err := s.GetModule(pkg.ModuleID)
+	if err != nil || rec == nil {
+		return nil, fmt.Errorf("模块 %s 落盘后 rescan 未注册成功", pkg.ModuleID)
+	}
+	return rec, nil
+}
+
 // writeUserMainPy 写 main.py：优先用 web 编辑器草稿（main_py_content），其次拷贝 work_dir/args[0]
 // 的用户脚本，最后落 echo 骨架。草稿优先以 honoring 用户在 web 的预览/编辑结果。
 func writeUserMainPy(moduleDir string, req UserModuleGenerateRequest) error {

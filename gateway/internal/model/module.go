@@ -147,3 +147,37 @@ type ModuleSubmissionMeta struct {
 	Version      string   `json:"version"`
 	Capabilities []string `json:"capabilities"`
 }
+
+// ModulePackage cloud->claw 下载的模块元数据包（GET /v1/market/modules/:id/package）。
+// 含 module.json + skus/*.json + claw 版 docker-compose.yml（image 引用，走 ACR pull_first），
+// 不含 main.py/Dockerfile（社区模块产物走 ACR 镜像，见 plan cloud-claw-module-download-sync D2）。
+type ModulePackage struct {
+	PackageVersion int                `json:"package_version"`         // 打包格式版本（当前 1）
+	ModuleID       string             `json:"module_id"`
+	ModuleJSON     json.RawMessage    `json:"module_json"`             // module.json 原文
+	SKUs           []ModulePackageSKU `json:"skus"`                    // skus/*.json
+	ComposeContent string             `json:"compose_content"`         // claw 版 docker-compose.yml（image 引用）
+	Version        string             `json:"version,omitempty"`       // 模块语义版本（可选，claw 比对更新用）
+	SourceOrigin   string             `json:"source_origin,omitempty"` // 归属（eleball_cloud/user/...）
+	UpdatedAt      time.Time          `json:"updated_at"`              // 云端最后更新时间（claw 比对本地决定是否更新）
+}
+
+// ModulePackageSKU 打包包内的单个 SKU 文件条目。
+type ModulePackageSKU struct {
+	FileName string          `json:"file_name"` // 如 "github"（不含 .json）
+	Content  json.RawMessage `json:"content"`   // SKU manifest 原文
+}
+
+// ModuleCatalogItem claw 云端模块目录单项（GET /v1/market/modules/catalog）。
+// claw 据此比对本地（module_id + updated_at）决定下载/更新。见 plan cloud-claw-module-download-sync C2。
+type ModuleCatalogItem struct {
+	ModuleID     string    `json:"module_id"`
+	Name         string    `json:"name"`
+	Description  string    `json:"description"`
+	Version      string    `json:"version,omitempty"`
+	SourceOrigin string    `json:"source_origin,omitempty"` // 归属（eleball_cloud/user/...）
+	SourceActor  string    `json:"source_actor,omitempty"`  // 来源主体（user=用户名）
+	Transport    string    `json:"transport"`
+	Capabilities []string  `json:"capabilities,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at"` // 云端最后更新时间（claw 比对本地决定是否更新）
+}
