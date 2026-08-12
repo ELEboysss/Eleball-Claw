@@ -527,10 +527,9 @@ func main() {
 	// 9. 启动
 	// P5.2：启动 mDNS 广播，供 APP 同局域网 NSD 发现（LAN 直连通道）
 	deviceID := os.Getenv("CLAW_DEVICE_ID")
+	hostname, _ := os.Hostname()
 	if deviceID == "" {
-		if h, err := os.Hostname(); err == nil {
-			deviceID = h
-		}
+		deviceID = hostname
 	}
 	if mdnsBroadcaster, mdnsErr := service.NewMdnsBroadcaster(deviceID, cfg.Server.Port, logger); mdnsErr != nil {
 		logger.Warn("mDNS 广播启动失败（LAN 发现不可用，不影响其他功能）", zap.Error(mdnsErr))
@@ -542,10 +541,12 @@ func main() {
 	// CLAW_RELAY_TOKEN 为用户在控制台登录后获得的 JWT（统一账户验签，与 gateway JWT_SECRET 一致）。
 	relayURL := os.Getenv("RELAY_URL")
 	relayToken := os.Getenv("CLAW_RELAY_TOKEN")
-	// P5.4 E2E 加密器（claw 静态 X25519 密钥对；公钥应注册云端设备列表供 APP 协商）
-	e2eCipher, err := service.NewE2ECipher()
+	// P5.4 E2E 加密器（claw 静态 P-256 密钥对）：S09-C2b 起私钥持久化到 ~/.eleball-claw/e2e_key，
+	// 重启复用同一公钥；公钥注册到云端设备列表供 APP 配对协商。
+	e2eCipher, err := service.LoadOrCreateE2ECipher("")
 	if err != nil {
-		logger.Warn("E2E 加密器初始化失败（relay 将走明文）", zap.Error(err))
+		// S09-C2d 安全收敛：cipher 不可用时 RelayTunnel.Start 拒绝启动，不再回落明文
+		logger.Warn("E2E 加密器初始化失败（relay 将被禁用，LAN 不受影响）", zap.Error(err))
 		e2eCipher = nil
 	} else {
 		logger.Info("E2E 加密就绪", zap.String("claw_pubkey", e2eCipher.PublicKeyBase64()))
@@ -557,6 +558,20 @@ func main() {
 	)
 	relayTunnel.Start()
 	defer relayTunnel.Stop()
+
+	// S09-C2b：已配置云端凭据（用户 JWT）时向云端注册 device_id + E2E 公钥（幂等 upsert）。
+	// 失败仅告警不阻塞：云端不可达不影响本地 LAN/relay 链路；APP 配对依赖该记录获取公钥。
+	if relayToken != "" && cfg.Server.EleagentBaseURL != "" && e2eCipher != nil {
+		go func() {
+			regCtx, regCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer regCancel()
+			if err := service.RegisterCloudDevice(regCtx, cfg.Server.EleagentBaseURL, relayToken, deviceID, hostname, e2eCipher.PublicKeyBase64()); err != nil {
+				logger.Warn("云端设备注册失败（APP 远程配对暂不可用，不影响本地功能）", zap.Error(err))
+			} else {
+				logger.Info("云端设备注册成功", zap.String("device_id", deviceID))
+			}
+		}()
+	}
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	logger.Info("Eleball-claw 启动", zap.String("addr", addr), zap.String("mode", cfg.Server.Mode))

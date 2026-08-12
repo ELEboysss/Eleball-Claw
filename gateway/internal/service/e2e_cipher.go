@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 )
 
 // E2E 加密层（P5.4）：中继只见密文，claw 与 APP 端到端加密。
@@ -42,6 +44,43 @@ func NewE2ECipher() (*E2ECipher, error) {
 		return nil, fmt.Errorf("生成 P-256 密钥对失败: %w", err)
 	}
 	return &E2ECipher{staticPriv: priv}, nil
+}
+
+// DefaultE2EKeyPath claw E2E 静态私钥默认持久化路径：~/.eleball-claw/e2e_key
+// （与 install 脚本写入 device_id 的 CONFIG_DIR 同一目录约定）
+func DefaultE2EKeyPath() string {
+	return filepath.Join(clawHomeDir(), ".eleball-claw", "e2e_key")
+}
+
+// LoadOrCreateE2ECipher 加载或首次生成并持久化 claw 静态密钥对（S09-C2b）。
+//
+// 私钥落盘（0600），重启复用同一密钥对，保证注册到云端的 claw_pub_key 稳定，
+// APP 侧已获取的公钥在 claw 重启后仍可完成 ECDH 协商。
+// keyPath 为空时用 DefaultE2EKeyPath()。
+func LoadOrCreateE2ECipher(keyPath string) (*E2ECipher, error) {
+	if keyPath == "" {
+		keyPath = DefaultE2EKeyPath()
+	}
+	if raw, err := os.ReadFile(keyPath); err == nil {
+		// 文件内容为原始 32 字节私钥（无编码），不可做 TrimSpace 之类的空白处理：
+		// 随机密钥首尾字节可能恰为 0x20/0x09 等，裁剪会破坏密钥
+		priv, err := ecdh.P256().NewPrivateKey(raw)
+		if err == nil {
+			return &E2ECipher{staticPriv: priv}, nil
+		}
+		// 文件损坏：重新生成覆盖（APP 需重新经云端设备列表获取公钥）
+	}
+	cipher, err := NewE2ECipher()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
+		return nil, fmt.Errorf("创建密钥目录失败: %w", err)
+	}
+	if err := os.WriteFile(keyPath, cipher.staticPriv.Bytes(), 0600); err != nil {
+		return nil, fmt.Errorf("持久化 E2E 私钥失败: %w", err)
+	}
+	return cipher, nil
 }
 
 // PublicKeyBase64 返回 claw 静态公钥（base64），供注册云端设备列表 / APP 协商用。
