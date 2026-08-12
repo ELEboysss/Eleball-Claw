@@ -633,8 +633,8 @@ func (s *ModuleService) WriteUserModule(req UserModuleGenerateRequest, tools []M
 // 不写 main.py/Dockerfile（社区模块产物走 ACR 镜像，见 plan cloud-claw-module-download-sync D2）。
 //
 // 手动下载语义（D4：不自动拉取，用户主动触发）：已存在则覆盖 module.json/skus/compose，
-// 不删本地额外文件（如用户改过的 main.py / 凭证）。探活与容器拉起由后续 serve 的 pull_first
-// 机制 + 前端 refresh 触发（#6 L2）。
+// 不删本地额外文件（如用户改过的 main.py / 凭证）。落盘后 best-effort 拉起（#6 L2）：
+// docker 触发 ACR pull_first 起 container，process 起 stdio；失败不阻断下载。
 func (s *ModuleService) ApplyCloudPackage(pkg model.ModulePackage) (*model.ModuleRecord, error) {
 	if pkg.ModuleID == "" || len(pkg.ModuleJSON) == 0 {
 		return nil, errors.New("模块包缺少 module_id 或 module_json")
@@ -678,6 +678,9 @@ func (s *ModuleService) ApplyCloudPackage(pkg model.ModulePackage) (*model.Modul
 	if err != nil || rec == nil {
 		return nil, fmt.Errorf("模块 %s 落盘后 rescan 未注册成功", pkg.ModuleID)
 	}
+	// #6 L2：best-effort 拉起（docker 触发 ACR pull_first 起 container，process 起 stdio）。
+	// 异步启动，立即返回可能 offline；失败不阻断下载（模块已落盘，前端 refresh 看最终状态）。
+	_, _ = s.Start(pkg.ModuleID)
 	return rec, nil
 }
 
