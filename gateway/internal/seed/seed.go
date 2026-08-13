@@ -65,7 +65,7 @@ func AutoEnsureMarketplaceModules(svc *service.ModuleService, logger *zap.Logger
 // manifest_json + name/desc/category/level/price，保留 rating/counts 等运行时统计。
 // 文件加载失败（空/非 JSON/缺必填字段）时跳过该 SKU，绝不覆盖数据库有效数据。
 func SyncOfficialSKUs(repo *repository.AgentRepo, side string, logger *zap.Logger) error {
-	root := resolveMarketplaceRoot()
+	root := service.ResolveMarketplaceRoot()
 	if root == "" {
 		logger.Warn("未找到 marketplace 目录，跳过官方 SKU 同步")
 		return nil
@@ -219,25 +219,6 @@ func delistStaleHandwrittenSKUs(repo *repository.AgentRepo, modName string, seen
 		}
 	}
 	return n
-}
-
-// resolveMarketplaceRoot 用候选路径定位 marketplace 根目录（纯磁盘，cloud/claw 通用）。
-// 与历史 loadManifestJSON 的候选路径一致：覆盖仓库内开发（marketplace / gateway/marketplace）
-// 与安装版（cwd 即安装根，marketplace 已由 EnsureMarketplaceRoot 落盘）。
-func resolveMarketplaceRoot() string {
-	for _, p := range []string{
-		"marketplace",
-		filepath.Join("..", "marketplace"),
-		filepath.Join("..", "..", "marketplace"),
-		filepath.Join("..", "..", "..", "marketplace"),
-		"gateway/marketplace",
-		filepath.Join("..", "gateway", "marketplace"),
-	} {
-		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
-			return p
-		}
-	}
-	return ""
 }
 
 // moduleDirHasJSON 判断模块目录有合法 module.json（含 id）。sku_scope 已随 T1.3 移除，

@@ -27,11 +27,25 @@ func setupSeedTestRepo(t *testing.T) *repository.AgentRepo {
 	return repository.NewAgentRepo(db)
 }
 
+// setupSeedMarketplaceRoot 定位仓库 marketplace（gateway/marketplace）并设为 CLAW_MARKETPLACE_DIR。
+// claw 的 service.ResolveMarketplaceRoot 不向上回溯（T2.1 前 seed 本地实现是 6 候选路径走查），
+// 在测试 cwd（gateway/internal/seed）下会回退到 ~/.eleball-claw/marketplace（home 安装版），
+// 其中含陈旧的 agent-reach/skus/*.json（已「两侧清除」的旧手写 SKU），会破坏本测试
+// 「agent-reach 无 skus 目录（纯 auto_sku）」的假设。显式钉住仓库 marketplace，
+// 使测试解析结果与生产启动（cwd=gateway，命中首候选 marketplace）一致。
+func setupSeedMarketplaceRoot(t *testing.T) {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", "..", "marketplace"))
+	require.NoError(t, err)
+	t.Setenv("CLAW_MARKETPLACE_DIR", root)
+}
+
 // TestSyncClawOfficialSKUs 泛化扫描本地官方 SKU（origin=builtin，即 search-web
 // 百度千帆/必应两条免费 SKU），manifest 含 credentials 声明，幂等重跑不产生重复。
 func TestSyncClawOfficialSKUs(t *testing.T) {
 	repo := setupSeedTestRepo(t)
 	logger := zap.NewNop()
+	setupSeedMarketplaceRoot(t)
 
 	require.NoError(t, SyncOfficialSKUs(repo, "claw", logger))
 
@@ -218,6 +232,7 @@ func TestSyncOfficialSKUs_DelistsStaleHandwritten(t *testing.T) {
 	repo := setupSeedTestRepo(t)
 	logger := zap.NewNop()
 	adminID := "00000000-0000-0000-0000-000000000000"
+	setupSeedMarketplaceRoot(t)
 
 	require.NoError(t, SyncOfficialSKUs(repo, "claw", logger))
 
