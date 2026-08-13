@@ -21,7 +21,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// TestModuleService_RescanMarketplace_MCP 验证 marketplace 扫描能识别 transport_type=mcp 的示例模块，
+// TestModuleService_RescanMarketplace_MCP 验证 marketplace 扫描能识别 transport=mcp_http 的示例模块，
 // 并创建正确的 SkillRuntime（含 MCPServerConfig）与驱动别名映射。
 func TestModuleService_RescanMarketplace_MCP(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -38,18 +38,21 @@ func TestModuleService_RescanMarketplace_MCP(t *testing.T) {
 	mcpDir := filepath.Join(root, "mcp-hello")
 	require.NoError(t, os.MkdirAll(mcpDir, 0755))
 	manifest := []byte(`{
-  "module_id": "mcp-hello",
+  "id": "mcp-hello",
   "name": "MCP Hello",
   "description": "test",
   "origin": "cloud",
-  "transport_type": "mcp",
+  "transport": "mcp_http",
+  "deployment": "external",
   "capabilities": ["hello"],
   "mcp_server_config": {"url": "http://mcp-hello:8080/mcp"},
   "driver": {"driver_id": "mcp_hello", "name": "MCP Hello Driver"}
 }`)
 	require.NoError(t, os.WriteFile(filepath.Join(mcpDir, "module.json"), manifest, 0644))
 
-	require.NoError(t, svc.ensureMarketplaceModules(root, zap.NewNop()))
+	// claw RescanPackage 经包级 ResolveMarketplaceRoot 解析根（CLAW_MARKETPLACE_DIR）
+	t.Setenv("CLAW_MARKETPLACE_DIR", root)
+	require.NoError(t, svc.RescanPackage("claw", zap.NewNop()))
 
 	rt, err := svc.repo.GetByID("mcp-hello")
 	require.NoError(t, err)
@@ -106,7 +109,9 @@ func TestModuleService_RescanMarketplace_AgentReachMCP(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "agent-reach"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "agent-reach", "module.json"), data, 0644))
 
-	require.NoError(t, svc.ensureMarketplaceModules(root, zap.NewNop()))
+	// claw RescanPackage 经包级 ResolveMarketplaceRoot 解析根（CLAW_MARKETPLACE_DIR）
+	t.Setenv("CLAW_MARKETPLACE_DIR", root)
+	require.NoError(t, svc.RescanPackage("claw", zap.NewNop()))
 
 	rt, err := svc.repo.GetByID("agent-reach")
 	require.NoError(t, err)

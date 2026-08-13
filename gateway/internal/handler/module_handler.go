@@ -37,9 +37,9 @@ func (h *ModuleHandler) SetCloudAccountService(svc *service.CloudAccountService)
 	h.cloudAccount = svc
 }
 
-// RescanMarketplace 运行时重新扫描 marketplace/ 目录并补齐内置模块与驱动别名
+// RescanMarketplace 运行时重新扫描 marketplace/ 目录并补齐模块与 SKU（T2.2 RescanPackage）
 func (h *ModuleHandler) RescanMarketplace(c *gin.Context) {
-	if err := h.moduleService.RescanMarketplace(h.logger); err != nil {
+	if err := h.moduleService.RescanPackage("claw", h.logger); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 5000, "message": err.Error()})
 		return
 	}

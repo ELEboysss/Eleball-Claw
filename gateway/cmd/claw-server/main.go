@@ -321,14 +321,11 @@ func main() {
 		return startModule(ctx, logger, absRoot, moduleID, cfg.Modules, normalizePullPolicy(cfg.Modules.PullPolicy))
 	})
 
-	// 扫描 marketplace/ 预置官方模块（search-web 等）
+	// T2.2 收敛：AutoEnsureMarketplaceModules 经 RescanPackage 一次扫描同时物化
+	// SkillRuntime（tool/mcp 运行时）与 AgentItem（手写 skus/*.json + 派生 + prompt-only SKILL.md，
+	// 如 search-web 免费搜索两变体），不再区分「模块补齐」与「官方 SKU 同步」两步。
 	if err := seed.AutoEnsureMarketplaceModules(moduleService, logger); err != nil {
 		logger.Warn("自动补齐内置 SkillRuntime 失败", zap.Error(err))
-	}
-
-	// 泛化同步本地官方 SKU（claw 收录 marketplace 全部，如 search-web 免费搜索两变体）
-	if err := seed.SyncOfficialSKUs(agentRepo, "claw", logger); err != nil {
-		logger.Warn("同步本地官方 SKU 失败", zap.Error(err))
 	}
 
 	// 启动 SkillRuntime 后台健康探测（每 5 分钟一次）

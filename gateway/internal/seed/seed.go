@@ -1,363 +1,50 @@
 // Package seed 提供可选的初始化数据填充工具。
 //
-// 注意：gateway 启动时会自动扫描 gateway/marketplace/ 下的内置模块目录，根据每个
-// 目录中的 module.json 自动确保模块记录与驱动别名存在，避免未运行 cmd/seed 时
-// 依赖这些模块的 SKU 显示“驱动未注册”。
-// 官方 SKU 的 manifest 同样由 SyncOfficialSKUs 泛化扫描 marketplace/<mod>/skus/*.json
-// 完成（不再需要每个模块手写一份 seed 函数）。完整的示例数据仍可由管理员显式运行
-// cmd/seed 或 --seed 插入。
+// 注意：claw 启动时会自动扫描 marketplace/ 目录（RescanPackage，T2.2 统一物化），
+// 一次扫描同时补齐 SkillRuntime（tool/mcp 运行时）与 AgentItem（手写 skus/*.json +
+// 派生 + prompt-only SKILL.md），不再区分「模块补齐」与「官方 SKU 同步」两步。
+// 本包仅保留与历史调用点兼容的薄包装（cmd/server、cmd/claw-server、cmd/seed --seed），
+// 实际逻辑全部收敛到 service.ModuleService.RescanPackage。
 package seed
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
-
-	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
 	"github.com/eleball/gateway/internal/service"
 	"go.uber.org/zap"
 )
 
-// All 执行全部默认初始化：内置模块 + 驱动别名 + 官方 SKU（云端侧）。
-// --seed 模式调用；启动时云端也会单独调用 SyncOfficialSKUs（见 cmd/server）。
+// rescanMarketplace claw 统一物化入口：先播种内嵌官方模块（首次运行写 home，只补缺失
+// 不覆盖用户修改），再 RescanPackage 一次扫描物化 SkillRuntime + AgentItem。
+// 云端无此步（marketplace 目录随仓库分发）；播种失败不阻断扫描（与旧 RescanMarketplace 等价）。
+func rescanMarketplace(svc *service.ModuleService, logger *zap.Logger) error {
+	if _, err := service.EnsureMarketplaceRoot(); err != nil {
+		if logger != nil {
+			logger.Warn("初始化 marketplace 目录失败，跳过模块物化", zap.Error(err))
+		}
+		return nil
+	}
+	return svc.RescanPackage("claw", logger)
+}
+
+// All 执行全部默认初始化：内置模块 + 驱动别名 + 官方 SKU（claw 侧）。
+// --seed 模式调用；启动时 claw 也会调用 AutoEnsureMarketplaceModules（见 cmd/claw-server）。
+// T2.2 收敛：RescanPackage 一次扫描物化 SkillRuntime + AgentItem，等价旧两步。
 func All(agentRepo *repository.AgentRepo, moduleSvc *service.ModuleService, logger *zap.Logger) error {
-	if err := AutoEnsureMarketplaceModules(moduleSvc, logger); err != nil {
-		return err
-	}
-	if err := SyncOfficialSKUs(agentRepo, "cloud", logger); err != nil {
-		return err
-	}
-	return nil
+	return rescanMarketplace(moduleSvc, logger)
 }
 
-// BuiltinModules 预置内置集市模块记录。
-// 通过扫描 marketplace/ 下的 module.json 自动补齐，支持新增官方模块而无需改代码。
+// BuiltinModules 预置内置集市模块记录（SkillRuntime + AgentItem 一次物化）。
 func BuiltinModules(svc *service.ModuleService, logger *zap.Logger) error {
-	return svc.RescanMarketplace(logger)
+	return rescanMarketplace(svc, logger)
 }
 
-// BuiltinDrivers 预置官方驱动别名映射。
-// 扫描 marketplace/ 下的 module.json 时已经同步补齐驱动别名，此处保留函数签名兼容旧调用。
+// BuiltinDrivers 预置官方驱动别名映射（驱动已并入 SkillRuntime，与 BuiltinModules 等价）。
 func BuiltinDrivers(svc *service.ModuleService, logger *zap.Logger) error {
-	return svc.RescanMarketplace(logger)
+	return rescanMarketplace(svc, logger)
 }
 
-// AutoEnsureMarketplaceModules 自动扫描 marketplace 目录，根据 module.json
-// 确保内置模块记录与驱动别名存在。新增官方内置模块时，只需在 marketplace/
-// 下新增目录和 module.json，无需修改代码。
+// AutoEnsureMarketplaceModules 自动扫描 marketplace 目录，确保模块记录与 SKU 存在。
+// 新增官方内置模块时，只需在 marketplace/ 下新增目录（package.json 或 module.json），无需修改代码。
 func AutoEnsureMarketplaceModules(svc *service.ModuleService, logger *zap.Logger) error {
-	return svc.RescanMarketplace(logger)
-}
-
-// SyncOfficialSKUs 泛化扫描 marketplace/<module>/skus/*.json，按 manifest 同步官方 SKU。
-// 替代原先每个官方模块手写的 AgentReachSKUs/FirecrawlSKUs/SearchWebSKUs：新增官方模块
-// 只需在 marketplace/<mod>/ 下放 module.json + skus/*.json，无需改 Go。
-//
-// 收录规则（T1.3）：按 origin 判定（取代旧 sku_scope）——
-//   - cloud 侧不收录 builtin（claw 内置模块，如 mcp-stdio-echo 不应出现在云端 seed/catalog）
-//   - claw 侧收录本地 marketplace 全部（builtin 内置 + cloud 官方副本 + user 本地创作）
-//
-// AgentItem.ID 约定 "{module}-{sku_file}"（与历史预置一致，不破坏已购记录）。
-// 已存在且 manifest 与文件一致则跳过；manifest 变化（如新增 credentials/price）则同步
-// manifest_json + name/desc/category/level/price，保留 rating/counts 等运行时统计。
-// 文件加载失败（空/非 JSON/缺必填字段）时跳过该 SKU，绝不覆盖数据库有效数据。
-func SyncOfficialSKUs(repo *repository.AgentRepo, side string, logger *zap.Logger) error {
-	root := service.ResolveMarketplaceRoot()
-	if root == "" {
-		logger.Warn("未找到 marketplace 目录，跳过官方 SKU 同步")
-		return nil
-	}
-	adminID := "00000000-0000-0000-0000-000000000000"
-	now := time.Now()
-	created, synced, skipped, delisted := 0, 0, 0, 0
-
-	modEntries, err := os.ReadDir(root)
-	if err != nil {
-		logger.Warn("读取 marketplace 目录失败，跳过官方 SKU 同步", zap.Error(err))
-		return nil
-	}
-	for _, modEntry := range modEntries {
-		if !modEntry.IsDir() {
-			continue
-		}
-		modName := modEntry.Name()
-		if !moduleDirHasJSON(filepath.Join(root, modName, "module.json")) {
-			// 无 module.json：尝试 SKILL.md prompt-only skill（Anthropic 标准，
-			// 1 SKILL.md = 1 SKU，body 即 SystemPrompt，不建 SkillRuntime）。
-			c, sy, sk := syncPromptSkillSKU(repo, root, modName, adminID, now, logger)
-			created += c
-			synced += sy
-			skipped += sk
-			continue
-		}
-		if !originIncluded(readModuleOrigin(filepath.Join(root, modName, "module.json")), side) {
-			continue
-		}
-		skuDir := filepath.Join(root, modName, "skus")
-		skuEntries, err := os.ReadDir(skuDir)
-		if err != nil {
-			// 无 skus/ 目录（如 stt / auto_sku 模块）：跳过 upsert，但仍下架陈旧手写 SKU。
-			skuEntries = nil
-		}
-		seenFiles := map[string]bool{}
-		for _, sf := range skuEntries {
-			if sf.IsDir() || !strings.HasSuffix(sf.Name(), ".json") {
-				continue
-			}
-			seenFiles[strings.TrimSuffix(sf.Name(), ".json")] = true
-			agentID := modName + "-" + strings.TrimSuffix(sf.Name(), ".json")
-			path := filepath.Join(skuDir, sf.Name())
-			data, err := os.ReadFile(path)
-			if err != nil {
-				logger.Warn("读取 SKU manifest 失败", zap.String("path", path), zap.Error(err))
-				continue
-			}
-			fileStr := string(data)
-			var m model.ToolManifest
-			if err := json.Unmarshal(data, &m); err != nil {
-				logger.Warn("解析 SKU manifest 失败", zap.String("path", path), zap.Error(err))
-				continue
-			}
-			if m.ID == "" || m.Name == "" || m.Driver == "" {
-				logger.Warn("SKU manifest 缺少必填字段，跳过", zap.String("path", path))
-				continue
-			}
-
-			existing, err := repo.GetByID(agentID)
-			if err == nil && existing != nil {
-				if !shouldSyncManifest(existing.ManifestJSON, fileStr) {
-					skipped++
-					continue
-				}
-				// per-field pin：admin 钉住的展示字段(name/desc/price/level)不被覆写，保留 admin 改的值；
-				// manifest_json(派生源) 与 Category 始终同步。与 DeriveSKUs 共用 SyncDerivedDisplay 不变量。
-				if existing.SyncDerivedDisplay(fileStr, &m) {
-					if err := repo.Update(existing); err != nil {
-						logger.Warn("同步官方 SKU manifest 失败", zap.String("id", agentID), zap.Error(err))
-					} else {
-						synced++
-					}
-				} else {
-					skipped++
-				}
-				continue
-			}
-			item := &model.AgentItem{
-				ID:           agentID,
-				Name:         m.Name,
-				Description:  m.Description,
-				Category:     m.Category,
-				Level:        model.AgentLevel(m.Level),
-				PriceDanwan:  m.PriceDanwan,
-				PriceElegant: m.PriceElegant,
-				ManifestJSON: fileStr,
-				Status:       model.AgentStatusApproved,
-				CreatorID:    adminID,
-				CreatorName:  "官方",
-				CreatedAt:    now,
-			}
-			if err := repo.Create(item); err != nil {
-				logger.Warn("创建官方 SKU 失败", zap.String("id", agentID), zap.Error(err))
-			} else {
-				created++
-			}
-		}
-		// 下架源 skus/*.json 已删除的手写 SKU（auto 派生由 DeriveSKUs 管理，此处跳过）。
-		delisted += delistStaleHandwrittenSKUs(repo, modName, seenFiles, logger)
-	}
-	logger.Info("已同步官方 SKU",
-		zap.String("side", side),
-		zap.Int("created", created), zap.Int("synced", synced),
-		zap.Int("skipped", skipped), zap.Int("delisted", delisted))
-	return nil
-}
-
-// delistStaleHandwrittenSKUs 下架源 skus/*.json 已删除的手写官方 SKU（保留购买记录不硬删）。
-// 与 DeriveSKUs 对称：auto 派生 SKU 在工具消失时由 SkillRuntimeSKUService.DeriveSKUs 下架，
-// 手写 SKU 在源文件删除时由此处下架。仅处理 approved 状态、且 manifest 无 auto_sku_module
-// 标记的手写 SKU（auto 派生的 metadata.auto_sku_module 指向所属模块，由 DeriveSKUs 精确管理）。
-//
-// 安全前提：模块名之间不存在「A 是 B 的前缀 + '-'」关系（marketplace 模块名已校验无碰撞），
-// 故 ListByModuleSKUs 的 id LIKE '<mod>-%' 粗筛不会命中间名前缀的其他模块 SKU（与 DeriveSKUs
-// 同样依赖前缀粗筛 + 精确标记二次判定的模式）。
-func delistStaleHandwrittenSKUs(repo *repository.AgentRepo, modName string, seenFiles map[string]bool, logger *zap.Logger) int {
-	existing, err := repo.ListByModuleSKUs(modName)
-	if err != nil {
-		if logger != nil {
-			logger.Warn("查询模块现有 SKU 失败，跳过下架", zap.String("module", modName), zap.Error(err))
-		}
-		return 0
-	}
-	n := 0
-	for _, it := range existing {
-		if it.Status != model.AgentStatusApproved {
-			continue
-		}
-		mf, err := it.Manifest()
-		if err != nil || mf == nil {
-			continue
-		}
-		if mf.Metadata["auto_sku_module"] != "" {
-			continue // auto 派生 SKU，由 DeriveSKUs 管理
-		}
-		fileBase := strings.TrimPrefix(it.ID, modName+"-")
-		if seenFiles[fileBase] {
-			continue // 源文件仍存在
-		}
-		if err := repo.UpdateStatus(it.ID, model.AgentStatusDelisted); err != nil {
-			if logger != nil {
-				logger.Warn("下架陈旧手写 SKU 失败", zap.String("id", it.ID), zap.Error(err))
-			}
-			continue
-		}
-		n++
-		if logger != nil {
-			logger.Info("下架陈旧手写 SKU（源文件已删除）", zap.String("id", it.ID), zap.String("module", modName))
-		}
-	}
-	return n
-}
-
-// moduleDirHasJSON 判断模块目录有合法 module.json（含 id）。sku_scope 已随 T1.3 移除，
-// 本函数仅用于区分「有 module.json 的模块」与「仅 SKILL.md 的 prompt-only skill」目录。
-// 支持新格式 id 与旧格式 module_id。
-func moduleDirHasJSON(path string) bool {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	var mod struct {
-		ID       string `json:"id"`
-		ModuleID string `json:"module_id"` // 兼容旧格式
-	}
-	if err := json.Unmarshal(data, &mod); err != nil {
-		return false
-	}
-	id := mod.ID
-	if id == "" {
-		id = mod.ModuleID
-	}
-	return id != ""
-}
-
-// readModuleOrigin 读 module.json 的 origin（T1.3 取代旧 sku_scope）。
-func readModuleOrigin(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	var mod struct {
-		Origin string `json:"origin"`
-	}
-	_ = json.Unmarshal(data, &mod)
-	return mod.Origin
-}
-
-// originIncluded 判断该模块的 origin 是否被当前 side 收录（T1.3 取代旧 scopeIncluded）。
-// cloud 侧不收录 builtin（claw 内置模块，如 mcp-stdio-echo 不应出现在云端 seed/catalog）；
-// claw 侧收录本地 marketplace 全部（builtin 内置 + cloud 官方副本 + user 本地创作）。
-func originIncluded(origin, side string) bool {
-	if side == "claw" {
-		return true
-	}
-	return origin != "builtin"
-}
-
-// shouldSyncManifest 判断是否需要用 marketplace 文件中的 manifest 覆盖数据库值。
-// 仅当文件加载成功（非空、非 "{}"）且与数据库内容不一致时才覆盖：
-// 既能让历史预置的旧 manifest 自动补齐后续新增字段（如 credentials/price），
-// 又避免容器内缺少 marketplace 目录时用空 JSON 冲掉有效数据。
-func shouldSyncManifest(existing, fromFile string) bool {
-	if fromFile == "" || fromFile == "{}" {
-		return false
-	}
-	return strings.TrimSpace(existing) != strings.TrimSpace(fromFile)
-}
-
-// syncPromptSkillSKU 处理「只有 SKILL.md 无 module.json」的 prompt-only skill 目录。
-//
-// Anthropic 标准 SKILL.md 直接丢进 marketplace/ 即用：1 SKILL.md = 1 SKU，
-// body 作为 SystemPrompt 注入对话，不建 SkillRuntime（纯 prompt 无进程/docker）。
-// 派生 SKU ID = skillmd-<frontmatter.name>，driver=none（checkModuleOnline/
-// checkDriverRegistered 对 none 一律返回 可用/已注册，故可展示可购买）。
-//
-// 端不过滤：SKILL.md 出现在哪一侧的 marketplace 就在哪一侧注册
-// （cloud/claw 的 marketplace 目录内容不同，自然区分；各端只收录本端目录）。
-// frontmatter metadata.category 可覆盖默认分类「提示」。
-//
-// 返回 (created, synced, skipped) 计数，由调用方累加。无 SKILL.md 或解析失败时全 0（跳过）。
-func syncPromptSkillSKU(repo *repository.AgentRepo, root, modName, adminID string, now time.Time, logger *zap.Logger) (int, int, int) {
-	skillmd, err := service.ParseSkillMD(filepath.Join(root, modName, "SKILL.md"))
-	if err != nil {
-		// 无 SKILL.md 或 frontmatter 不合法：非 prompt-only skill 目录，静默跳过。
-		return 0, 0, 0
-	}
-	agentID := "skillmd-" + strings.TrimSpace(skillmd.Name)
-	body := skillmd.Body
-	category := "提示"
-	if skillmd.Metadata != nil {
-		if c, ok := skillmd.Metadata["category"].(string); ok && strings.TrimSpace(c) != "" {
-			category = c
-		}
-	}
-	// 极简 ToolManifest：driver=none 标识 prompt-only，SystemPrompt 存 AgentItem 字段
-	// （ToolManifest 无 system_prompt 字段，SKILL.md 是 prompt-only SKU 的源格式，并行于 skus/*.json）。
-	manifest := &model.ToolManifest{
-		ID:          agentID,
-		Name:        skillmd.Name,
-		Description: skillmd.Description,
-		Driver:      model.ToolDriverNone,
-		Category:    category,
-		Parameters:  map[string]interface{}{},
-	}
-	manifestJSON, err := json.Marshal(manifest)
-	if err != nil {
-		if logger != nil {
-			logger.Warn("序列化 prompt-only skill manifest 失败", zap.String("id", agentID), zap.Error(err))
-		}
-		return 0, 0, 0
-	}
-	manifestStr := string(manifestJSON)
-
-	existing, err := repo.GetByID(agentID)
-	if err == nil && existing != nil {
-		// SKILL.md 是源格式：body/name/desc 任一变化即同步（不同于 shouldSyncManifest 比 manifest_json）。
-		if existing.SystemPrompt == body && existing.Name == skillmd.Name && existing.Description == skillmd.Description {
-			return 0, 0, 1
-		}
-		existing.ManifestJSON = manifestStr
-		existing.Name = skillmd.Name
-		existing.Description = skillmd.Description
-		existing.Category = category
-		existing.SystemPrompt = body
-		if err := repo.Update(existing); err != nil {
-			if logger != nil {
-				logger.Warn("同步 prompt-only skill 失败", zap.String("id", agentID), zap.Error(err))
-			}
-			return 0, 0, 0
-		}
-		return 0, 1, 0
-	}
-	item := &model.AgentItem{
-		ID:           agentID,
-		Name:         skillmd.Name,
-		Description:  skillmd.Description,
-		Category:     category,
-		SystemPrompt: body,
-		ManifestJSON: manifestStr,
-		Status:       model.AgentStatusApproved,
-		CreatorID:    adminID,
-		CreatorName:  "官方",
-		CreatedAt:    now,
-	}
-	if err := repo.Create(item); err != nil {
-		if logger != nil {
-			logger.Warn("创建 prompt-only skill SKU 失败", zap.String("id", agentID), zap.Error(err))
-		}
-		return 0, 0, 0
-	}
-	return 1, 0, 0
+	return rescanMarketplace(svc, logger)
 }

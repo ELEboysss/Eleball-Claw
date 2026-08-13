@@ -145,7 +145,11 @@ func TestPackageModule_ScriptModule(t *testing.T) {
 	// 回扫验证：解压到新 marketplace 根的 <id>/ 下，扫描器应读回带 user 来源的运行时。
 	root2 := t.TempDir()
 	extractTarGzTo(t, res.Data, filepath.Join(root2, moduleID))
-	require.NoError(t, svc.ensureMarketplaceModules(root2, zap.NewNop()))
+	// 本测试已 t.Setenv 过 CLAW_MARKETPLACE_DIR（root），此处手动切到 root2 后回扫；
+	// claw RescanPackage 经包级 ResolveMarketplaceRoot 读该变量。
+	os.Setenv("CLAW_MARKETPLACE_DIR", root2)
+	defer os.Unsetenv("CLAW_MARKETPLACE_DIR")
+	require.NoError(t, svc.RescanPackage("claw", zap.NewNop()))
 	rt, err := svc.repo.GetByID(moduleID)
 	require.NoError(t, err)
 	require.NotNil(t, rt)
@@ -209,7 +213,10 @@ func TestPackageModule_MCPRuntime(t *testing.T) {
 	// 回扫验证
 	root2 := t.TempDir()
 	extractTarGzTo(t, res.Data, filepath.Join(root2, moduleID))
-	require.NoError(t, svc.ensureMarketplaceModules(root2, zap.NewNop()))
+	// 本测试已 t.Setenv 过 CLAW_MARKETPLACE_DIR（root），此处手动切到 root2 后回扫
+	os.Setenv("CLAW_MARKETPLACE_DIR", root2)
+	defer os.Unsetenv("CLAW_MARKETPLACE_DIR")
+	require.NoError(t, svc.RescanPackage("claw", zap.NewNop()))
 	rt2, err := svc.repo.GetByID(moduleID)
 	require.NoError(t, err)
 	require.NotNil(t, rt2)

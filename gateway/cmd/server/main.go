@@ -350,17 +350,11 @@ func main() {
 	skillRuntimeManager := service.NewSkillRuntimeManager(skillRuntimeRegistry, logger)
 	moduleService := service.NewModuleService(skillRuntimeRegistry, skillRuntimeManager, skillRuntimeRepo, agentRepo)
 
-	// 自动扫描 marketplace/ 目录，根据 module.json 确保官方内置 SkillRuntime 存在。
-	// 新增官方内置模块时，只需在 marketplace/ 下新增目录和 module.json，无需改代码。
+	// T2.2 收敛：AutoEnsureMarketplaceModules 经 RescanPackage 一次扫描同时物化
+	// SkillRuntime（tool/mcp 运行时）与 AgentItem（手写 skus/*.json + 派生 + prompt-only SKILL.md），
+	// 不再区分「模块补齐」与「官方 SKU 同步」两步。
 	if err := seed.AutoEnsureMarketplaceModules(moduleService, logger); err != nil {
 		logger.Warn("自动补齐内置 SkillRuntime 失败", zap.Error(err))
-	}
-
-	// 泛化同步官方 SKU（claw 收录本地 marketplace 全部，含 builtin 内置 + cloud 官方副本）：
-	// 启动即按 marketplace/<mod>/skus/*.json 同步 manifest（含 credentials/price），
-	// 不再依赖 --seed。已存在且 manifest 一致则跳过，保留 rating/counts 等统计。
-	if err := seed.SyncOfficialSKUs(agentRepo, "claw", logger); err != nil {
-		logger.Warn("同步官方 SKU 失败", zap.Error(err))
 	}
 
 	// 若指定 --seed，写入示例模块与 SKU 后退出；不启动 HTTP 服务。

@@ -94,7 +94,8 @@ func main() {
 	}
 
 	if *onlySKUs {
-		if err := seed.SyncOfficialSKUs(agentRepo, "cloud", logger); err != nil {
+		// T2.2 收敛：SKU 物化并入 RescanPackage，与 --modules 等价（全量物化 SkillRuntime + SKU）。
+		if err := seed.BuiltinModules(moduleSvc, logger); err != nil {
 			logger.Fatal("同步官方 SKU 失败", zap.Error(err))
 		}
 		fmt.Println("官方 SKU 同步完成")

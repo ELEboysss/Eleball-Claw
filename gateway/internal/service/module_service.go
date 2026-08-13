@@ -16,7 +16,6 @@ import (
 	"github.com/eleball/gateway/marketplace"
 	"github.com/eleball/gateway/pkg/llm"
 	"github.com/google/uuid"
-	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -418,6 +417,7 @@ type marketplaceModuleManifest struct {
 	AllowedTools      []string                       `json:"allowed_tools,omitempty"`    // G2 工具白名单（非空时仅保留）
 	DisallowedTools   []string                       `json:"disallowed_tools,omitempty"` // G2 工具黑名单（始终排除）
 	Capabilities      []string                       `json:"capabilities"`
+	Version           string                         `json:"version,omitempty"` // 模块语义版本（可选，catalog/下载比对用）
 	MCPServerConfig   *model.MCPServerConfig         `json:"mcp_server_config,omitempty"`
 	Driver            struct {
 		ID          string `json:"driver_id"`
@@ -456,26 +456,6 @@ func (m *marketplaceModuleManifest) GetDeployment() string {
 		return m.Deployment
 	}
 	return "docker"
-}
-
-// RescanMarketplace 运行时重新扫描 marketplace 目录，根据 module.json
-// 自动补齐官方内置模块记录与驱动别名。新增官方模块时无需重启 gateway，
-// 也无需走后台手动注册。
-func (s *ModuleService) RescanMarketplace(logger *zap.Logger) error {
-	root, err := EnsureMarketplaceRoot()
-	if err != nil {
-		if logger != nil {
-			logger.Warn("初始化 marketplace 目录失败，跳过内置模块自动补齐", zap.Error(err))
-		}
-		return nil
-	}
-	if root == "" {
-		if logger != nil {
-			logger.Warn("未找到 marketplace 目录，跳过内置模块自动补齐")
-		}
-		return nil
-	}
-	return s.ensureMarketplaceModules(root, logger)
 }
 
 // ResolveMarketplaceRoot 解析 marketplace 根目录：
@@ -573,8 +553,8 @@ func (s *ModuleService) WriteUserModule(req UserModuleGenerateRequest, tools []M
 		return nil, err
 	}
 
-	// rescan 注册 SkillRuntime（含 AutoSKU/Credentials/DriverID）
-	if err := s.RescanMarketplace(nil); err != nil {
+	// rescan 注册 SkillRuntime（含 AutoSKU/Credentials/DriverID）；claw 侧收录全部来源
+	if err := s.RescanPackage("claw", nil); err != nil {
 		return nil, fmt.Errorf("rescan 失败: %w", err)
 	}
 
@@ -614,7 +594,7 @@ func (s *ModuleService) ApplyCloudPackage(pkg model.ModulePackage) (*model.Skill
 	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建模块目录失败: %w", err)
 	}
-	// module.json（云端原文，含 origin 显式标记，ensureMarketplaceModules 据 IsOfficial 推断 Official）
+	// module.json（云端原文，含 origin 显式标记，RescanPackage 据 IsOfficial 推断 Official）
 	if err := os.WriteFile(filepath.Join(moduleDir, "module.json"), pkg.ModuleJSON, 0o644); err != nil {
 		return nil, fmt.Errorf("写 module.json 失败: %w", err)
 	}
@@ -638,7 +618,7 @@ func (s *ModuleService) ApplyCloudPackage(pkg model.ModulePackage) (*model.Skill
 		}
 	}
 	// rescan 注册 SkillRuntime
-	if err := s.RescanMarketplace(nil); err != nil {
+	if err := s.RescanPackage("claw", nil); err != nil {
 		return nil, fmt.Errorf("rescan 失败: %w", err)
 	}
 	rec, err := s.GetModule(pkg.ModuleID)
@@ -920,122 +900,6 @@ func (s *ModuleService) TestCall(ctx context.Context, moduleID string, req TestC
 		args = map[string]interface{}{}
 	}
 	return s.registry.Execute(moduleID, req.ToolName, args, userID)
-}
-
-func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger) error {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		path := filepath.Join(root, entry.Name(), "module.json")
-		data, err := os.ReadFile(path)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return err
-		}
-		var m marketplaceModuleManifest
-		if err := json.Unmarshal(data, &m); err != nil {
-			if logger != nil {
-				logger.Warn("解析 module.json 失败", zap.String("path", path), zap.Error(err))
-			}
-			continue
-		}
-		moduleID := m.GetID()
-		if moduleID == "" || m.Driver.ID == "" {
-			if logger != nil {
-				logger.Warn("module.json 缺少必填字段", zap.String("path", path))
-			}
-			continue
-		}
-
-		transport := parseSkillRuntimeTransport(m.GetTransport())
-		deployment := parseSkillRuntimeDeployment(m.GetDeployment())
-		endpoint := m.GetEndpoint()
-		if transport == model.SkillRuntimeTransportMCPHTTP && m.MCPServerConfig != nil {
-			endpoint = m.MCPServerConfig.URL
-		}
-
-		existing, err := s.repo.GetByID(moduleID)
-		if err != nil {
-			existing = nil
-		}
-
-		// Official 据 origin 推断（T1.3，防伪造）：builtin 恒官方；cloud 仅官方维护列表内官方；
-		// user 一律非官方。T11 发布的 user 模块 module.json 带 origin=user，扫描回读即正确标非官方。
-		origin := model.SkillRuntimeOrigin(m.Origin)
-		official := origin.IsOfficial(moduleID)
-
-		rt := &model.SkillRuntime{
-			ID:                moduleID,
-			Name:              m.Name,
-			Description:       m.Description,
-			Source:            model.SkillRuntimeSource(m.Source),
-			Origin:            origin,
-			Actor:             m.Actor,
-			Transport:         transport,
-			Deployment:        deployment,
-			Endpoint:          endpoint,
-			Command:           m.Command,
-			WorkDir:           m.WorkDir,
-			DockerComposePath: m.DockerComposePath,
-			Official:          official,
-			DriverID:          m.Driver.ID,
-			AutoSKU:           m.AutoSKU,
-		}
-		rt.SetArgs(m.Args)
-		rt.SetEnv(m.Env)
-		rt.SetCredentials(m.Credentials)
-		rt.SetAllowedTools(m.AllowedTools)
-		rt.SetDisallowedTools(m.DisallowedTools)
-		if rt.Source == "" {
-			rt.Source = model.SkillRuntimeSourceMarketplace
-		}
-		if rt.DockerComposePath == "" && deployment == model.SkillRuntimeDeploymentDocker {
-			rt.DockerComposePath = filepath.Join(root, moduleID, "docker-compose.yml")
-		}
-		// process 部署默认工作目录为模块目录（spawn 时 cmd.Dir），使相对 command/args 能定位模块脚本
-		if deployment == model.SkillRuntimeDeploymentProcess && rt.WorkDir == "" {
-			rt.WorkDir = filepath.Join(root, moduleID)
-		}
-		rt.SetCapabilities(m.Capabilities)
-		if transport == model.SkillRuntimeTransportMCPHTTP && m.MCPServerConfig != nil {
-			rt.SetMCPServerConfig(m.MCPServerConfig)
-		}
-
-		if existing != nil {
-			rt.CreatedAt = existing.CreatedAt
-			rt.UpdatedAt = time.Now()
-			// process 模块跨重启后子进程已不存在，active/activating/degraded 为陈旧缓存，
-			// 重置为 installed 由探活重新判定（消除重启后"在线但会话未注册"误报）；
-			// disabled 是用户主动禁用，跨重启保留。
-			if deployment == model.SkillRuntimeDeploymentProcess && existing.Status != model.SkillRuntimeStatusDisabled {
-				rt.Status = model.SkillRuntimeStatusInstalled
-			} else {
-				rt.Status = existing.Status
-			}
-		} else {
-			rt.Status = model.SkillRuntimeStatusInstalled
-			rt.CreatedAt = time.Now()
-			rt.UpdatedAt = rt.CreatedAt
-		}
-
-		if err := s.registry.Register(rt); err != nil {
-			if logger != nil {
-				logger.Warn("自动补齐内置 SkillRuntime 失败", zap.String("id", moduleID), zap.Error(err))
-			}
-		} else {
-			if logger != nil {
-				logger.Info("已自动补齐内置 SkillRuntime", zap.String("id", moduleID), zap.String("transport", string(transport)))
-			}
-		}
-	}
-	return nil
 }
 
 // RegisterDriver 注册/更新驱动运行时（driver 已统一为 SkillRuntime，key=DriverID）
