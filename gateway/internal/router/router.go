@@ -312,7 +312,6 @@ func NewRouter(
 				admin.POST("/modules/:id/refresh", moduleHandler.RefreshModule)
 				admin.POST("/modules/rescan", moduleHandler.RescanMarketplace)
 				admin.GET("/drivers", moduleHandler.ListDrivers)
-				admin.POST("/drivers", moduleHandler.RegisterDriver)
 				admin.DELETE("/drivers/:id", moduleHandler.UnregisterDriver)
 			}
 		}

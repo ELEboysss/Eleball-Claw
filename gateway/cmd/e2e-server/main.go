@@ -5479,42 +5479,6 @@ func adminListDriversHandler(w http.ResponseWriter, r *http.Request) {
 	respondSuccess(w, map[string]interface{}{"items": items})
 }
 
-func adminRegisterDriverHandler(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		ID              string          `json:"driver_id"`
-		Name            string          `json:"name"`
-		TransportType   string          `json:"transport_type"`
-		ModuleID        string          `json:"module_id"`
-		Endpoint        string          `json:"endpoint"`
-		MCPServerConfig json.RawMessage `json:"mcp_server_config"`
-		AuthToken       string          `json:"auth_token"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, 1001, "参数错误")
-		return
-	}
-	if req.ID == "" || req.Name == "" {
-		respondError(w, 1001, "driver_id 和 name 不能为空")
-		return
-	}
-	if req.TransportType == "module" && req.ModuleID == "" && req.AuthToken == "" {
-		respondError(w, 1001, "module 型驱动必须指定 module_id 或 auth_token")
-		return
-	}
-	modulesMu.Lock()
-	defer modulesMu.Unlock()
-	e2eDrivers[req.ID] = &E2EDriver{
-		ID:              req.ID,
-		Name:            req.Name,
-		TransportType:   req.TransportType,
-		ModuleID:        req.ModuleID,
-		Endpoint:        req.Endpoint,
-		MCPServerConfig: req.MCPServerConfig,
-		AuthToken:       req.AuthToken,
-	}
-	respondSuccess(w, nil)
-}
-
 func adminUnregisterDriverHandler(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/v1/admin/drivers/")
 	modulesMu.Lock()
@@ -7284,8 +7248,6 @@ func main() {
 				switch r.Method {
 				case http.MethodGet:
 					adminListDriversHandler(w, r)
-				case http.MethodPost:
-					adminRegisterDriverHandler(w, r)
 				default:
 					http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 				}

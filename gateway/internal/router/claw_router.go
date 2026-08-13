@@ -248,9 +248,8 @@ func NewClawRouter(
 				// P4：本地秘技提交云端审核（转发云端 register）
 				console.POST("/modules/submit-review", moduleHandler.SubmitForReview)
 
-				// 本地动态驱动管理
+				// 本地动态驱动管理（driver 注册已随 RegisterDriver 退役，T5.5 仅保留列表/注销）
 				console.GET("/drivers", moduleHandler.ListDrivers)
-				console.POST("/drivers", moduleHandler.RegisterDriver)
 				console.DELETE("/drivers/:id", moduleHandler.UnregisterDriver)
 
 				// C9 二期：MCP server 一次性探测（initialize + tools/list -> tool schemas），

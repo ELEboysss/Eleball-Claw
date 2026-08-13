@@ -1109,11 +1109,6 @@ func (s *ModuleService) TestCall(ctx context.Context, moduleID string, req TestC
 	return s.registry.Execute(moduleID, req.ToolName, args, userID)
 }
 
-// RegisterDriver 注册/更新驱动运行时（driver 已统一为 SkillRuntime，key=DriverID）
-func (s *ModuleService) RegisterDriver(rt *model.SkillRuntime) error {
-	return s.registry.Register(rt)
-}
-
 // ensureDriver 确保 SKU 所需的驱动别名已存在并持有 auth_token。
 // driver 已统一为 SkillRuntime（key=DriverID），返回 driver_id 和 auth_token。
 // driver-binding 统一入口：原 AgentMarketService.ensureDriverForManifest 的逻辑收敛至此。

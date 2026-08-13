@@ -13,7 +13,6 @@ function sourceLabel(origin, actor, official) {
 
 export default function Modules() {
   const [modules, setModules] = useState([])
-  const [drivers, setDrivers] = useState([])
   const [cloudInstalled, setCloudInstalled] = useState([]) // P4：云端已购可安装模块
   const [installing, setInstalling] = useState(null) // P4：安装中 module_id
   const [starting, setStarting] = useState(null) // 「启动服务」中的 module_id
@@ -32,24 +31,12 @@ export default function Modules() {
     auth_token: ''
   })
 
-  const [driverForm, setDriverForm] = useState({
-    driver_id: '',
-    name: '',
-    description: '',
-    transport_type: 'module',
-    module_id: '',
-    endpoint: '',
-    auth_token: '',
-    schema_json: ''
-  })
-
   const fetchData = async () => {
     setLoading(true)
     setError('')
     try {
-      const [mRes, dRes] = await Promise.all([moduleApi.listModules(), moduleApi.listDrivers()])
+      const mRes = await moduleApi.listModules()
       setModules(mRes?.data?.items || mRes?.items || [])
-      setDrivers(dRes?.data?.items || dRes?.items || [])
       // P4：拉取云端已购可安装模块（失败不阻塞本地展示）
       clawMarketApi.listInstalledModules()
         .then((d) => setCloudInstalled(d?.items || d || []))
@@ -120,27 +107,6 @@ export default function Modules() {
     }
   }
 
-  const handleDriverSubmit = async (e) => {
-    e.preventDefault()
-    setError('')
-    try {
-      await moduleApi.registerDriver(driverForm)
-      setDriverForm({
-        driver_id: '',
-        name: '',
-        description: '',
-        transport_type: 'module',
-        module_id: '',
-        endpoint: '',
-        auth_token: '',
-        schema_json: ''
-      })
-      fetchData()
-    } catch (err) {
-      setError(err?.message || err || '提交失败')
-    }
-  }
-
   const handleDeleteModule = async (id) => {
     if (!window.confirm(`确定注销模块 ${id}？`)) return
     try {
@@ -193,16 +159,6 @@ export default function Modules() {
     }
   }
 
-  const handleDeleteDriver = async (id) => {
-    if (!window.confirm(`确定注销驱动 ${id}？`)) return
-    try {
-      await moduleApi.deleteDriver(id)
-      fetchData()
-    } catch (err) {
-      setError(err?.message || err || '删除失败')
-    }
-  }
-
   const formatTime = (t) => {
     if (!t) return '-'
     return new Date(t).toLocaleString('zh-CN')
@@ -218,12 +174,6 @@ export default function Modules() {
             className={`px-4 py-2 rounded-xl text-sm font-medium ${activeTab === 'modules' ? 'bg-eleball-primary text-white' : 'bg-white border border-eleball-outline'}`}
           >
             模块
-          </button>
-          <button
-            onClick={() => setActiveTab('drivers')}
-            className={`px-4 py-2 rounded-xl text-sm font-medium ${activeTab === 'drivers' ? 'bg-eleball-primary text-white' : 'bg-white border border-eleball-outline'}`}
-          >
-            驱动映射
           </button>
           <button
             onClick={() => setActiveTab('cloud')}
@@ -334,63 +284,6 @@ export default function Modules() {
                 ))}
                 {modules.length === 0 && !loading && (
                   <tr><td colSpan={8} className="px-4 py-8 text-center text-eleball-text-secondary">暂无模块</td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
-
-      {activeTab === 'drivers' && (
-        <>
-          <div className="bg-white rounded-2xl border border-eleball-outline p-6">
-            <h2 className="font-semibold mb-4">注册/更新驱动映射</h2>
-            <form onSubmit={handleDriverSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <input required value={driverForm.driver_id} onChange={(e) => setDriverForm({ ...driverForm, driver_id: e.target.value })} placeholder="驱动 ID（如 firecrawl）" className="input" />
-              <input required value={driverForm.name} onChange={(e) => setDriverForm({ ...driverForm, name: e.target.value })} placeholder="显示名称" className="input" />
-              <select value={driverForm.transport_type} onChange={(e) => setDriverForm({ ...driverForm, transport_type: e.target.value })} className="input">
-                <option value="module">module</option>
-                <option value="remote_url">remote_url</option>
-              </select>
-              <input value={driverForm.module_id} onChange={(e) => setDriverForm({ ...driverForm, module_id: e.target.value })} placeholder="关联模块 ID（module 类型与 auth_token 二选一）" className="input" />
-              <input value={driverForm.endpoint} onChange={(e) => setDriverForm({ ...driverForm, endpoint: e.target.value })} placeholder="Endpoint（remote_url 类型必填）" className="input" />
-              <input value={driverForm.auth_token} onChange={(e) => setDriverForm({ ...driverForm, auth_token: e.target.value })} placeholder="自助注册令牌（module 类型与 module_id 二选一）" className="input" />
-              <input value={driverForm.description} onChange={(e) => setDriverForm({ ...driverForm, description: e.target.value })} placeholder="描述" className="input" />
-              <div className="md:col-span-2">
-                <button type="submit" className="px-4 py-2 bg-eleball-primary text-white rounded-xl text-sm font-medium hover:bg-eleball-primary-dark transition-colors">
-                  提交
-                </button>
-              </div>
-            </form>
-          </div>
-
-          <div className="bg-white rounded-2xl border border-eleball-outline overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-eleball-surface-variant">
-                <tr>
-                  <th className="text-left px-4 py-3 font-medium">驱动 ID</th>
-                  <th className="text-left px-4 py-3 font-medium">名称</th>
-                  <th className="text-left px-4 py-3 font-medium">传输类型</th>
-                  <th className="text-left px-4 py-3 font-medium">关联模块 / Endpoint</th>
-                  <th className="text-left px-4 py-3 font-medium">注册令牌</th>
-                  <th className="text-left px-4 py-3 font-medium">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {drivers.map((d) => (
-                  <tr key={d.driver_id} className="border-t border-eleball-outline">
-                    <td className="px-4 py-3 font-mono">{d.driver_id}</td>
-                    <td className="px-4 py-3">{d.name}</td>
-                    <td className="px-4 py-3">{d.transport_type}</td>
-                    <td className="px-4 py-3">{d.module_id || d.endpoint || '-'}</td>
-                    <td className="px-4 py-3 font-mono">{d.auth_token || '-'}</td>
-                    <td className="px-4 py-3">
-                      <button onClick={() => handleDeleteDriver(d.driver_id)} className="text-red-600 hover:underline">注销</button>
-                    </td>
-                  </tr>
-                ))}
-                {drivers.length === 0 && !loading && (
-                  <tr><td colSpan={6} className="px-4 py-8 text-center text-eleball-text-secondary">暂无驱动映射</td></tr>
                 )}
               </tbody>
             </table>

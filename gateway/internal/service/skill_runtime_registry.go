@@ -220,7 +220,7 @@ func (r *SkillRuntimeRegistry) Register(runtime *model.SkillRuntime) error {
 		runtime.Capabilities = "[]"
 	}
 	// 模块来源缺失时按 side 默认（云端=cloud），覆盖所有写入路径
-	// （集市扫描/RegisterDriver/迁移）；user 由各写入点显式设置后此处保留。
+	// （集市扫描/RegisterModule/迁移）；user 由各写入点显式设置后此处保留。
 	if runtime.Origin == "" {
 		runtime.Origin = model.SkillRuntimeOriginCloud
 	}

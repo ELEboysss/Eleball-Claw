@@ -91,7 +91,6 @@ export const moduleApi = {
   startModule: (id) => client.post(`/claw-console/modules/${id}/start`),
   rescanMarketplace: () => client.post('/claw-console/modules/rescan'),
   listDrivers: () => client.get('/claw-console/drivers'),
-  registerDriver: (data) => client.post('/claw-console/drivers', data),
   deleteDriver: (id) => client.delete(`/claw-console/drivers/${id}`),
   // P4：把云端已购模块元数据安装到本地（拉镜像+签名校验+激活）
   install: (installMeta) => client.post('/claw-console/modules/install', installMeta),

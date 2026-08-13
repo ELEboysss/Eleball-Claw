@@ -174,69 +174,6 @@ func (h *ModuleHandler) ListDrivers(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": gin.H{"total": len(items), "items": items}})
 }
 
-// registerDriverRequest 管理后台驱动注册请求（driver 已并入 SkillRuntime，本结构为兼容旧 admin-web 表单）。
-// T5.3 admin-web 对齐 package 模型后移除。
-type registerDriverRequest struct {
-	ID              string                 `json:"id"`
-	Name            string                 `json:"name"`
-	Description     string                 `json:"description"`
-	TransportType   string                 `json:"transport_type"`
-	ModuleID        string                 `json:"module_id"`
-	Endpoint        string                 `json:"endpoint"`
-	AuthToken       string                 `json:"auth_token"`
-	MCPServerConfig *model.MCPServerConfig `json:"mcp_server_config"`
-}
-
-// RegisterDriver 管理后台注册/更新驱动运行时
-func (h *ModuleHandler) RegisterDriver(c *gin.Context) {
-	var req registerDriverRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "参数错误: " + err.Error()})
-		return
-	}
-
-	transport := model.SkillRuntimeTransportExecute
-	deployment := model.SkillRuntimeDeploymentExternal
-	endpoint := req.Endpoint
-	switch req.TransportType {
-	case "mcp":
-		transport = model.SkillRuntimeTransportMCPHTTP
-		if req.MCPServerConfig != nil {
-			endpoint = req.MCPServerConfig.URL
-		}
-	case "remote_url":
-		transport = model.SkillRuntimeTransportRawHTTP
-		deployment = model.SkillRuntimeDeploymentNone
-	case "module":
-		deployment = model.SkillRuntimeDeploymentDocker
-		if req.ModuleID != "" {
-			endpoint = "http://" + req.ModuleID + ":8080"
-		}
-	}
-
-	rt := &model.SkillRuntime{
-		ID:          req.ID,
-		Name:        req.Name,
-		Description: req.Description,
-		Source:      model.SkillRuntimeSourceMarketplace,
-		Transport:   transport,
-		Deployment:  deployment,
-		Endpoint:    endpoint,
-		DriverID:    req.ID,
-		AuthToken:   req.AuthToken,
-		Status:      model.SkillRuntimeStatusInstalled,
-	}
-	if req.TransportType == "mcp" && req.MCPServerConfig != nil {
-		rt.SetMCPServerConfig(req.MCPServerConfig)
-	}
-
-	if err := h.moduleService.RegisterDriver(rt); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 3001, "message": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success"})
-}
-
 // UnregisterDriver 注销驱动映射
 func (h *ModuleHandler) UnregisterDriver(c *gin.Context) {
 	id := c.Param("id")
