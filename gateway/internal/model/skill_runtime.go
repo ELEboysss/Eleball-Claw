@@ -80,15 +80,35 @@ const (
 	SkillRuntimeDeploymentExternal SkillRuntimeDeployment = "external"
 )
 
-// SkillRuntimeStatus 运行时状态
+// SkillRuntimeStatus 运行时状态（T1.4 统一状态机，单一 status 字段）
+// 完整状态：not_installed / installed / activating / active / degraded / needs_update / disabled。
+// purchased 是否已购是独立布尔（InstallStatus），不占用本枚举。
 type SkillRuntimeStatus string
 
 const (
-	SkillRuntimeStatusOnline   SkillRuntimeStatus = "online"
-	SkillRuntimeStatusOffline  SkillRuntimeStatus = "offline"
-	SkillRuntimeStatusStarting SkillRuntimeStatus = "starting"
-	SkillRuntimeStatusError    SkillRuntimeStatus = "error"
+	// SkillRuntimeStatusNotInstalled 未安装（catalog 中存在但本地未下载）
+	SkillRuntimeStatusNotInstalled SkillRuntimeStatus = "not_installed"
+	// SkillRuntimeStatusInstalled 已安装未运行
+	SkillRuntimeStatusInstalled SkillRuntimeStatus = "installed"
+	// SkillRuntimeStatusActivating 拉起中（异步启动未回写）
+	SkillRuntimeStatusActivating SkillRuntimeStatus = "activating"
+	// SkillRuntimeStatusActive 运行中
+	SkillRuntimeStatusActive SkillRuntimeStatus = "active"
+	// SkillRuntimeStatusDegraded 拉起重试耗尽或运行异常
+	SkillRuntimeStatusDegraded SkillRuntimeStatus = "degraded"
+	// SkillRuntimeStatusNeedsUpdate 检测到新版本待更新
+	SkillRuntimeStatusNeedsUpdate SkillRuntimeStatus = "needs_update"
+	// SkillRuntimeStatusDisabled 手动禁用
 	SkillRuntimeStatusDisabled SkillRuntimeStatus = "disabled"
+)
+
+// 旧枚举值兼容别名（T1.4 状态机重构：值改名后映射到新枚举）。
+// 新代码请直接用新常量；旧常量仅保证存量调用点在新语义下编译通过。
+const (
+	SkillRuntimeStatusOnline   = SkillRuntimeStatusActive    // 旧 "online"  -> active
+	SkillRuntimeStatusOffline  = SkillRuntimeStatusInstalled // 旧 "offline" -> installed
+	SkillRuntimeStatusStarting = SkillRuntimeStatusActivating // 旧 "starting" -> activating
+	SkillRuntimeStatusError    = SkillRuntimeStatusDegraded   // 旧 "error"   -> degraded
 )
 
 // SkillRuntime 统一秘技运行时记录
@@ -134,7 +154,7 @@ type SkillRuntime struct {
 	// 探活时过滤 tools/list，DeriveSKUs 只为允许的工具出 SKU（G2，对标 openhuman apply_safety_filter）。
 	AllowedTools    string             `json:"allowed_tools,omitempty"`
 	DisallowedTools string             `json:"disallowed_tools,omitempty"`
-	Status          SkillRuntimeStatus `gorm:"default:offline" json:"status"`
+	Status          SkillRuntimeStatus `gorm:"default:installed" json:"status"`
 	LastHeartbeat   *time.Time         `json:"last_heartbeat,omitempty"`
 	CreatedAt       time.Time          `json:"created_at"`
 	UpdatedAt       time.Time          `json:"updated_at"`

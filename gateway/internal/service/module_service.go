@@ -289,8 +289,8 @@ func (s *ModuleService) Start(moduleID string) (*SkillRuntimeStatusSnapshot, err
 		starter := s.dockerStarter
 		go func() {
 			if err := starter(moduleID); err != nil {
-				// 异步失败：写入状态错误，前端刷新可见离线 + 原因。
-				s.registry.SetRuntimeStatus(moduleID, model.SkillRuntimeStatusOffline, nil, err.Error())
+				// 异步失败：写入状态 degraded，前端刷新可见异常 + 原因。
+				s.registry.SetStatus(moduleID, model.SkillRuntimeStatusDegraded, nil, err.Error())
 				return
 			}
 			s.registry.ForceProbe(moduleID)
@@ -334,7 +334,7 @@ func (s *ModuleService) RegisterModuleFromPlugin(req *model.PluginRegisterReques
 		Endpoint:    req.URL,
 		Version:     req.Version,
 		AuthToken:   providedToken,
-		Status:      model.SkillRuntimeStatusOffline,
+		Status:      model.SkillRuntimeStatusInstalled,
 	}
 	rt.SetCapabilities(req.Capabilities)
 
@@ -1011,16 +1011,16 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 		if existing != nil {
 			rt.CreatedAt = existing.CreatedAt
 			rt.UpdatedAt = time.Now()
-			// process 模块跨重启后子进程已不存在，online/starting/error 为陈旧缓存，
-			// 重置为 offline 由探活/自启动重新判定（消除重启后"在线但会话未注册"误报）；
+			// process 模块跨重启后子进程已不存在，active/activating/degraded 为陈旧缓存，
+			// 重置为 installed 由探活重新判定（消除重启后"在线但会话未注册"误报）；
 			// disabled 是用户主动禁用，跨重启保留。
 			if deployment == model.SkillRuntimeDeploymentProcess && existing.Status != model.SkillRuntimeStatusDisabled {
-				rt.Status = model.SkillRuntimeStatusOffline
+				rt.Status = model.SkillRuntimeStatusInstalled
 			} else {
 				rt.Status = existing.Status
 			}
 		} else {
-			rt.Status = model.SkillRuntimeStatusOffline
+			rt.Status = model.SkillRuntimeStatusInstalled
 			rt.CreatedAt = time.Now()
 			rt.UpdatedAt = rt.CreatedAt
 		}
@@ -1075,7 +1075,7 @@ func (s *ModuleService) ensureDriver(driverID, name, description string) (string
 		Deployment:  model.SkillRuntimeDeploymentDocker,
 		DriverID:    driverID,
 		AuthToken:   token,
-		Status:      model.SkillRuntimeStatusOffline,
+		Status:      model.SkillRuntimeStatusInstalled,
 	}
 	if err := s.registry.Register(rt); err != nil {
 		return "", "", err
@@ -1140,7 +1140,7 @@ func (s *ModuleService) InstallMCPRuntime(req *MCPInstallRequest, tools []MCPToo
 		Deployment:  deployment,
 		AutoSKU:     true,
 		DriverID:    runtimeID, // 自驱动
-		Status:      model.SkillRuntimeStatusOffline,
+		Status:      model.SkillRuntimeStatusInstalled,
 	}
 	rt.Origin = model.SkillRuntimeOriginUser // type4b：MCP 安装 fold 进 user，actor=MCP 名
 	rt.Actor = req.Name
@@ -1404,10 +1404,10 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Ski
 	}
 
 	// 触发一次健康探测刷新状态
-	record.Status = model.SkillRuntimeStatusOffline
+	record.Status = model.SkillRuntimeStatusInstalled
 	if st := s.registry.ForceProbe(meta.ModuleID); st != nil {
 		if st.Online {
-			record.Status = model.SkillRuntimeStatusOnline
+			record.Status = model.SkillRuntimeStatusActive
 		}
 		record.Version = st.Version
 		record.SetCapabilities(st.Capabilities)

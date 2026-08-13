@@ -84,7 +84,7 @@ func (h *ModuleHandler) RegisterModule(c *gin.Context) {
 		Source:      model.SkillRuntimeSourceMarketplace,
 		Endpoint:    req.URL,
 		Version:     req.Version,
-		Status:      model.SkillRuntimeStatusOffline,
+		Status:      model.SkillRuntimeStatusInstalled,
 	}
 	switch req.TransportType {
 	case "mcp":
@@ -224,7 +224,7 @@ func (h *ModuleHandler) RegisterDriver(c *gin.Context) {
 		Endpoint:    endpoint,
 		DriverID:    req.ID,
 		AuthToken:   req.AuthToken,
-		Status:      model.SkillRuntimeStatusOffline,
+		Status:      model.SkillRuntimeStatusInstalled,
 	}
 	if req.TransportType == "mcp" && req.MCPServerConfig != nil {
 		rt.SetMCPServerConfig(req.MCPServerConfig)

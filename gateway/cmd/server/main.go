@@ -176,6 +176,19 @@ func main() {
 		}
 	}
 
+	// 兼容迁移：旧状态枚举值 → 新枚举（T1.4 统一状态机）。
+	// 值映射：online→active、offline→installed、starting→activating、error→degraded；
+	// 已是新值/空值原样保留。幂等，仅当次映射旧值。
+	if err := db.Exec(`UPDATE skill_runtimes SET status = CASE status
+			WHEN 'online' THEN 'active'
+			WHEN 'offline' THEN 'installed'
+			WHEN 'starting' THEN 'activating'
+			WHEN 'error' THEN 'degraded'
+			ELSE status END
+			WHERE status IN ('online','offline','starting','error')`).Error; err != nil {
+		logger.Warn("迁移 skill_runtimes.status 旧枚举值失败", zap.Error(err))
+	}
+
 	// 订单幂等兜底：支付宝交易号部分唯一索引（空串为管理员确认/CDK 等非渠道订单，不参与唯一约束）。
 	// 防支付宝重复通知或并发回调导致同一 trade_no 入账两次。
 	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_trade_no ON orders(trade_no) WHERE trade_no <> ''").Error; err != nil {

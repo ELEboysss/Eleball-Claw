@@ -19,13 +19,15 @@ import (
 	"go.uber.org/zap"
 )
 
-// SkillRuntimeStatusSnapshot 运行时状态快照
+// SkillRuntimeStatusSnapshot 运行时状态快照（T1.4 统一状态机）
+// Status 为完整状态枚举；Online 由 Status==active 派生，保留给在线门控（agent_tool_loader / driver）。
 type SkillRuntimeStatusSnapshot struct {
-	RuntimeID    string   `json:"runtime_id"`
-	Version      string   `json:"version"`
-	Online       bool     `json:"online"`
-	Capabilities []string `json:"capabilities,omitempty"`
-	Error        string   `json:"error,omitempty"`
+	RuntimeID    string                   `json:"runtime_id"`
+	Version      string                   `json:"version"`
+	Status       model.SkillRuntimeStatus `json:"status"`
+	Online       bool                     `json:"online"`
+	Capabilities []string                 `json:"capabilities,omitempty"`
+	Error        string                   `json:"error,omitempty"`
 	CheckedAt    time.Time
 }
 
@@ -42,6 +44,7 @@ type SkillRuntimeRegistry struct {
 	stopCh        chan struct{}
 	startOnce     sync.Once
 	probeInterval time.Duration
+	statusHandler func(runtimeID string, status model.SkillRuntimeStatus) // T1.4 状态变更推送
 	mcpHTTP       *MCPHTTPProtocol        // 用于 MCP HTTP 探活
 	mcpStdio      *MCPStdioProtocol       // 用于 MCP stdio 探活与调用（与 Manager 共享）
 	skuService    *SkillRuntimeSKUService // auto_sku 运行时探活成功后自动派生 SKU
@@ -171,6 +174,7 @@ func (r *SkillRuntimeRegistry) loadAll() {
 		r.statuses[rec.ID] = &SkillRuntimeStatusSnapshot{
 			RuntimeID:    rec.ID,
 			Version:      rec.Version,
+			Status:       rec.Status,
 			Online:       rec.Status == model.SkillRuntimeStatusOnline,
 			Capabilities: rec.CapabilitiesList(),
 			CheckedAt:    time.Time{},
@@ -190,7 +194,7 @@ func (r *SkillRuntimeRegistry) Register(runtime *model.SkillRuntime) error {
 		runtime.CreatedAt = now
 	}
 	if runtime.Status == "" {
-		runtime.Status = model.SkillRuntimeStatusOffline
+		runtime.Status = model.SkillRuntimeStatusInstalled
 	}
 	if runtime.Capabilities == "" {
 		runtime.Capabilities = "[]"
@@ -213,6 +217,7 @@ func (r *SkillRuntimeRegistry) Register(runtime *model.SkillRuntime) error {
 	r.statuses[runtime.ID] = &SkillRuntimeStatusSnapshot{
 		RuntimeID:    runtime.ID,
 		Version:      runtime.Version,
+		Status:       runtime.Status,
 		Online:       runtime.Status == model.SkillRuntimeStatusOnline,
 		Capabilities: runtime.CapabilitiesList(),
 		CheckedAt:    time.Time{},
@@ -567,32 +572,36 @@ func (r *SkillRuntimeRegistry) probeMCPStdio(runtimeID string) *SkillRuntimeStat
 	return r.setStatus(runtimeID, true, rt.Version, caps, "")
 }
 
-// SetRuntimeStatus 供 SkillRuntimeManager supervisor 更新 stdio 运行时状态
-// （starting/online/offline/error）。同时刷新请求级缓存与异步持久化。
-func (r *SkillRuntimeRegistry) SetRuntimeStatus(runtimeID string, status model.SkillRuntimeStatus, caps []string, errMsg string) {
+// SetStatus 唯一状态写入入口（T1.4）：更新内存模型 + 请求级快照 + 落库 + 推送回调。
+// 统一持久化全部状态（activating/degraded 等不再分两条路径），供 manager 启动/重连/probe 使用。
+func (r *SkillRuntimeRegistry) SetStatus(runtimeID string, status model.SkillRuntimeStatus, caps []string, errMsg string) {
 	rt := r.Get(runtimeID)
 	version := ""
 	if rt != nil {
 		version = rt.Version
 		rt.Status = status
 	}
-	online := status == model.SkillRuntimeStatusOnline
-	r.setStatus(runtimeID, online, version, caps, errMsg)
-
-	// starting/error 状态 setStatus 不会落库（它只持久化 online/offline），单独补一次
-	if r.runtimeRepo != nil && (status == model.SkillRuntimeStatusStarting || status == model.SkillRuntimeStatusError) {
-		now := time.Now()
-		rec := &model.SkillRuntime{
-			ID:        runtimeID,
-			Status:    status,
-			UpdatedAt: now,
-		}
-		rec.SetCapabilities(caps)
-		_ = r.runtimeRepo.UpdateStatus(rec)
-	}
+	r.setStatusExplicit(runtimeID, status, version, caps, errMsg)
 }
 
+// SetStatusChangeHandler 注册状态变更回调（T1.4）。回调仅在 status 实际变化时触发，幂等探测不重复推送。
+func (r *SkillRuntimeRegistry) SetStatusChangeHandler(h func(runtimeID string, status model.SkillRuntimeStatus)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.statusHandler = h
+}
+
+// setStatus 探活内部便捷入口：online 布尔映射为 active/degraded。
 func (r *SkillRuntimeRegistry) setStatus(runtimeID string, online bool, version string, caps []string, errMsg string) *SkillRuntimeStatusSnapshot {
+	status := model.SkillRuntimeStatusDegraded
+	if online {
+		status = model.SkillRuntimeStatusActive
+	}
+	return r.setStatusExplicit(runtimeID, status, version, caps, errMsg)
+}
+
+// setStatusExplicit 状态快照 + 落库 + 推送的唯一实现（同步单条路径，不做 online/offline 分支）。
+func (r *SkillRuntimeRegistry) setStatusExplicit(runtimeID string, status model.SkillRuntimeStatus, version string, caps []string, errMsg string) *SkillRuntimeStatusSnapshot {
 	if errMsg != "" && r.logger != nil {
 		r.logger.Warn("运行时健康探测失败",
 			zap.String("runtime_id", runtimeID),
@@ -602,37 +611,40 @@ func (r *SkillRuntimeRegistry) setStatus(runtimeID string, online bool, version 
 	st := &SkillRuntimeStatusSnapshot{
 		RuntimeID:    runtimeID,
 		Version:      version,
-		Online:       online,
+		Status:       status,
+		Online:       status == model.SkillRuntimeStatusActive,
 		Capabilities: caps,
 		Error:        errMsg,
 		CheckedAt:    time.Now(),
 	}
 	r.mu.Lock()
+	changed := true
+	if prev, ok := r.statuses[runtimeID]; ok && prev != nil && prev.Status == status {
+		changed = false
+	}
 	r.statuses[runtimeID] = st
+	handler := r.statusHandler
 	r.mu.Unlock()
 
-	// 异步写回 DB
+	// 落库（全部状态统一持久化；UpdateStatus 对缺失行安全 no-op）
 	if r.runtimeRepo != nil {
-		go r.persistStatus(runtimeID, online, version, caps)
+		now := time.Now()
+		record := &model.SkillRuntime{
+			ID:            runtimeID,
+			Version:       version,
+			Status:        status,
+			LastHeartbeat: &now,
+			UpdatedAt:     now,
+		}
+		record.SetCapabilities(caps)
+		_ = r.runtimeRepo.UpdateStatus(record)
+	}
+
+	// 状态变更推送（仅在状态实际变化时）
+	if changed && handler != nil {
+		handler(runtimeID, status)
 	}
 	return st
-}
-
-func (r *SkillRuntimeRegistry) persistStatus(runtimeID string, online bool, version string, caps []string) {
-	status := model.SkillRuntimeStatusOffline
-	if online {
-		status = model.SkillRuntimeStatusOnline
-	}
-	now := time.Now()
-	record := &model.SkillRuntime{
-		ID:            runtimeID,
-		Version:       version,
-		Status:        status,
-		LastHeartbeat: &now,
-		UpdatedAt:     now,
-	}
-	record.SetCapabilities(caps)
-	_ = r.runtimeRepo.UpdateStatus(record)
 }
 
 // defaultRuntimeURL 生成默认运行时地址（兼容旧逻辑）

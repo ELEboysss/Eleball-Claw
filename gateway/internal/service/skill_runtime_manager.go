@@ -84,7 +84,8 @@ func (m *SkillRuntimeManager) SetCredentialService(svc *AgentCredentialService) 
 	m.credService = svc
 }
 
-// Start 启动运行时（按 deployment 分发）
+// Start 启动运行时（T1.4 统一异步拉起：先置 activating -> 立即返回 -> startAsync 异步回写 active/degraded）。
+// none/external 已是现成服务，无需拉起，仅同步探活决定 active/degraded。
 func (m *SkillRuntimeManager) Start(runtimeID string) error {
 	rt := m.registry.Get(runtimeID)
 	if rt == nil {
@@ -97,11 +98,10 @@ func (m *SkillRuntimeManager) Start(runtimeID string) error {
 		m.registry.ForceProbe(runtimeID)
 		return nil
 
-	case model.SkillRuntimeDeploymentDocker:
-		return m.startDocker(rt)
-
-	case model.SkillRuntimeDeploymentProcess:
-		return m.startProcess(rt)
+	case model.SkillRuntimeDeploymentDocker, model.SkillRuntimeDeploymentProcess:
+		m.registry.SetStatus(runtimeID, model.SkillRuntimeStatusActivating, nil, "")
+		go m.startAsync(rt)
+		return nil
 
 	case model.SkillRuntimeDeploymentExternal:
 		// 外部服务，只注册 endpoint 并探测
@@ -111,6 +111,23 @@ func (m *SkillRuntimeManager) Start(runtimeID string) error {
 	default:
 		return fmt.Errorf("不支持的 deployment: %s", rt.Deployment)
 	}
+}
+
+// startAsync 异步执行实际拉起：docker/process 共用，成功后探活回写 active/degraded。
+func (m *SkillRuntimeManager) startAsync(rt *model.SkillRuntime) {
+	var err error
+	switch rt.Deployment {
+	case model.SkillRuntimeDeploymentDocker:
+		err = m.startDocker(rt)
+	case model.SkillRuntimeDeploymentProcess:
+		err = m.startProcess(rt)
+	}
+	if err != nil {
+		m.registry.SetStatus(rt.ID, model.SkillRuntimeStatusDegraded, nil, err.Error())
+		return
+	}
+	// 启动成功：探活决定 active/degraded（stdio 另有 superviseStdio 周期探活）
+	m.registry.ForceProbe(rt.ID)
 }
 
 // Stop 停止指定运行时。
@@ -284,8 +301,7 @@ func (m *SkillRuntimeManager) startDocker(rt *model.SkillRuntime) error {
 		return fmt.Errorf("docker compose up 失败: %w, output: %s", err, string(output))
 	}
 
-	// 启动后探测
-	m.registry.ForceProbe(rt.ID)
+	// 探活由 startAsync 统一执行（T1.4 异步拉起后回写 active/degraded）
 	return nil
 }
 
@@ -374,8 +390,8 @@ func (m *SkillRuntimeManager) startProcess(rt *model.SkillRuntime) error {
 		}
 		m.processes[rt.ID] = proc
 
-		// 更新状态为 starting
-		rt.Status = model.SkillRuntimeStatusStarting
+		// 更新状态为 activating（Start 已置，此处于 Register 刷新内存 + 落库）
+		rt.Status = model.SkillRuntimeStatusActivating
 		m.registry.Register(rt)
 
 		// 启动 supervisor（周期探活 + 掉线重连）
@@ -448,9 +464,8 @@ func (m *SkillRuntimeManager) stopProcess(rt *model.SkillRuntime) error {
 	delete(m.stopChans, rt.ID)
 	m.mu.Unlock()
 
-	// 更新状态为 offline
-	rt.Status = model.SkillRuntimeStatusOffline
-	m.registry.Register(rt)
+	// 更新状态为 installed（已停止未运行）
+	m.registry.SetStatus(rt.ID, model.SkillRuntimeStatusInstalled, nil, "")
 	return nil
 }
 
@@ -651,25 +666,25 @@ func (m *SkillRuntimeManager) reconnectStdio(rt *model.SkillRuntime) bool {
 		m.removeProcess(runtimeID)
 	}
 
-	// 超过重连上限 -> 标记 error
+	// 超过重连上限 -> 标记 degraded
 	if m.logger != nil {
-		m.logger.Warn("stdio MCP 重连超限，标记 error", zap.String("runtime_id", runtimeID))
+		m.logger.Warn("stdio MCP 重连超限，标记 degraded", zap.String("runtime_id", runtimeID))
 	}
-	m.registry.SetRuntimeStatus(runtimeID, model.SkillRuntimeStatusError, nil, "stdio MCP 重连超限")
+	m.registry.SetStatus(runtimeID, model.SkillRuntimeStatusDegraded, nil, "stdio MCP 重连超限")
 	return false
 }
 
 // probeStdioRuntime 经共享 MCPStdioProtocol 探活并更新状态。成功返回 nil。
 func (m *SkillRuntimeManager) probeStdioRuntime(rt *model.SkillRuntime) error {
 	if m.mcpStdio == nil || !m.mcpStdio.IsRegistered(rt.ID) {
-		m.registry.SetRuntimeStatus(rt.ID, model.SkillRuntimeStatusOffline, nil, "stdio 会话未注册")
+		m.registry.SetStatus(rt.ID, model.SkillRuntimeStatusDegraded, nil, "stdio 会话未注册")
 		return errors.New("stdio 会话未注册")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	tools, err := m.mcpStdio.ListTools(ctx, rt.ID)
 	if err != nil {
-		m.registry.SetRuntimeStatus(rt.ID, model.SkillRuntimeStatusOffline, nil, err.Error())
+		m.registry.SetStatus(rt.ID, model.SkillRuntimeStatusDegraded, nil, err.Error())
 		return err
 	}
 	tools = FilterTools(rt, tools) // G2：按 allowed/disallowed 过滤，caps 与 DeriveSKUs 均只见允许的工具
@@ -677,7 +692,7 @@ func (m *SkillRuntimeManager) probeStdioRuntime(rt *model.SkillRuntime) error {
 	for _, t := range tools {
 		caps = append(caps, t.Name)
 	}
-	m.registry.SetRuntimeStatus(rt.ID, model.SkillRuntimeStatusOnline, caps, "")
+	m.registry.SetStatus(rt.ID, model.SkillRuntimeStatusActive, caps, "")
 	// auto_sku 运行时：探活成功且拿到工具列表 -> 自动派生/同步 SKU
 	if m.skuService != nil {
 		m.skuService.DeriveSKUs(rt, tools)
@@ -715,8 +730,8 @@ func (m *SkillRuntimeManager) monitorProcess(runtimeID string, cmd *exec.Cmd) {
 
 	rt := m.registry.Get(runtimeID)
 	if rt != nil {
-		rt.Status = model.SkillRuntimeStatusOffline
-		m.registry.Register(rt)
+		// 进程退出 -> 已安装未运行
+		m.registry.SetStatus(runtimeID, model.SkillRuntimeStatusInstalled, nil, "")
 	}
 }
 
