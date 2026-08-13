@@ -95,17 +95,23 @@ func (s *ModuleService) materializePackageDir(modDir, side string, logger *zap.L
 
 	// 1. tools → SkillRuntime + 派生 SKU
 	for _, t := range pkg.Tools {
-		rt := buildPackageToolRuntime(modName, pkg.Version, t, origin, official, modDir)
+		rt := buildPackageToolRuntime(modName, pkg.Version, t, origin, official, modDir, side)
 		s.upsertRuntime(rt, logger)
 		skuID := modName + "-" + t.Name
 		seen[skuID] = true
 		s.upsertPackageToolSKU(modName, pkg, t, rt.ID, adminID, now, logger)
 	}
 	// 2. mcpServers → SkillRuntime + 派生 SKU
+	//    auto_sku=true（D-A）：跳过通用 {pkg}-mcp-{key} SKU，由 DeriveSKUs 派生逐工具 SKU
+	//    （mcp__{server}__{tool}，对齐 legacy firecrawl 无通用 SKU 的行为）。运行时仍注册——
+	//    DeriveSKUs 在探活拿到 tools/list 后据此派生。旧通用 SKU 不在 seen 内 → delist 下架。
 	for key, srv := range pkg.MCPServers {
-		rt := buildPackageMCPRuntime(modName, pkg.Version, key, srv, origin, official, modDir)
+		rt := buildPackageMCPRuntime(modName, pkg.Version, key, srv, origin, official, pkg.AutoSKU, modDir, side)
 		s.upsertRuntime(rt, logger)
 		skuID := modName + "-mcp-" + key
+		if pkg.AutoSKU {
+			continue // 不占 seen：旧通用 SKU（auto_sku 前的残留）交 delistStaleModuleSKUs 下架
+		}
 		seen[skuID] = true
 		s.upsertPackageMCPDerivedSKU(modName, pkg, key, srv, rt.ID, adminID, now, logger)
 	}
@@ -235,7 +241,9 @@ func (s *ModuleService) materializeLegacyModuleDir(modDir, side string, logger *
 // tool 运行时 ID = DriverID = {pkg}-{tool}：SKU manifest.Driver 据此经 GetByDriverID 定位运行时。
 // transport 映射：process→execute/process（WorkDir=模块目录）、docker→execute/docker（ImageRef）、
 // http→raw_http/external（Endpoint）。
-func buildPackageToolRuntime(pkgName, version string, t model.PackageTool, origin model.SkillRuntimeOrigin, official bool, modDir string) *model.SkillRuntime {
+// side（D-C）：docker compose 文件按 side 选择（cloud=构建版 docker-compose.yml，claw=镜像版
+// docker-compose.claw.yml），使同一 package.json 双端可物化。
+func buildPackageToolRuntime(pkgName, version string, t model.PackageTool, origin model.SkillRuntimeOrigin, official bool, modDir, side string) *model.SkillRuntime {
 	rt := &model.SkillRuntime{
 		ID:          pkgName + "-" + t.Name,
 		Name:        t.Name,
@@ -257,7 +265,7 @@ func buildPackageToolRuntime(pkgName, version string, t model.PackageTool, origi
 		rt.Transport = model.SkillRuntimeTransportExecute
 		rt.Deployment = model.SkillRuntimeDeploymentDocker
 		rt.ImageRef = t.Image
-		rt.DockerComposePath = filepath.Join(modDir, "docker-compose.yml")
+		rt.DockerComposePath = packageComposePath(modDir, side)
 	case "http":
 		rt.Transport = model.SkillRuntimeTransportRawHTTP
 		rt.Deployment = model.SkillRuntimeDeploymentExternal
@@ -269,9 +277,16 @@ func buildPackageToolRuntime(pkgName, version string, t model.PackageTool, origi
 }
 
 // buildPackageMCPRuntime 由 package.json mcpServers[] 构建 SkillRuntime（mcp 型）。
-// stdio→mcp_stdio/process（Command+Args）；http/sse→mcp_http/external（Endpoint+MCPServerConfig，
+// stdio→mcp_stdio/process（Command+Args）；http/sse→mcp_http（Endpoint+MCPServerConfig，
 // sse 优先后置 T2.5，此处按 http 连接）。
-func buildPackageMCPRuntime(pkgName, version, key string, srv model.PackageMCPServer, origin model.SkillRuntimeOrigin, official bool, modDir string) *model.SkillRuntime {
+// autoSKU（D-A）：PackageManifest.auto_sku → rt.AutoSKU，探活成功后 DeriveSKUs 派生逐工具 SKU。
+// side（D-C）决定 http/sse 的部署语义：
+//   - claw：宿主进程需本地 docker 拉起容器并经发布端口访问 → Deployment=docker，
+//     Endpoint=hostUrl（缺省回退 url），DockerComposePath=packageComposePath（.claw.yml 优先）。
+//   - cloud：模块是预部署容器（deployments/docker-compose.prod.yml 随网关同网），只探活不 spawn →
+//     Deployment=external，Endpoint=url。
+// credentials（D-B）：mcpServers 凭证声明经 rt.SetCredentials 透传，逐工具派生 SKU 继承。
+func buildPackageMCPRuntime(pkgName, version, key string, srv model.PackageMCPServer, origin model.SkillRuntimeOrigin, official, autoSKU bool, modDir, side string) *model.SkillRuntime {
 	id := pkgName + "-mcp-" + key
 	rt := &model.SkillRuntime{
 		ID:          id,
@@ -282,6 +297,7 @@ func buildPackageMCPRuntime(pkgName, version, key string, srv model.PackageMCPSe
 		Official:    official,
 		Version:     version,
 		DriverID:    id,
+		AutoSKU:     autoSKU,
 		Status:      model.SkillRuntimeStatusInstalled,
 	}
 	switch srv.Transport {
@@ -293,12 +309,36 @@ func buildPackageMCPRuntime(pkgName, version, key string, srv model.PackageMCPSe
 		rt.SetMCPServerConfig(&model.MCPServerConfig{Command: rt.Command, Args: rt.ArgsList(), Env: srv.Env})
 	case "http", "sse":
 		rt.Transport = model.SkillRuntimeTransportMCPHTTP
-		rt.Deployment = model.SkillRuntimeDeploymentExternal
-		rt.Endpoint = srv.URL
-		rt.SetMCPServerConfig(&model.MCPServerConfig{URL: srv.URL, Headers: srv.Headers})
+		if side == "claw" {
+			rt.Deployment = model.SkillRuntimeDeploymentDocker
+			rt.DockerComposePath = packageComposePath(modDir, side)
+			ep := srv.HostURL
+			if ep == "" {
+				ep = srv.URL
+			}
+			rt.Endpoint = ep
+			rt.SetMCPServerConfig(&model.MCPServerConfig{URL: ep, Headers: srv.Headers})
+		} else {
+			rt.Deployment = model.SkillRuntimeDeploymentExternal
+			rt.Endpoint = srv.URL
+			rt.SetMCPServerConfig(&model.MCPServerConfig{URL: srv.URL, Headers: srv.Headers})
+		}
 	}
 	rt.SetEnv(srv.Env)
+	rt.SetCredentials(packageCredentialsToModel(srv.Credentials))
 	return rt
+}
+
+// packageComposePath 按 side 选择 compose 文件：claw 优先 docker-compose.claw.yml（ACR 镜像 + 发布端口，
+// claw 宿主机可拉取/访问），缺失或 cloud 用 docker-compose.yml（build 版，随云端部署构建）。
+func packageComposePath(modDir, side string) string {
+	if side == "claw" {
+		clawPath := filepath.Join(modDir, "docker-compose.claw.yml")
+		if pathExists(clawPath) {
+			return clawPath
+		}
+	}
+	return filepath.Join(modDir, "docker-compose.yml")
 }
 
 // splitArgv 把 package.json 的 argv（command[0]=可执行，其余=参数）拆进 SkillRuntime Command+Args。
@@ -367,6 +407,8 @@ func (s *ModuleService) upsertPackageToolSKU(modName string, pkg *model.PackageM
 }
 
 // upsertPackageMCPDerivedSKU 派生 mcp SKU：{pkg}-mcp-{key}，driver=运行时 DriverID。
+// Credentials（D-B）：mcpServers 凭证声明透传进 SKU manifest（auto_sku=false 的 MCP SKU 也带凭证，
+// web 据此提示用户填写；auto_sku=true 时逐工具 SKU 经 buildDerivedManifest 的 rt.CredentialsMap 继承）。
 func (s *ModuleService) upsertPackageMCPDerivedSKU(modName string, pkg *model.PackageManifest, key string, srv model.PackageMCPServer, driverID, adminID string, now time.Time, logger *zap.Logger) {
 	skuID := modName + "-mcp-" + key
 	mf := model.ToolManifest{
@@ -380,6 +422,7 @@ func (s *ModuleService) upsertPackageMCPDerivedSKU(modName string, pkg *model.Pa
 		Level:       pkg.Level,
 		Parameters:  packageParametersMap(nil),
 		Metadata:    map[string]string{"module": modName, "package_module": modName, "package_derived": "mcp"},
+		Credentials: packageCredentialsToModel(srv.Credentials),
 	}
 	s.upsertSKUFromManifest(mf, adminID, now, logger)
 }
@@ -689,6 +732,9 @@ func packageParametersMap(p *model.PackageToolParameters) map[string]interface{}
 }
 
 // packageCredentialsToModel 转换凭证声明：PackageCredential → CredentialDef。
+// Scope 固定 module：package 凭证声明挂在 mcpServer/tool 上，同 server 派生的所有 SKU 共享一份凭证值
+// （存 module:<driver> 桶，与 legacy module.json 显式 "scope":"module" 对齐）；T5.1 agent-reach 21 个
+// 派生 SKU 共用同一 cookie 桶即由此而来。空 Scope 默认 sku 会要求每个 SKU 各填一份，不可取。
 func packageCredentialsToModel(creds map[string]model.PackageCredential) map[string]model.CredentialDef {
 	if len(creds) == 0 {
 		return nil
@@ -701,6 +747,7 @@ func packageCredentialsToModel(creds map[string]model.PackageCredential) map[str
 			Description: c.Description,
 			Placeholder: c.Placeholder,
 			Required:    c.Required,
+			Scope:       model.CredentialScopeModule,
 		}
 	}
 	return out

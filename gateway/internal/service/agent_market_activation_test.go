@@ -32,6 +32,9 @@ func newActivationTestSvc(t *testing.T) (*ModuleService, *AgentMarketService, *r
 	reg := NewSkillRuntimeRegistry(nil)
 	reg.SetRepo(rtRepo)
 	modSvc := NewModuleService(reg, nil, rtRepo, agentRepo)
+	// T5.1 D-D：claw 侧 http MCP 一律 docker 部署，Start 走 dockerStarter（compose 拉起）——
+	// 测试注入 no-op 回调使 docker 分支可走通（dir 即模块目录名，D-D 断言见 mcp 激活用例）。
+	modSvc.SetDockerStarter(func(string) error { return nil })
 
 	root := t.TempDir()
 	t.Setenv("CLAW_MARKETPLACE_DIR", root)

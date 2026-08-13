@@ -78,18 +78,31 @@ func autoStartModules(ctx context.Context, logger *zap.Logger, cfg config.Module
 		logger.Info("没有可自动启动的模块", zap.String("reason", err.Error()))
 		return nil
 	}
-	// 激活门控：仅上线已激活模块（docker 模块目录名 == 模块 ID）。
+	// 激活门控：仅上线已激活的模块（按运行时 ID 判定）；目录内任一运行时满足即纳入。
 	// 例外：auto_sku 模块（如 firecrawl/agent-reach）SKU 需探活在线后才派生，存在"先启动才能购买"
 	// 的鸡生蛋，故无购买记录也自动启动（与 process 部署门控 autoStartProcessRuntimes 一致）；
 	// 用户可在控制台禁用（Status=disabled）不需要的模块。
+	// package 布局下运行时 ID={pkg}-mcp-{key} ≠ 目录名，registry.Get(目录名) 取不到 → 先建
+	// dir→runtimes 映射（dirOf 由 DockerComposePath 反解目录）再按目录门控；legacy（rt.ID==目录名）兼容。
+	byDir := map[string][]*model.SkillRuntime{}
+	if registry != nil {
+		for _, st := range registry.List() {
+			rt := registry.Get(st.RuntimeID)
+			if rt == nil {
+				continue
+			}
+			if d := dirOf(rt); d != "" {
+				byDir[d] = append(byDir[d], rt)
+			}
+		}
+	}
 	filtered := make([]string, 0, len(targets))
 	for _, name := range targets {
-		if activated[name] {
-			filtered = append(filtered, name)
-			continue
-		}
-		if rt := registry.Get(name); rt != nil && rt.AutoSKU && rt.Status != model.SkillRuntimeStatusDisabled {
-			filtered = append(filtered, name)
+		for _, rt := range byDir[name] {
+			if activated[rt.ID] || (rt.AutoSKU && rt.Status != model.SkillRuntimeStatusDisabled) {
+				filtered = append(filtered, name)
+				break
+			}
 		}
 	}
 	if len(filtered) == 0 {
@@ -183,18 +196,43 @@ func autoStopModules(logger *zap.Logger, names []string) {
 	}
 }
 
+// moduleComposeFile 返回模块目录下优先的 compose 文件：docker-compose.claw.yml（云端下发的
+// ACR 镜像 + 发布端口版，claw 宿主机可拉取/访问）优先；无则回退 docker-compose.yml（legacy 内置 /
+// 云端构建版）。claw-server 是 package main，用 os.Stat 判存在。
+func moduleComposeFile(root, name string) string {
+	claw := filepath.Join(root, name, "docker-compose.claw.yml")
+	if _, err := os.Stat(claw); err == nil {
+		return claw
+	}
+	return filepath.Join(root, name, "docker-compose.yml")
+}
+
 // composeRun 执行 docker compose -f <compose> -p eleball-claw-<name> <args...>
+// D-D：compose 文件经 moduleComposeFile 选择（.claw.yml 优先），覆盖 startModule / autoStopModules。
 func composeRun(ctx context.Context, root, name string, timeout time.Duration, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	compose := filepath.Join(root, name, "docker-compose.yml")
-	dargs := append([]string{"compose", "-f", compose, "-p", "eleball-claw-" + name}, args...)
+	dargs := append([]string{"compose", "-f", moduleComposeFile(root, name), "-p", "eleball-claw-" + name}, args...)
 	cmd := service.DockerCommand(ctx, dargs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return &composeError{module: name, output: string(out), err: err}
 	}
 	return nil
+}
+
+// dirOf 解析运行时所属的 marketplace 目录名：package 布局 DockerComposePath={modDir}/docker-compose[.claw].yml
+// → 父目录 basename；无 compose（或路径退化）回退 rt.ID（legacy 布局 ID==目录名，天然兼容）。
+func dirOf(rt *model.SkillRuntime) string {
+	if rt == nil {
+		return ""
+	}
+	if rt.DockerComposePath != "" {
+		if base := filepath.Base(filepath.Dir(rt.DockerComposePath)); base != "" && base != "." {
+			return base
+		}
+	}
+	return rt.ID
 }
 
 // dockerPull 拉取模块镜像（docker pull <ref>），超时/失败由调用方按策略回退或报错

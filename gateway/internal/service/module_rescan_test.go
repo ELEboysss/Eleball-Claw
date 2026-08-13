@@ -332,6 +332,53 @@ func TestRescanPackage_PackageOriginSidecar(t *testing.T) {
 	assert.Equal(t, model.SkillRuntimeOriginBuiltin, rt2.Origin)
 }
 
+// TestRescanPackage_OfficialMCPPackageClaw 验证 T5.1 D-C：官方模块 package（auto_sku=true + hostUrl +
+// docker-compose.claw.yml）在 claw 侧物化——MCP http 运行时 Deployment=docker（云端下载包由 claw 拉起容器）、
+// Endpoint 取 hostUrl（宿主机可达）、DockerComposePath 指向 .claw.yml（ACR 镜像版）、auto_sku=true、
+// official=true（origin=cloud + OfficialModuleIDs）；auto_sku=true 跳过通用 {pkg}-mcp-{key} SKU
+// （探活后由 DeriveSKUs 派生逐工具 SKU），credentials 透传进运行时。
+func TestRescanPackage_OfficialMCPPackageClaw(t *testing.T) {
+	svc, agentRepo, root := newRescanTestSvc(t)
+	modDir := filepath.Join(root, "agent-reach")
+	require.NoError(t, os.MkdirAll(modDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(modDir, "package.json"), []byte(agentReachFixturePackageJSON), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(modDir, ".origin"), []byte("cloud"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(modDir, "docker-compose.claw.yml"), []byte("version: '3'\nservices:\n  agent-reach:\n    image: example.registry/eleball/agent-reach:develop\n    ports:\n      - \"8094:8080\"\n"), 0o644))
+
+	require.NoError(t, svc.RescanPackage("claw", zap.NewNop()))
+
+	// package 布局运行时 ID={pkg}-mcp-{key}=agent-reach-mcp-main（非目录名）
+	rt, err := svc.GetModule("agent-reach-mcp-main")
+	require.NoError(t, err)
+	require.NotNil(t, rt)
+	assert.Equal(t, model.SkillRuntimeTransportMCPHTTP, rt.Transport)
+	assert.Equal(t, model.SkillRuntimeDeploymentDocker, rt.Deployment, "claw 侧 http MCP 应 docker 部署")
+	assert.Equal(t, "http://127.0.0.1:8094", rt.Endpoint, "Endpoint 取 hostUrl（宿主机可达）")
+	assert.True(t, rt.Official)
+	assert.True(t, rt.AutoSKU)
+	assert.Equal(t, model.SkillRuntimeOriginCloud, rt.Origin)
+	require.NotEmpty(t, rt.DockerComposePath, "claw 侧 http MCP 应带 DockerComposePath（Start 据此拉起容器）")
+	assert.True(t, strings.HasSuffix(rt.DockerComposePath, "docker-compose.claw.yml"), rt.DockerComposePath)
+
+	cfg := rt.GetMCPServerConfig()
+	require.NotNil(t, cfg)
+	assert.Equal(t, "http://127.0.0.1:8094", cfg.URL)
+	assert.Equal(t, "${credentials.github_token}", cfg.Headers["X-Github-Token"])
+
+	creds := rt.CredentialsMap()
+	require.Len(t, creds, 6)
+	assert.Equal(t, model.CredentialTypeAPIKey, creds["github_token"].Type)
+	assert.Equal(t, model.CredentialScopeModule, creds["github_token"].Scope)
+
+	// auto_sku=true：通用 {pkg}-mcp-{key} SKU 不物化（由 DeriveSKUs 探活后派生逐工具 SKU），
+	// 本包无 tools/skills/skus → 一个 AgentItem 都不派生
+	_, err = agentRepo.GetByID("agent-reach-mcp-main")
+	assert.Error(t, err)
+	total, err := agentRepo.Count()
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), total)
+}
+
 // TestApplyPackage_FullLanding 验证 T4.2 整包落盘：ApplyPackage 把 PackageBundle 解包到
 // marketplace/<id>/（package.json + .origin + skills/*/SKILL.md + skus/*.json + tools_files），
 // RescanPackage 物化 MCP 运行时 + 派生 SKU + 手写 SKU。skill/mcp/tool 三类全落盘。
@@ -370,14 +417,16 @@ func TestApplyPackage_FullLanding(t *testing.T) {
 	assert.FileExists(t, filepath.Join(modDir, "main.py"))
 	assert.FileExists(t, filepath.Join(modDir, "skus", "echo.json"))
 
-	// MCP 运行时物化（http → MCPHTTP/External）
+	// MCP 运行时物化（http → MCPHTTP/Docker：T5.1 D-C 后 claw 侧 http MCP 一律 docker 部署，
+	// 由 claw 拉起容器——云端下载包如此，本包无 hostUrl 故 Endpoint 回退 url）
 	rt, err := svc.GetModule("demo-pkg-mcp-main")
 	require.NoError(t, err)
 	assert.Equal(t, model.SkillRuntimeOriginUser, rt.Origin, ".origin 侧车决定 provenance")
 	assert.Equal(t, model.SkillRuntimeTransportMCPHTTP, rt.Transport)
-	assert.Equal(t, model.SkillRuntimeDeploymentExternal, rt.Deployment)
+	assert.Equal(t, model.SkillRuntimeDeploymentDocker, rt.Deployment)
 	assert.Equal(t, "http://127.0.0.1:1/mcp", rt.Endpoint)
 	assert.Equal(t, "1.0.0", rt.Version)
+	require.NotEmpty(t, rt.DockerComposePath)
 
 	// 派生 MCP SKU + skill SKU + 手写 echo SKU 全部物化（skill/mcp/tool 三类）
 	for _, skuID := range []string{"demo-pkg-mcp-main", "demo-pkg-skill-writer", "demo-pkg-echo"} {

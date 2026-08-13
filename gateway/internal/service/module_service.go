@@ -328,9 +328,19 @@ func (s *ModuleService) Start(moduleID string) (*SkillRuntimeStatusSnapshot, err
 		if s.dockerStarter == nil {
 			return nil, errors.New("docker 启动未配置")
 		}
+		// D-D：dockerStarter 收模块目录名而非 runtime ID——package 布局下 runtime ID 是
+		// {pkg}-mcp-{key}（含 -mcp-main 后缀），但 compose 以目录 {pkg}/ 为单位。
+		// DockerComposePath={modDir}/docker-compose[.claw].yml → 取父目录 basename；legacy 布局
+		// （rt.ID==目录名）回退 moduleID。claw-server main 已按目录名解析 compose 文件。
+		dir := moduleID
+		if rt.DockerComposePath != "" {
+			if base := filepath.Base(filepath.Dir(rt.DockerComposePath)); base != "" && base != "." {
+				dir = base
+			}
+		}
 		starter := s.dockerStarter
 		go func() {
-			if err := starter(moduleID); err != nil {
+			if err := starter(dir); err != nil {
 				// 异步失败：写入状态 degraded，前端刷新可见异常 + 原因。
 				s.registry.SetStatus(moduleID, model.SkillRuntimeStatusDegraded, nil, err.Error())
 				return
@@ -577,17 +587,23 @@ func (s *ModuleService) WriteUserModule(req UserModuleGenerateRequest, tools []M
 		return nil, errors.New("无法推导合法 module_id，请显式传入")
 	}
 
-	// 禁止覆盖官方模块
-	if existing := s.registry.Get(moduleID); existing != nil && existing.Official {
-		return nil, fmt.Errorf("模块 ID %s 与官方模块冲突，请换一个", moduleID)
-	}
-
+	// 禁止覆盖官方模块：registry 命中（legacy 布局 rt.ID==目录名）或 marketplace 目录按 origin 推断
+	// （package 布局 runtime ID={pkg}-mcp-{key} ≠ 目录名，registry.Get(moduleID) 取不到——T5.1 官方模块
+	// 全部 package 化后必须按目录判定，否则用户可写 module_id=agent-reach 覆盖官方包）。
 	root, err := EnsureMarketplaceRoot()
 	if err != nil {
 		return nil, fmt.Errorf("初始化 marketplace 目录失败: %w", err)
 	}
 	if root == "" {
 		return nil, errors.New("无法定位 marketplace 目录（设 CLAW_MARKETPLACE_DIR 或在仓库内运行）")
+	}
+	if existing := s.registry.Get(moduleID); existing != nil && existing.Official {
+		return nil, fmt.Errorf("模块 ID %s 与官方模块冲突，请换一个", moduleID)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, moduleID, "package.json")); statErr == nil {
+		if packageDirOrigin(filepath.Join(root, moduleID), "claw").IsOfficial(moduleID) {
+			return nil, fmt.Errorf("模块 ID %s 与官方模块冲突，请换一个", moduleID)
+		}
 	}
 	moduleDir := filepath.Join(root, moduleID)
 	if err := os.MkdirAll(moduleDir, 0o755); err != nil {

@@ -75,27 +75,13 @@ func TestModuleService_RescanMarketplace_MCP(t *testing.T) {
 	assert.Equal(t, "http://mcp-hello:8080/mcp", cfg.URL)
 }
 
-// TestModuleService_RescanMarketplace_AgentReachMCP 验证 G1：agent-reach 从 execute 迁移到
-// mcp_http + auto_sku 后，rescan 能正确创建 mcp_http 运行时（端点取 mcp_server_config.url 原值、
-// auto_sku=true、mcp_server_config.headers 含 6 个 ${credentials.KEY} 凭证模板、credentials 声明 6 个
-// module 级凭证；exa 搜索经 mcporter 零配置接入，不占凭证槽）。读取真实 marketplace/agent-reach/module.json，守护 G1 配置不被回退。
+// TestModuleService_RescanMarketplace_AgentReachMCP 验证 T5.1：agent-reach 官方模块 package 化后
+// （package.json + auto_sku + .origin=cloud + docker-compose.claw.yml），claw 侧 rescan 按 side=claw 物化——
+// MCP http 运行时 Deployment=docker、Endpoint 取 hostUrl（127.0.0.1:8094，宿主机可达）、auto_sku=true、
+// DockerComposePath 指向 docker-compose.claw.yml；headers 含 6 个 ${credentials.KEY} 凭证模板、credentials
+// 透传 6 个 module 级凭证；auto_sku=true 跳过通用 {pkg}-mcp-{key} SKU（由 DeriveSKUs 派生逐工具 SKU）。
+// 写 fixture（package.json + .origin=cloud + docker-compose.claw.yml），不读真实 marketplace 目录。
 func TestModuleService_RescanMarketplace_AgentReachMCP(t *testing.T) {
-	// 定位真实 marketplace/agent-reach/module.json（兼容 go test 不同 cwd）
-	var manifestPath string
-	for _, p := range []string{
-		filepath.Join("..", "..", "marketplace", "agent-reach", "module.json"),
-		filepath.Join("..", "..", "..", "marketplace", "agent-reach", "module.json"),
-		filepath.Join("marketplace", "agent-reach", "module.json"),
-	} {
-		if _, err := os.Stat(p); err == nil {
-			manifestPath = p
-			break
-		}
-	}
-	require.NotEmpty(t, manifestPath, "未找到 agent-reach/module.json")
-	data, err := os.ReadFile(manifestPath)
-	require.NoError(t, err)
-
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&model.SkillRuntime{}))
@@ -106,35 +92,105 @@ func TestModuleService_RescanMarketplace_AgentReachMCP(t *testing.T) {
 	svc := NewModuleService(registry, manager, skillRuntimeRepo, nil)
 
 	root := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(root, "agent-reach"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(root, "agent-reach", "module.json"), data, 0644))
+	modDir := filepath.Join(root, "agent-reach")
+	require.NoError(t, os.MkdirAll(modDir, 0755))
+	// 云端下发的 package 布局：package.json + .origin=cloud + docker-compose.claw.yml
+	require.NoError(t, os.WriteFile(filepath.Join(modDir, "package.json"), []byte(agentReachFixturePackageJSON), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(modDir, ".origin"), []byte("cloud"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(modDir, "docker-compose.claw.yml"), []byte("version: '3'\nservices:\n  agent-reach:\n    image: example.registry/eleball/agent-reach:develop\n"), 0644))
 
 	// claw RescanPackage 经包级 ResolveMarketplaceRoot 解析根（CLAW_MARKETPLACE_DIR）
 	t.Setenv("CLAW_MARKETPLACE_DIR", root)
 	require.NoError(t, svc.RescanPackage("claw", zap.NewNop()))
 
-	rt, err := svc.repo.GetByID("agent-reach")
+	// package 布局运行时 ID={pkg}-mcp-{key}=agent-reach-mcp-main（非目录名）
+	rt, err := svc.repo.GetByID("agent-reach-mcp-main")
 	require.NoError(t, err)
 	require.NotNil(t, rt)
 	assert.Equal(t, model.SkillRuntimeTransportMCPHTTP, rt.Transport)
-	assert.True(t, rt.AutoSKU, "auto_sku 应为 true（G1 迁移后免手写 SKU）")
-	// rt.Endpoint 取 mcp_server_config.url 原值（agent-reach url 无 path，故为根路径），网关据此 POST JSON-RPC
-	assert.Equal(t, "http://localhost:8094", rt.Endpoint)
-	assert.Equal(t, "agent_reach", rt.DriverID)
+	assert.Equal(t, model.SkillRuntimeDeploymentDocker, rt.Deployment, "claw 侧 http MCP 应 docker 部署（云端下载包由 claw 拉起容器）")
+	assert.True(t, rt.AutoSKU, "auto_sku 应为 true（免手写 SKU，探活后 DeriveSKUs 派生逐工具 SKU）")
+	// Endpoint 取 hostUrl（claw 宿主机可达；云端 DNS 地址 http://agent-reach:8080 对宿主机不可达）
+	assert.Equal(t, "http://127.0.0.1:8094", rt.Endpoint)
+	assert.True(t, rt.Official)
+	// DockerComposePath 指向 docker-compose.claw.yml（ACR 镜像 + 发布端口版）
+	require.NotEmpty(t, rt.DockerComposePath, "claw 侧 http MCP 应带 DockerComposePath（Start 据此拉起容器）")
+	assert.True(t, strings.HasSuffix(rt.DockerComposePath, "docker-compose.claw.yml"), rt.DockerComposePath)
 
 	cfg := rt.GetMCPServerConfig()
 	require.NotNil(t, cfg)
-	// 6 个凭证请求头模板（${credentials.KEY} 由网关 prepareMCPHeaders 替换为值后注入；exa 经 mcporter 零配置，无凭证）
+	assert.Equal(t, "http://127.0.0.1:8094", cfg.URL)
+	// 6 个凭证请求头模板（${credentials.KEY} 由网关 prepareMCPHeaders 替换为值后注入）
 	require.Len(t, cfg.Headers, 6)
 	assert.Equal(t, "${credentials.twitter_cookie}", cfg.Headers["X-Twitter-Cookie"])
 	assert.Equal(t, "${credentials.bilibili_cookie}", cfg.Headers["X-Bilibili-Cookie"])
 
-	// 6 个 module 级凭证声明（同模块多 SKU 共享 module:agent_reach 桶；exa 零配置不入此列）
+	// 6 个 module 级凭证声明（同模块多 SKU 共享 module:agent_reach 桶）
 	creds := rt.CredentialsMap()
 	require.Len(t, creds, 6)
 	require.Contains(t, creds, "twitter_cookie")
 	assert.Equal(t, model.CredentialScopeModule, creds["bilibili_cookie"].Scope)
 }
+
+// agentReachFixturePackageJSON 云端下发的 agent-reach package.json（T5.1 author 版）测试 fixture。
+// 与 gateway/marketplace/agent-reach/package.json 保持字段对齐：auto_sku=true、hostUrl=127.0.0.1:8094、
+// 6 个 ${credentials.KEY} 请求头模板 + 6 个凭证声明（github_token + 5 cookie，均 required=false）。
+const agentReachFixturePackageJSON = `{
+  "name": "agent-reach",
+  "version": "2.0.0",
+  "description": "网页阅读、搜索、视频字幕、GitHub、社交平台等",
+  "author": "eleball",
+  "category": "互联网",
+  "level": 1,
+  "auto_sku": true,
+  "mcpServers": {
+    "main": {
+      "transport": "http",
+      "url": "http://agent-reach:8080",
+      "hostUrl": "http://127.0.0.1:8094",
+      "headers": {
+        "X-Twitter-Cookie": "${credentials.twitter_cookie}",
+        "X-Reddit-Cookie": "${credentials.reddit_cookie}",
+        "X-Xiaohongshu-Cookie": "${credentials.xiaohongshu_cookie}",
+        "X-Bilibili-Cookie": "${credentials.bilibili_cookie}",
+        "X-YouTube-Cookie": "${credentials.youtube_cookie}",
+        "X-Github-Token": "${credentials.github_token}"
+      },
+      "credentials": {
+        "github_token": {
+          "type": "api_key",
+          "label": "GitHub Token",
+          "required": false
+        },
+        "twitter_cookie": {
+          "type": "cookie",
+          "label": "Twitter Cookie",
+          "required": false
+        },
+        "reddit_cookie": {
+          "type": "cookie",
+          "label": "Reddit Cookie",
+          "required": false
+        },
+        "xiaohongshu_cookie": {
+          "type": "cookie",
+          "label": "小红书 Cookie",
+          "required": false
+        },
+        "bilibili_cookie": {
+          "type": "cookie",
+          "label": "B站 Cookie",
+          "required": false
+        },
+        "youtube_cookie": {
+          "type": "cookie",
+          "label": "YouTube Cookie",
+          "required": false
+        }
+      }
+    }
+  }
+}`
 
 // echoUserScript 测试用用户脚本：最小 stdio MCP echo server（含标记便于校验拷贝）。
 const echoUserScript = `#!/usr/bin/env python3
@@ -181,6 +237,15 @@ func TestModuleService_WriteUserModule(t *testing.T) {
 	// 隔离 marketplace root（EnsureMarketplaceRoot 会 SeedOfficial 播种官方模块文件）
 	root := t.TempDir()
 	t.Setenv("CLAW_MARKETPLACE_DIR", root)
+
+	// T5.1：官方模块全部 package 化（云端下载，不再内嵌）。写 firecrawl 官方包 fixture，
+	// 使「官方模块防覆盖」有可判定的目录（package 布局 registry.Get("firecrawl") 取不到，
+	// WriteUserModule 改按 packageDirOrigin 推断）。WriteUserModule 每次内部 RescanPackage 会扫到。
+	fcDir := filepath.Join(root, "firecrawl")
+	require.NoError(t, os.MkdirAll(fcDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(fcDir, "package.json"), []byte(`{"name":"firecrawl","version":"2.0.0","description":"firecrawl","category":"抓取","level":1,"auto_sku":true,"mcpServers":{"main":{"transport":"http","url":"http://firecrawl:8080","hostUrl":"http://127.0.0.1:8095"}}}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(fcDir, ".origin"), []byte("cloud"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(fcDir, "docker-compose.claw.yml"), []byte("version: '3'\nservices:\n  firecrawl:\n    image: example.registry/eleball/firecrawl:develop\n"), 0o644))
 
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)

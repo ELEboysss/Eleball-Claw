@@ -68,7 +68,8 @@ func runModuleCommand(args []string) int {
 
 	rc := 0
 	for _, name := range targets {
-		compose := filepath.Join(absRoot, name, "docker-compose.yml")
+		// D-D：优先 docker-compose.claw.yml（云端下载包），无则 docker-compose.yml
+		compose := moduleComposeFile(absRoot, name)
 		project := "eleball-claw-" + name
 		var dargs []string
 		switch cmd {
@@ -133,7 +134,7 @@ func moduleList(root string) int {
 			continue
 		}
 		compose := "无 compose（仅登记）"
-		if _, err := os.Stat(filepath.Join(root, e.Name(), "docker-compose.yml")); err == nil {
+		if _, err := os.Stat(moduleComposeFile(root, e.Name())); err == nil {
 			compose = "可 docker 启动"
 		}
 		fmt.Printf("  %-14s %s\n                %s\n                URL: %s | 能力: %s | %s\n",
@@ -157,7 +158,8 @@ func resolveModuleTargets(root string, names []string) ([]string, error) {
 		if !e.IsDir() {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(root, e.Name(), "docker-compose.yml")); err == nil {
+		// D-D：docker-compose.claw.yml（云端下载包）与 docker-compose.yml 任一存在即可启动
+		if _, err := os.Stat(moduleComposeFile(root, e.Name())); err == nil {
 			available[e.Name()] = true
 		}
 	}
@@ -174,7 +176,7 @@ func resolveModuleTargets(root string, names []string) ([]string, error) {
 	}
 	for _, n := range names {
 		if !available[n] {
-			return nil, fmt.Errorf("模块 %s 不存在或不含 docker-compose.yml（module ls 查看可用模块）", n)
+			return nil, fmt.Errorf("模块 %s 不存在或不含 docker compose 文件（module ls 查看可用模块）", n)
 		}
 	}
 	return names, nil

@@ -23,6 +23,9 @@ type PackageManifest struct {
 	Skills      []PackageSkill               `json:"skills,omitempty"`
 	Tools       []PackageTool                `json:"tools,omitempty"`
 	MCPServers  map[string]PackageMCPServer  `json:"mcpServers,omitempty"`
+	// AutoSKU 由 mcpServers 经 DeriveSKUs 派生逐工具 SKU（对齐 legacy module.json auto_sku）：
+	// true 时跳过 D5「每 mcpServer 一个通用 SKU」，由 MCP tools/list 派生 mcp__{server}__{tool}。
+	AutoSKU bool `json:"auto_sku,omitempty"`
 }
 
 // PackageSkill 纯 prompt 能力项；每项 = skills/{name}/SKILL.md → 1 个 prompt 型 SKU。
@@ -79,8 +82,12 @@ type PackageMCPServer struct {
 	Command   []string          `json:"command,omitempty"`
 	Args      []string          `json:"args,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
-	URL       string            `json:"url,omitempty"`
+	URL       string            `json:"url,omitempty"`     // cloud/DNS 可达地址（云端物化用）
+	HostURL   string            `json:"hostUrl,omitempty"` // claw/宿主机可达地址（发布端口，claw 物化优先用）
 	Headers   map[string]string `json:"headers,omitempty"`
+	// Credentials MCP 服务器用户凭证声明（与 PackageTool.Credentials 同构）：
+	// 物化时经 rt.SetCredentials 透传，逐工具派生 SKU 继承（buildDerivedManifest.CredentialsMap）。
+	Credentials map[string]PackageCredential `json:"credentials,omitempty"`
 }
 
 // 字段校验模式（与 specs/package-manifest-schema.json 一致）。
@@ -221,6 +228,13 @@ func (s PackageMCPServer) validate() error {
 		}
 	default:
 		return fmt.Errorf("transport 非法（需 stdio/http/sse）: %q", s.Transport)
+	}
+	for name, c := range s.Credentials {
+		switch c.Type {
+		case "cookie", "api_key", "token":
+		default:
+			return fmt.Errorf("credentials[%q].type 非法（需 cookie/api_key/token）: %q", name, c.Type)
+		}
 	}
 	return nil
 }
