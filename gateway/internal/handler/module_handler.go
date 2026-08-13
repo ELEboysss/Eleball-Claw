@@ -401,7 +401,10 @@ func (h *ModuleHandler) ListCloudCatalog(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"code": 3001, "message": "解析云端响应失败: " + err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": gin.H{"items": cloudResp.Data.Items}})
+	// T4.4：比对本地安装状态（installed/local_version/has_update/local_status），
+	// 供 web 展示「下载/更新/已最新」。更新复用 DownloadCloudModule（ApplyPackage 覆盖同名文件）。
+	enriched := h.moduleService.EnrichCloudCatalog(cloudResp.Data.Items)
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": gin.H{"items": enriched}})
 }
 
 // DownloadCloudModule 从云端下载完整秘技包并落盘（云端 GET /v1/market/modules/:id/package

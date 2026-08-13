@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -708,6 +709,114 @@ func (s *ModuleService) ApplyPackage(pkg model.PackageBundle) (*model.SkillRunti
 	// 异步启动，立即返回可能 offline；失败不阻断下载（模块已落盘，前端 refresh 看最终状态）。
 	_, _ = s.Start(rec.ID)
 	return rec, nil
+}
+
+// CloudCatalogEnriched 云端目录项 + 本地安装比对（T4.4「检查更新」）。
+// 透传云端 catalog 原值；Installed/LocalVersion/HasUpdate/LocalStatus 由 EnrichCloudCatalog 现算。
+// web「云端模块」tab 据此决定按钮态：未安装→下载 / 已装且更新→更新 / 已装最新→已最新（禁用）。
+type CloudCatalogEnriched struct {
+	model.PackageCatalogItem
+	Installed    bool   `json:"installed"`     // 本地是否已安装该包
+	LocalVersion string `json:"local_version"` // 本地已装版本（空=未安装）
+	HasUpdate    bool   `json:"has_update"`    // 云端有新版可更新（已装且 catalog.version > local_version）
+	LocalStatus  string `json:"local_status"`  // 本地运行时状态（T1.4 枚举；未安装为空）
+}
+
+// EnrichCloudCatalog 为云端目录项补充本地安装/更新状态（T4.4 更新检测，比对主键=version，
+// updated_at 透传供展示）。纯查询，不触发任何安装/下载副作用；web 每次打开目录时现算。
+func (s *ModuleService) EnrichCloudCatalog(items []model.PackageCatalogItem) []CloudCatalogEnriched {
+	out := make([]CloudCatalogEnriched, 0, len(items))
+	for _, it := range items {
+		e := CloudCatalogEnriched{PackageCatalogItem: it}
+		if rt := s.findPackageRuntime(it.PackageID); rt != nil {
+			e.Installed = true
+			e.LocalVersion = rt.Version
+			if it.Version != "" && compareVersions(it.Version, rt.Version) > 0 {
+				e.HasUpdate = true
+			}
+			// 状态以 registry 现算快照为准（探活结果），无快照回退 DB 记录值。
+			e.LocalStatus = string(rt.Status)
+			if st := s.registry.Check(rt.ID); st != nil {
+				e.LocalStatus = string(st.Status)
+			}
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// findPackageRuntime 在本地已安装运行时中定位 packageID 对应的包运行时。
+// package 布局下包没有同名运行时（派生运行时形如 {pkg}-mcp-{key} / {pkg}-{tool}），
+// 先试精确 ID 与主 MCP 运行时，再按 {pkg}- 前缀扫描（同包派生运行时版本一致，取首个即可）。
+// 返回 nil 表示本地未安装。
+func (s *ModuleService) findPackageRuntime(packageID string) *model.SkillRuntime {
+	if rt, err := s.GetModule(packageID); err == nil {
+		return rt
+	}
+	if rt, err := s.GetModule(packageID + "-mcp-main"); err == nil {
+		return rt
+	}
+	if runtimes, err := s.ListModules(); err == nil {
+		prefix := packageID + "-"
+		for _, rt := range runtimes {
+			if strings.HasPrefix(rt.ID, prefix) {
+				return rt
+			}
+		}
+	}
+	return nil
+}
+
+// compareVersions 宽松 semver 比较（依赖无关）：按 '.' 分段逐段比较，短串缺省段补 0
+// （"1.2" == "1.2.0"，避免因版本写法差异误报更新）。纯数字段数值比较（"1.10.0" > "1.9.0"），
+// 数字段 > 非数字段（发布段 > 预发布段，如 "1.0.0" > "1.0.0-beta"），双非数字段字典序。
+// 返回 -1/0/1；空串低于任何版本。用于 T4.4 更新检测：仅 catalog.version 严格大于
+// local_version 才判定有新版（无新版不误报）。
+func compareVersions(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	n := len(as)
+	if len(bs) > n {
+		n = len(bs)
+	}
+	for i := 0; i < n; i++ {
+		sa, sb := "0", "0" // 短串缺省段视为 0
+		if i < len(as) {
+			sa = as[i]
+		}
+		if i < len(bs) {
+			sb = bs[i]
+		}
+		if cmp := compareVersionSegment(sa, sb); cmp != 0 {
+			return cmp
+		}
+	}
+	return 0
+}
+
+func compareVersionSegment(a, b string) int {
+	an, aErr := strconv.Atoi(a)
+	bn, bErr := strconv.Atoi(b)
+	switch {
+	case aErr == nil && bErr == nil:
+		switch {
+		case an < bn:
+			return -1
+		case an > bn:
+			return 1
+		}
+		return 0
+	case aErr == nil: // a 为数字段（发布），b 非数字（预发布/构建）：发布段更高
+		return 1
+	case bErr == nil:
+		return -1
+	}
+	switch { // 双非数字段：字典序
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
 }
 
 // writeUserMainPy 写 main.py：优先用 web 编辑器草稿（main_py_content），其次拷贝 work_dir/args[0]
