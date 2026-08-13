@@ -14,13 +14,13 @@ import (
 
 // AgentMarketService Agent 市场服务
 type AgentMarketService struct {
-	agentRepo      *repository.AgentRepo
-	userRepo       *repository.UserRepo
-	vipService     *VIPService
-	skillRuntimeRegistry *SkillRuntimeRegistry
-	moduleService        *ModuleService
-	db                   *gorm.DB
-	agentToolLoader      *AgentToolLoader
+	agentRepo              *repository.AgentRepo
+	userRepo               *repository.UserRepo
+	vipService             *VIPService
+	skillRuntimeRegistry   *SkillRuntimeRegistry
+	moduleService          *ModuleService
+	db                     *gorm.DB
+	agentToolLoader        *AgentToolLoader
 	agentCredentialService *AgentCredentialService
 	// localFreeOnly=true 时仅允许免费 SKU 本地购买（claw：付费秘技统一引导到云端 eleball.cn 购买）。
 	// 云端 cmd/server 不设置，保持原有余额扣费购买行为。
@@ -342,6 +342,10 @@ type PurchaseAgentRequest struct {
 // ErrVIPRequired 下载/获取秘技需 VIP1 及以上（管理员豁免）。handler 据此返回 403/4002。
 var ErrVIPRequired = errors.New("下载秘技需 VIP1 及以上")
 
+// ErrNotPurchased D9 购买门禁：cloud 收费模块（origin==cloud && !official）未购买时拒绝激活。
+// handler 据此返回 402/4002（PaymentRequired），与云端付费语义对齐。
+var ErrNotPurchased = errors.New("未购买该秘技")
+
 // PurchaseAgent 购买秘技
 func (s *AgentMarketService) PurchaseAgent(buyerID string, req PurchaseAgentRequest) error {
 	agent, err := s.agentRepo.GetByID(req.AgentID)
@@ -480,44 +484,151 @@ func (s *AgentMarketService) PurchaseAgent(buyerID string, req PurchaseAgentRequ
 
 // ToggleAgentActive 切换当前用户对某秘技的激活状态
 // 购买后默认激活；用户可随时关闭或重新开启，控制该秘技是否作为工具进入 Agent 工作流。
+// 停用分支仅清 active（无需购买/记录）；激活分支走 activateSingle（D9 门禁 + kind 分派）。
 func (s *AgentMarketService) ToggleAgentActive(userID, agentID string) (bool, error) {
-	// 校验已购买
+	active, _ := s.agentRepo.IsToolActive(userID, agentID)
+	if active {
+		// 停用：仅置 inactive（不触碰 runtime；工具注入按 active 门控消失）
+		agent, err := s.agentRepo.GetByID(agentID)
+		if err != nil {
+			return false, err
+		}
+		if err := s.agentRepo.SetToolActive(userID, agentID, skuToolName(agent), false); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	return s.activateSingle(userID, agentID)
+}
+
+// activateSingle 单 SKU 激活：D9 购买门禁 + 凭证校验 + T4.3 kind 分派拉起 + 置 active。
+// 幂等：已激活返回 (false, nil)。被 ToggleAgentActive（激活分支）与 ActivatePackageSKUs（整包）复用。
+// 购买门禁在 GetByID 之前：agent 未落库（未 provision）时同样返回 ErrNotPurchased（"未购买该秘技"），
+// 而非 record not found——保持旧实现「未购买优先」的激活语义。
+func (s *AgentMarketService) activateSingle(userID, agentID string) (bool, error) {
+	// 幂等：已激活直接返回（整包激活重复调用不计入）
+	if active, _ := s.agentRepo.IsToolActive(userID, agentID); active {
+		return false, nil
+	}
+
+	// 购买门禁（D9）：cloud 收费模块未购买拒绝激活（handler 映射 402/4002）；
+	// 免费/本地/内置 SKU 购买即用（free 购买时 ActivateToolOnPurchase 已自动置 active）。
 	purchased, err := s.agentRepo.HasPurchased(agentID, userID)
 	if err != nil {
 		return false, err
 	}
 	if !purchased {
-		return false, errors.New("未购买该秘技")
+		return false, ErrNotPurchased
 	}
 
 	agent, err := s.agentRepo.GetByID(agentID)
 	if err != nil {
 		return false, err
 	}
+
+	// 激活时校验必填凭证是否配齐：缺则拒绝激活，提示用户先配置凭证
 	manifest, _ := agent.Manifest()
-	toolName := ""
-	if manifest != nil {
-		toolName = manifest.ID
-	}
-	if toolName == "" {
-		toolName = fmt.Sprintf("Agent_%s", agentID)
-	}
-
-	// 查询当前状态
-	active, _ := s.agentRepo.IsToolActive(userID, agentID)
-	newActive := !active
-
-	// 激活（非取消）时校验必填凭证是否配齐：缺则拒绝激活，提示用户先配置凭证
-	if newActive && s.agentCredentialService != nil && manifest != nil && len(manifest.Credentials) > 0 {
-		if err := s.agentCredentialService.ValidateRequired(userID, agentID, manifest.Credentials); err != nil {
+	if s.agentCredentialService != nil && manifest != nil && len(manifest.Credentials) > 0 {
+		if err := s.agentCredentialService.ValidateRequired(userID, agent.ID, manifest.Credentials); err != nil {
 			return false, fmt.Errorf("配置凭证不全，无法激活：%w", err)
 		}
 	}
 
-	if err := s.agentRepo.SetToolActive(userID, agentID, toolName, newActive); err != nil {
+	// T4.3：按 SKU kind 分派激活行为——tool/mcp 拉起对应 runtime（含 MCP 连接），skill 载入 prompt（无 runtime）。
+	s.dispatchSKUActivation(manifest)
+
+	if err := s.agentRepo.SetToolActive(userID, agent.ID, skuToolName(agent), true); err != nil {
 		return false, err
 	}
-	return newActive, nil
+	return true, nil
+}
+
+// dispatchSKUActivation 按 SKU kind 分派激活（T4.3）：
+//   - tool/mcp：moduleService.Start(runtimeID) 拉起（process/docker/http 启动；MCP external 经
+//     ForceProbe → MCPConnectionManager.connect，stdio 经 Start spawn + probe）。best-effort：
+//     失败不阻断激活——模块状态（CheckRuntime）是工具注入门控与前端展示的唯一事实源。
+//   - skill：无 runtime（prompt-only），激活即生效，直接返回。
+//
+// 手写 SKU（无 package_derived）按 Driver 推断 kind（none→skill / mcp→mcp / 其余→tool）。
+func (s *AgentMarketService) dispatchSKUActivation(manifest *model.ToolManifest) {
+	if manifest == nil || s.moduleService == nil {
+		return
+	}
+	if skuKind(manifest) == "skill" {
+		return
+	}
+	// 派生 tool/mcp SKU 的 Driver 即运行时 ID（{pkg}-{tool}/{pkg}-mcp-{key}，见 module_rescan upsert*SKU）；
+	// 手写 SKU 的 Driver 可能是别名/缺省，回退统一 module-resolution。
+	runtimeID := string(manifest.Driver)
+	if _, err := s.moduleService.GetModule(runtimeID); err != nil {
+		if s.agentToolLoader != nil {
+			runtimeID = s.agentToolLoader.ResolveModuleID(manifest)
+		}
+		if runtimeID == "" {
+			return
+		}
+	}
+	_, _ = s.moduleService.Start(runtimeID)
+}
+
+// skuKind 判定 SKU 能力种类（tool/mcp/skill）。优先读派生标注 package_derived
+// （module_rescan upsert*SKU / auto_sku buildDerivedManifest 同键）；手写 SKU 按 Driver 推断。
+func skuKind(manifest *model.ToolManifest) string {
+	if manifest == nil {
+		return ""
+	}
+	if manifest.Metadata != nil {
+		if k := manifest.Metadata["package_derived"]; k != "" {
+			return k
+		}
+	}
+	switch manifest.Driver {
+	case model.ToolDriverNone:
+		return "skill"
+	case model.ToolDriverMCP:
+		return "mcp"
+	default:
+		return "tool"
+	}
+}
+
+// skuToolName 取 SKU 工具名标签（agent_user_tools.ToolName）：manifest.ID，缺失回退 Agent_<id>。
+func skuToolName(agent *model.AgentItem) string {
+	if manifest, _ := agent.Manifest(); manifest != nil && manifest.ID != "" {
+		return manifest.ID
+	}
+	return fmt.Sprintf("Agent_%s", agent.ID)
+}
+
+// ActivatePackageSKUs 整包激活（T4.3 快捷入口）：批量激活 package_module==packageID 的全部已购 SKU。
+// 逐 SKU 复用 activateSingle（购买门禁 + kind 分派 + 置 active）；单 SKU 失败（未购买/凭证不全）跳过，
+// 不阻断整包。返回实际激活数（重复调用幂等：已激活不计入）。
+func (s *AgentMarketService) ActivatePackageSKUs(userID, packageID string) (int, error) {
+	items, err := s.agentRepo.ListByModuleSKUs(packageID)
+	if err != nil {
+		return 0, err
+	}
+	activated := 0
+	for _, item := range items {
+		if item.Status != model.AgentStatusApproved {
+			continue
+		}
+		manifest, err := item.Manifest()
+		if err != nil || manifest == nil || manifest.Metadata == nil {
+			continue
+		}
+		if manifest.Metadata["package_module"] != packageID {
+			continue // 前缀粗筛可能命中同名前缀的其他包 SKU，精确按 package_module 归属
+		}
+		ok, err := s.activateSingle(userID, item.ID)
+		if err != nil {
+			continue // 未购买/凭证不全等单 SKU 失败不阻断整包
+		}
+		if ok {
+			activated++
+		}
+	}
+	return activated, nil
 }
 
 // ====== 评价 ======
@@ -763,8 +874,9 @@ type ReviewAgentResult struct {
 
 // ReviewAgent 审核秘技（通过/拒绝）
 // 通过时：
-//   1. 若 SKU 声明了非内置驱动别名，自动在 drivers 表创建/更新驱动记录，并生成 auth_token；
-//   2. SKU 状态变为 approved。
+//  1. 若 SKU 声明了非内置驱动别名，自动在 drivers 表创建/更新驱动记录，并生成 auth_token；
+//  2. SKU 状态变为 approved。
+//
 // 驱动服务由开发者通过返回的 auth_token 自助注册；未注册或离线时，集市列表会自动隐藏该 SKU。
 func (s *AgentMarketService) ReviewAgent(agentID string, req ReviewAgentRequest) (*ReviewAgentResult, error) {
 	agent, err := s.agentRepo.GetByID(agentID)
@@ -802,12 +914,12 @@ func (s *AgentMarketService) ReviewAgent(agentID string, req ReviewAgentRequest)
 
 // AgentDependencyStatus SKU 依赖的驱动/模块状态，供管理后台审批时展示。
 type AgentDependencyStatus struct {
-	Driver          string `json:"driver"`
-	DriverName      string `json:"driver_name,omitempty"`
-	DriverRegistered bool  `json:"driver_registered"`
-	ModuleID        string `json:"module_id,omitempty"`
-	ModuleRegistered bool  `json:"module_registered,omitempty"`
-	ModuleOnline    *bool  `json:"module_online,omitempty"`
+	Driver           string `json:"driver"`
+	DriverName       string `json:"driver_name,omitempty"`
+	DriverRegistered bool   `json:"driver_registered"`
+	ModuleID         string `json:"module_id,omitempty"`
+	ModuleRegistered bool   `json:"module_registered,omitempty"`
+	ModuleOnline     *bool  `json:"module_online,omitempty"`
 }
 
 // GetAgentDependencyStatus 获取 SKU 依赖的驱动与模块状态。

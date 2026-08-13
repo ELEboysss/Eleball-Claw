@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -117,6 +118,11 @@ func (h *AgentHandler) ToggleAgentActive(c *gin.Context) {
 	}
 	active, err := h.agentService.ToggleAgentActive(userID, agentID)
 	if err != nil {
+		// D9 购买门禁：未购买（cloud 收费模块）→ 402/4002，与云端付费语义对齐
+		if errors.Is(err, service.ErrNotPurchased) {
+			c.JSON(http.StatusPaymentRequired, gin.H{"code": 4002, "message": err.Error()})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"code": 3001, "message": err.Error()})
 		return
 	}
@@ -125,6 +131,29 @@ func (h *AgentHandler) ToggleAgentActive(c *gin.Context) {
 		"code":    0,
 		"message": "success",
 		"data":    gin.H{"active": active},
+	})
+}
+
+// ActivatePackageSKUs 整包激活（T4.3 快捷入口）：一键激活包内全部已购 SKU
+// （tool→拉起 runtime / mcp→连接 / skill→载入 prompt 各自生效）。未购买/凭证不全的
+// SKU 跳过，返回实际激活数。路由：POST /v1/claw-console/agents/package/:id/activate。
+func (h *AgentHandler) ActivatePackageSKUs(c *gin.Context) {
+	userIDVal, _ := c.Get("user_id")
+	userID, _ := userIDVal.(string)
+	packageID := c.Param("id")
+	if packageID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "缺少包 ID"})
+		return
+	}
+	activated, err := h.agentService.ActivatePackageSKUs(userID, packageID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 5000, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "success",
+		"data":    gin.H{"activated": activated},
 	})
 }
 

@@ -179,6 +179,7 @@ func NewClawRouter(
 			auth.POST("/agents", agentHandler.CreateAgent)
 			auth.POST("/agents/:id/purchase", agentHandler.PurchaseAgent)
 			auth.POST("/agents/:id/active", agentHandler.ToggleAgentActive)
+			auth.POST("/agents/package/:id/activate", agentHandler.ActivatePackageSKUs)
 			auth.GET("/agents/:id/reviews", agentHandler.ListReviews)
 			auth.POST("/agents/:id/reviews", agentHandler.CreateReview)
 			auth.POST("/agents/:id/favorite", agentHandler.ToggleFavorite)
