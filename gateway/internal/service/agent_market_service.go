@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"time"
 
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
@@ -54,7 +53,12 @@ func (s *AgentMarketService) IsCloudPurchasedAgent(agentID string) bool {
 	if err != nil || item == nil {
 		return false
 	}
-	moduleID := s.resolveModuleID(item)
+	// module-resolution 统一走 AgentToolLoader.ResolveModuleID（唯一实现）
+	manifest, _ := item.Manifest()
+	moduleID := ""
+	if s.agentToolLoader != nil {
+		moduleID = s.agentToolLoader.ResolveModuleID(manifest)
+	}
 	if moduleID == "" {
 		return false // 内置驱动 / 无模块依赖 -> 本地，免门控
 	}
@@ -207,7 +211,11 @@ func (s *AgentMarketService) checkModuleOnline(item *model.AgentItem) *bool {
 	if s.skillRuntimeRegistry == nil {
 		return nil
 	}
-	moduleID := s.resolveModuleID(item)
+	// module-resolution 统一走 AgentToolLoader.ResolveModuleID（唯一实现）
+	moduleID := ""
+	if s.agentToolLoader != nil {
+		moduleID = s.agentToolLoader.ResolveModuleID(manifest)
+	}
 	if moduleID == "" {
 		// 声明了外部驱动但解析不到模块，视为离线
 		offline := false
@@ -224,7 +232,12 @@ func (s *AgentMarketService) checkModuleDeps(item *model.AgentItem) (hasDeps, in
 	if s.skillRuntimeRegistry == nil {
 		return false, false, ""
 	}
-	moduleID := s.resolveModuleID(item)
+	// module-resolution 统一走 AgentToolLoader.ResolveModuleID（唯一实现）
+	manifest, _ := item.Manifest()
+	moduleID := ""
+	if s.agentToolLoader != nil {
+		moduleID = s.agentToolLoader.ResolveModuleID(manifest)
+	}
 	if moduleID == "" {
 		return false, false, ""
 	}
@@ -255,24 +268,6 @@ func (s *AgentMarketService) checkDriverRegistered(item *model.AgentItem) bool {
 	}
 	_, ok := s.agentToolLoader.ResolveDriver(driver)
 	return ok
-}
-
-// resolveModuleID 解析 SKU 依赖的模块 ID。
-// 优先通过 AgentToolLoader 根据 driver 别名解析，未设置 loader 时回退到 metadata.module。
-func (s *AgentMarketService) resolveModuleID(item *model.AgentItem) string {
-	manifest, _ := item.Manifest()
-	if manifest == nil {
-		return ""
-	}
-	if s.agentToolLoader != nil {
-		if moduleID := s.agentToolLoader.ResolveModuleID(manifest); moduleID != "" {
-			return moduleID
-		}
-	}
-	if manifest.Metadata != nil && manifest.Metadata["module"] != "" {
-		return manifest.Metadata["module"]
-	}
-	return ""
 }
 
 // enrichAgents 填充动态评分、激活人数、当前用户激活状态、模块在线状态等运行时字段
@@ -785,7 +780,7 @@ func (s *AgentMarketService) ReviewAgent(agentID string, req ReviewAgentRequest)
 		manifest, _ := agent.Manifest()
 		if manifest != nil && manifest.Driver != "" &&
 			manifest.Driver != model.ToolDriverNone && manifest.Driver != model.ToolDriverBuiltin {
-			driverID, token, err := s.ensureDriverForManifest(manifest)
+			driverID, token, err := s.moduleService.ensureDriver(string(manifest.Driver), manifest.Name, manifest.Description)
 			if err != nil {
 				return nil, fmt.Errorf("创建驱动别名失败: %w", err)
 			}
@@ -803,50 +798,6 @@ func (s *AgentMarketService) ReviewAgent(agentID string, req ReviewAgentRequest)
 	}
 	result.Status = agent.Status
 	return result, nil
-}
-
-// ensureDriverForManifest 确保 SKU 所需的驱动别名已存在并持有 auth_token。
-// driver 已统一为 SkillRuntime（key=DriverID），返回 driver_id 和 auth_token。
-func (s *AgentMarketService) ensureDriverForManifest(manifest *model.ToolManifest) (string, string, error) {
-	if s.moduleService == nil {
-		return "", "", errors.New("ModuleService 未初始化")
-	}
-	driverID := string(manifest.Driver)
-	rec, err := s.moduleService.ResolveDriver(driverID)
-	if err == nil && rec != nil {
-		// 已存在：若没有 token，生成一个并更新；否则直接返回现有 token
-		if rec.AuthToken != "" {
-			return rec.ID, rec.AuthToken, nil
-		}
-		rec.AuthToken = model.GenerateDriverAuthToken()
-		rec.UpdatedAt = time.Now()
-		if err := s.moduleService.RegisterDriver(rec); err != nil {
-			return "", "", err
-		}
-		return rec.ID, rec.AuthToken, nil
-	}
-
-	// 不存在：新建驱动运行时（execute 型占位，后续 RescanPackage 物化真实配置）
-	token := model.GenerateDriverAuthToken()
-	name := manifest.Name
-	if name == "" {
-		name = driverID
-	}
-	rt := &model.SkillRuntime{
-		ID:          driverID,
-		Name:        name,
-		Description: manifest.Description,
-		Source:      model.SkillRuntimeSourceMarketplace,
-		Transport:   model.SkillRuntimeTransportExecute,
-		Deployment:  model.SkillRuntimeDeploymentDocker,
-		DriverID:    driverID,
-		AuthToken:   token,
-		Status:      model.SkillRuntimeStatusOffline,
-	}
-	if err := s.moduleService.RegisterDriver(rt); err != nil {
-		return "", "", err
-	}
-	return driverID, token, nil
 }
 
 // AgentDependencyStatus SKU 依赖的驱动/模块状态，供管理后台审批时展示。

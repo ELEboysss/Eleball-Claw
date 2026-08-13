@@ -17,6 +17,7 @@ import (
 	"github.com/eleball/gateway/pkg/llm"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 // ModuleService 集市模块业务层（兼容层）。
@@ -35,6 +36,8 @@ type ModuleService struct {
 	// dockerStarter 可选：claw 控制台「启动服务」按钮拉起 docker 部署模块时调用
 	// （docker compose up 逻辑在 cmd/claw-server，经此回调注入，避免 service 层依赖 cmd）。
 	dockerStarter func(moduleID string) error
+	// agentToolLoader 可选：manifest→模块解析统一入口（ActivatedModuleIDs 用），main 注入。
+	agentToolLoader *AgentToolLoader
 }
 
 // NewModuleService 创建模块业务服务
@@ -67,6 +70,11 @@ func (s *ModuleService) SetInterpreterBootstrap(b *InterpreterBootstrap) {
 // 控制台「启动服务」按钮对 docker 部署模块调用此回调拉起容器。
 func (s *ModuleService) SetDockerStarter(fn func(moduleID string) error) {
 	s.dockerStarter = fn
+}
+
+// SetAgentToolLoader 注入动态工具加载器，用于 ActivatedModuleIDs 的 manifest→模块解析。
+func (s *ModuleService) SetAgentToolLoader(loader *AgentToolLoader) {
+	s.agentToolLoader = loader
 }
 
 // CheckRuntime 查询指定运行时状态，供 AgentToolLoader 过滤离线 SKU。
@@ -247,33 +255,14 @@ func (s *ModuleService) ActivatedModuleIDs() map[string]bool {
 	}
 	for _, item := range items {
 		manifest, _ := item.Manifest()
-		if manifest == nil {
+		if manifest == nil || s.agentToolLoader == nil {
 			continue
 		}
-		if modID := s.resolveModuleIDFromManifest(manifest); modID != "" {
+		if modID := s.agentToolLoader.ResolveModuleID(manifest); modID != "" {
 			set[modID] = true
 		}
 	}
 	return set
-}
-
-// resolveModuleIDFromManifest 从 SKU manifest 解析其依赖的模块 ID。
-// 优先 metadata.module（旧写法），否则据 driver 别名查 drivers 表映射（与 AgentToolLoader.ResolveModuleID 一致）。
-func (s *ModuleService) resolveModuleIDFromManifest(manifest *model.ToolManifest) string {
-	if manifest == nil {
-		return ""
-	}
-	if manifest.Metadata != nil && manifest.Metadata["module"] != "" {
-		return manifest.Metadata["module"]
-	}
-	if manifest.Driver == "" || manifest.Driver == model.ToolDriverNone {
-		return ""
-	}
-	rec, err := s.ResolveDriver(string(manifest.Driver))
-	if err != nil || rec == nil {
-		return ""
-	}
-	return rec.ID
 }
 
 // Start 拉起指定模块（控制台「启动服务」按钮）。按部署方式分流：
@@ -1051,6 +1040,46 @@ func (s *ModuleService) RegisterDriver(rt *model.SkillRuntime) error {
 	return s.registry.Register(rt)
 }
 
+// ensureDriver 确保 SKU 所需的驱动别名已存在并持有 auth_token。
+// driver 已统一为 SkillRuntime（key=DriverID），返回 driver_id 和 auth_token。
+// driver-binding 统一入口：原 AgentMarketService.ensureDriverForManifest 的逻辑收敛至此。
+func (s *ModuleService) ensureDriver(driverID, name, description string) (string, string, error) {
+	rec, err := s.repo.GetByDriverID(driverID)
+	if err == nil && rec != nil {
+		// 已存在：若没有 token，生成一个并更新；否则直接返回现有 token
+		if rec.AuthToken != "" {
+			return rec.ID, rec.AuthToken, nil
+		}
+		rec.AuthToken = model.GenerateDriverAuthToken()
+		rec.UpdatedAt = time.Now()
+		if err := s.registry.Register(rec); err != nil {
+			return "", "", err
+		}
+		return rec.ID, rec.AuthToken, nil
+	}
+
+	// 不存在：新建驱动运行时（execute 型占位，后续 RescanPackage 物化真实配置）
+	token := model.GenerateDriverAuthToken()
+	if name == "" {
+		name = driverID
+	}
+	rt := &model.SkillRuntime{
+		ID:          driverID,
+		Name:        name,
+		Description: description,
+		Source:      model.SkillRuntimeSourceMarketplace,
+		Transport:   model.SkillRuntimeTransportExecute,
+		Deployment:  model.SkillRuntimeDeploymentDocker,
+		DriverID:    driverID,
+		AuthToken:   token,
+		Status:      model.SkillRuntimeStatusOffline,
+	}
+	if err := s.registry.Register(rt); err != nil {
+		return "", "", err
+	}
+	return driverID, token, nil
+}
+
 // MCPInstallRequest 动态安装远端 MCP server 请求（G3，Smithery 式）。
 // 用户在 web 输入 stdio 启动命令或 http URL，探测成功后创建 source=mcp_remote 的 SkillRuntime。
 type MCPInstallRequest struct {
@@ -1202,11 +1231,15 @@ func ParseMCPConfig(raw []byte) ([]*MCPInstallRequest, error) {
 	return reqs, nil
 }
 
-// UnregisterDriver 注销驱动映射
+// UnregisterDriver 注销驱动运行时
 func (s *ModuleService) UnregisterDriver(driverID string) error {
 	rt, err := s.repo.GetByDriverID(driverID)
 	if err != nil {
-		return nil
+		// 驱动不存在视为幂等成功；其余错误必须上抛，不再吞错
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return fmt.Errorf("查询驱动 %s 失败: %w", driverID, err)
 	}
 	return s.registry.Unregister(rt.ID)
 }
@@ -1229,21 +1262,16 @@ func (s *ModuleService) ResolveDriver(driverID string) (*model.SkillRuntime, err
 	return rt, nil
 }
 
-// ResolveDriverByAuthToken 根据 auth_token 解析运行时
+// ResolveDriverByAuthToken 根据 auth_token 解析运行时（索引查询，替代全表线性扫描）
 func (s *ModuleService) ResolveDriverByAuthToken(token string) (*model.SkillRuntime, error) {
 	if token == "" {
 		return nil, errors.New("auth_token 不能为空")
 	}
-	runtimes, err := s.repo.List()
+	rt, err := s.repo.GetByAuthToken(token)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("驱动不存在")
 	}
-	for _, rt := range runtimes {
-		if rt.AuthToken == token {
-			return rt, nil
-		}
-	}
-	return nil, errors.New("驱动不存在")
+	return rt, nil
 }
 
 // BindDriverModule 将驱动别名绑定到指定模块（更新 SkillRuntime 的 endpoint/module_id）
@@ -1312,29 +1340,17 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Ski
 		return nil, errors.New("SkillRuntimeRegistry 未初始化")
 	}
 
-	// 已存在则幂等返回（避免重复拉镜像/启动容器）
+	var record *model.SkillRuntime
 	if existing, err := s.repo.GetByID(meta.ModuleID); err == nil && existing != nil {
-		// 持久化云端下发的来源属性（type3：云端下载模块 -> eleball_cloud / user 共享 -> user+actor）。
-		// 幂等重装也会校正本地扫描默认值（如 agent-reach/firecrawl 扫描默认 eleball_builtin -> 云端 eleball_cloud）。
+		// 幂等：校正云端下发的来源属性
 		if applyCloudSourceOrigin(existing, meta) {
 			if err := s.repo.CreateOrUpdate(existing); err != nil {
 				return nil, fmt.Errorf("持久化模块来源属性失败: %w", err)
 			}
 		}
-		// 幂等路径也要补齐驱动绑定（首次安装时驱动写库失败重试、云端补发 driver_id 等场景）
-		if err := s.upsertDriverBinding(meta); err != nil {
-			return nil, err
-		}
-		// S2：云端下发了 manifest -> 云端 manifest 定名接管，关闭 auto_sku 并下架遗留派生 SKU。
-		if err := s.applyCloudManifestSKUAuthority(meta, existing); err != nil {
-			return nil, err
-		}
-		return existing, nil
-	}
-
-	var record *model.SkillRuntime
-	if meta.Official {
-		// 官方模块：依赖 marketplace 扫描已注册；此处持久化来源属性并返回
+		record = existing
+	} else if meta.Official {
+		// 官方模块：依赖 marketplace 扫描已注册
 		rec, err := s.repo.GetByID(meta.ModuleID)
 		if err != nil || rec == nil {
 			return nil, fmt.Errorf("官方模块 %s 未在本地预置，请确认 marketplace/ 已包含", meta.ModuleID)
@@ -1363,9 +1379,24 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Ski
 		record = rt
 	}
 
-	// 安装成功后按 meta upsert 本地驱动绑定（official/第三方通用）。
-	if err := s.upsertDriverBinding(meta); err != nil {
-		return nil, err
+	// 驱动绑定（official/第三方/幂等通用）：按 meta.DriverID 把别名绑到模块记录上
+	if meta.DriverID != "" {
+		if rt, err := s.repo.GetByID(meta.ModuleID); err == nil && rt != nil {
+			changed := false
+			if rt.DriverID != meta.DriverID {
+				rt.DriverID = meta.DriverID
+				changed = true
+			}
+			if meta.AuthToken != "" && rt.AuthToken != meta.AuthToken {
+				rt.AuthToken = meta.AuthToken
+				changed = true
+			}
+			if changed {
+				if err := s.repo.CreateOrUpdate(rt); err != nil {
+					return nil, fmt.Errorf("绑定驱动别名失败: %w", err)
+				}
+			}
+		}
 	}
 
 	// 触发一次健康探测刷新状态
@@ -1424,34 +1455,6 @@ func (s *ModuleService) applyCloudManifestSKUAuthority(meta ModuleInstallMeta, r
 		if err := s.agentRepo.UpdateStatus(item.ID, model.AgentStatusDelisted); err != nil {
 			return fmt.Errorf("下架遗留派生 SKU %s 失败: %w", item.ID, err)
 		}
-	}
-	return nil
-}
-
-// upsertDriverBinding 按云端 meta 把驱动别名绑定到已安装模块的 skill_runtimes 记录上。
-// meta.DriverID 为空时不做任何事；模块不存在则报错。skill_runtimes 是驱动别名的唯一落库点。
-func (s *ModuleService) upsertDriverBinding(meta ModuleInstallMeta) error {
-	if meta.DriverID == "" {
-		return nil
-	}
-	rt, err := s.repo.GetByID(meta.ModuleID)
-	if err != nil {
-		return fmt.Errorf("模块 %s 不存在，无法绑定驱动: %w", meta.ModuleID, err)
-	}
-	changed := false
-	if rt.DriverID != meta.DriverID {
-		rt.DriverID = meta.DriverID
-		changed = true
-	}
-	if meta.AuthToken != "" && rt.AuthToken != meta.AuthToken {
-		rt.AuthToken = meta.AuthToken
-		changed = true
-	}
-	if !changed {
-		return nil
-	}
-	if err := s.repo.CreateOrUpdate(rt); err != nil {
-		return fmt.Errorf("更新模块 %s 驱动绑定失败: %w", meta.ModuleID, err)
 	}
 	return nil
 }

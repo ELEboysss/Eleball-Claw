@@ -38,6 +38,18 @@ func (r *SkillRuntimeRepo) GetByDriverID(driverID string) (*model.SkillRuntime, 
 	return &rt, nil
 }
 
+// GetByAuthToken 根据 auth_token 查询运行时（索引命中，替代全表线性扫描）
+func (r *SkillRuntimeRepo) GetByAuthToken(token string) (*model.SkillRuntime, error) {
+	if token == "" {
+		return nil, gorm.ErrRecordNotFound
+	}
+	var rt model.SkillRuntime
+	if err := r.db.Where("auth_token = ?", token).First(&rt).Error; err != nil {
+		return nil, err
+	}
+	return &rt, nil
+}
+
 // List 查询所有运行时
 func (r *SkillRuntimeRepo) List() ([]*model.SkillRuntime, error) {
 	var items []*model.SkillRuntime

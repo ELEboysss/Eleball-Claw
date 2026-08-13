@@ -410,6 +410,7 @@ func main() {
 	agentWorkflowService.SetPlansDir(filepath.Join(cfg.Agent.BasePath, "plans"))
 	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry())
 	agentToolLoader.SetModuleService(moduleService)
+	moduleService.SetAgentToolLoader(agentToolLoader)
 	agentWorkflowService.SetAgentToolLoader(agentToolLoader)
 	agentService.SetAgentToolLoader(agentToolLoader)
 	agentService.SetModuleService(moduleService)

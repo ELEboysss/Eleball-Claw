@@ -96,7 +96,7 @@ type SkillRuntime struct {
 	Signature         string                 `json:"signature,omitempty"`
 	Capabilities      string                 `json:"capabilities"` // JSON ["search", ...]
 	Version           string                 `json:"version"`
-	AuthToken         string                 `json:"auth_token,omitempty"`
+	AuthToken         string                 `gorm:"index:idx_skill_runtime_auth_token" json:"auth_token,omitempty"`
 	Official          bool                   `gorm:"default:false" json:"official"`
 	// AutoSKU 是否据 tools/list 自动派生可购买 SKU（默认 false，保护手写 SKU 模块）。
 	// 为 true 时，supervisor/探活成功后由 SkillRuntimeSKUService 合成并同步 AgentItem+ToolManifest，

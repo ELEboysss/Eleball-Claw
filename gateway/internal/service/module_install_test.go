@@ -68,6 +68,8 @@ func setupCloudInstallTest(t *testing.T) (*ModuleService, *AgentMarketService, *
 
 	agentSvc := NewAgentMarketService(db, agentRepo, nil, nil, registry)
 	agentSvc.SetLocalFreeOnly(true)
+	// module-resolution 统一走 AgentToolLoader.ResolveModuleID：装配 loader（同 agent_service_test 等）
+	agentSvc.SetAgentToolLoader(NewAgentToolLoader(agentRepo, NewToolDriverRegistry()))
 
 	return moduleSvc, agentSvc, agentRepo
 }
