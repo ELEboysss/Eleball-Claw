@@ -103,7 +103,7 @@ func (s *ModuleService) materializePackageDir(modDir, side string, logger *zap.L
 	}
 	// 2. mcpServers → SkillRuntime + 派生 SKU
 	for key, srv := range pkg.MCPServers {
-		rt := buildPackageMCPRuntime(modName, pkg.Version, key, srv, origin, official)
+		rt := buildPackageMCPRuntime(modName, pkg.Version, key, srv, origin, official, modDir)
 		s.upsertRuntime(rt, logger)
 		skuID := modName + "-mcp-" + key
 		seen[skuID] = true
@@ -271,7 +271,7 @@ func buildPackageToolRuntime(pkgName, version string, t model.PackageTool, origi
 // buildPackageMCPRuntime 由 package.json mcpServers[] 构建 SkillRuntime（mcp 型）。
 // stdio→mcp_stdio/process（Command+Args）；http/sse→mcp_http/external（Endpoint+MCPServerConfig，
 // sse 优先后置 T2.5，此处按 http 连接）。
-func buildPackageMCPRuntime(pkgName, version, key string, srv model.PackageMCPServer, origin model.SkillRuntimeOrigin, official bool) *model.SkillRuntime {
+func buildPackageMCPRuntime(pkgName, version, key string, srv model.PackageMCPServer, origin model.SkillRuntimeOrigin, official bool, modDir string) *model.SkillRuntime {
 	id := pkgName + "-mcp-" + key
 	rt := &model.SkillRuntime{
 		ID:          id,
@@ -289,6 +289,7 @@ func buildPackageMCPRuntime(pkgName, version, key string, srv model.PackageMCPSe
 		rt.Transport = model.SkillRuntimeTransportMCPStdio
 		rt.Deployment = model.SkillRuntimeDeploymentProcess
 		splitArgv(&rt.Command, rt, srv.Command, srv.Args)
+		rt.WorkDir = modDir // T3.1：stdio 子进程以模块目录为工作目录，相对 command/args 才能定位脚本（与 legacy process 一致）
 		rt.SetMCPServerConfig(&model.MCPServerConfig{Command: rt.Command, Args: rt.ArgsList(), Env: srv.Env})
 	case "http", "sse":
 		rt.Transport = model.SkillRuntimeTransportMCPHTTP

@@ -504,19 +504,24 @@ type UserModuleGenerateRequest struct {
 	Description     string                         `json:"description"`      // 模块描述
 	ModuleID        string                         `json:"module_id"`        // 模块 ID（缺省据 name 生成）
 	MainPyContent   string                         `json:"main_py_content"`  // main.py 草稿内容（web 编辑器；非空时优先落盘，见 writeUserMainPy）
-	Username        string                         `json:"username"`         // 创建者用户名（写 module.json actor；前端 T5 传入，缺失则空）
+	Username        string                         `json:"username"`         // 创建者用户名（写 .origin 时记录；前端 T5 传入，缺失则空）
+	Version         string                         `json:"version"`          // package.json version（缺省 0.1.0，T3.1 秘技包）
+	Category        string                         `json:"category"`         // package.json category（缺省空，T3.1 秘技包）
 }
 
-// UserModuleGenerateResult 生成结果
+// UserModuleGenerateResult 生成结果（T3.1 秘技包：package.json + main.py 落盘 marketplace/{id}/）
 type UserModuleGenerateResult struct {
-	ModuleID  string    `json:"module_id"`
+	ModuleID  string    `json:"module_id"`   // 包名 = marketplace 目录名（slug）
+	RuntimeID string    `json:"runtime_id"`  // 物化 SkillRuntime ID = {pkg}-mcp-main（TestCall 用）
+	SKUID     string    `json:"sku_id"`      // 派生 SKU ID = {pkg}-mcp-main
 	ModuleDir string    `json:"module_dir"`
 	Tools     []MCPTool `json:"tools"`
 }
 
-// WriteUserModule 一键生成用户 stdio MCP 模块：写 module.json + main.py -> rescan -> autostart。
-// tools 为 ProbeStdio 探到的工具列表（写入 capabilities；SKU 由 supervisor 探活时 DeriveSKUs 派生）。
+// WriteUserModule 一键生成用户秘技包（T3.1）：写 package.json + main.py -> RescanPackage 物化 -> autostart。
+// tools 为 ProbeStdio 探到的工具列表（仅回传前端展示/试跑；SKU 由 RescanPackage 据 mcpServers 派生单条）。
 // main.py 优先用 web 编辑器草稿（main_py_content），其次拷贝 work_dir/args[0] 用户脚本，否则落 echo 骨架。
+// package.json 以 mcpServers.main（stdio）描述主脚本 → 运行时 {pkg}-mcp-main；.origin 侧车标记 user。
 func (s *ModuleService) WriteUserModule(req UserModuleGenerateRequest, tools []MCPTool) (*UserModuleGenerateResult, error) {
 	if req.Name == "" && req.ModuleID == "" {
 		return nil, errors.New("name 或 module_id 不能为空")
@@ -549,27 +554,32 @@ func (s *ModuleService) WriteUserModule(req UserModuleGenerateRequest, tools []M
 	if err := writeUserMainPy(moduleDir, req); err != nil {
 		return nil, err
 	}
-	if err := writeUserModuleJSON(moduleDir, moduleID, req, tools); err != nil {
+	// T3.1：写 package.json（mcpServers.main stdio 描述主脚本）+ .origin 侧车（user），替代 legacy module.json。
+	// RescanPackage 物化运行时 {pkg}-mcp-main（mcp_stdio/process，WorkDir=模块目录）与 SKU {pkg}-mcp-main。
+	runtimeID := moduleID + "-mcp-main"
+	if err := writeUserPackageJSON(moduleDir, moduleID, req); err != nil {
 		return nil, err
 	}
 
-	// rescan 注册 SkillRuntime（含 AutoSKU/Credentials/DriverID）；claw 侧收录全部来源
+	// rescan 物化 SkillRuntime + SKU（T2.2 RescanPackage）；claw 侧收录全部来源
 	if err := s.RescanPackage("claw", nil); err != nil {
 		return nil, fmt.Errorf("rescan 失败: %w", err)
 	}
 
-	// autostart：supervisor 探活成功后自动调 DeriveSKUs 派生 SKU（阶段 D2）。
-	// 失败重试：若模块已在运行（重新生成场景），先停旧进程再启动，使新 main.py 生效
+	// autostart：supervisor 拉起 stdio 进程并注册会话，使 TestCall/调用在线。
+	// 失败重试：若运行时已在运行（重新生成场景），先停旧进程再启动，使新 main.py 生效
 	// （startProcess 对已运行进程是 no-op，不重启则旧代码继续跑）。
 	if s.manager != nil {
-		if s.manager.IsRunning(moduleID) {
-			_ = s.manager.Stop(moduleID)
+		if s.manager.IsRunning(runtimeID) {
+			_ = s.manager.Stop(runtimeID)
 		}
-		_ = s.manager.Start(moduleID) // best-effort：失败不阻断生成，模块已落盘，下次 rescan/autostart 仍可拉起
+		_ = s.manager.Start(runtimeID) // best-effort：失败不阻断生成，包已落盘，下次 rescan/autostart 仍可拉起
 	}
 
 	return &UserModuleGenerateResult{
 		ModuleID:  moduleID,
+		RuntimeID: runtimeID,
+		SKUID:     runtimeID,
 		ModuleDir: moduleDir,
 		Tools:     tools,
 	}, nil
@@ -647,8 +657,12 @@ func writeUserMainPy(moduleDir string, req UserModuleGenerateRequest) error {
 	return os.WriteFile(target, []byte(userModuleEchoSkeleton), 0o644)
 }
 
-// writeUserModuleJSON 生成 module.json（mcp_stdio + process + auto_sku:true）。
-func writeUserModuleJSON(moduleDir, moduleID string, req UserModuleGenerateRequest, tools []MCPTool) error {
+// writeUserPackageJSON 生成 package.json（T3.1）：mcpServers.main 描述主脚本（stdio）。
+// name=moduleID（slug，满足包名校验），version/category 来自请求（version 缺省 0.1.0）。
+// env 透传请求 env 模板（${credentials.KEY}，spawn 时按运行时凭证解析）。
+// 同时写 .origin 侧车（user）：package.json 不声明 origin 防伪造（T1.3），RescanPackage 据侧车定 origin。
+// 注：凭证 defs 本期不写入（PackageMCPServer schema 无 credentials 字段），待 T4.3 激活/凭证链补。
+func writeUserPackageJSON(moduleDir, moduleID string, req UserModuleGenerateRequest) error {
 	command := req.Command
 	if command == "" {
 		command = "python"
@@ -657,34 +671,33 @@ func writeUserModuleJSON(moduleDir, moduleID string, req UserModuleGenerateReque
 	if len(args) == 0 {
 		args = []string{"main.py"}
 	}
-	caps := make([]string, 0, len(tools))
-	for _, t := range tools {
-		caps = append(caps, t.Name)
+	version := req.Version
+	if version == "" {
+		version = "0.1.0"
 	}
-	m := marketplaceModuleManifest{
-		ID:           moduleID,
-		Name:         req.Name,
-		Description:  req.Description,
-		Source:       "marketplace",
-		Transport:    "mcp_stdio",
-		Deployment:   "process",
-		Command:      command,
-		Args:         args,
-		AutoSKU:      true,
-		Env:          req.Env,
-		Credentials:  req.CredentialsMeta,
-		Capabilities: caps,
+	pkg := model.PackageManifest{
+		Name:        moduleID,
+		Version:     version,
+		Description: req.Description,
+		Category:    req.Category,
+		Level:       1,
+		MCPServers: map[string]model.PackageMCPServer{
+			"main": {
+				Transport: "stdio",
+				Command:   []string{command},
+				Args:      args,
+				Env:       req.Env,
+			},
+		},
 	}
-	m.Origin = "user" // type4a：/studio 脚本造秘技，actor=创建者用户名
-	m.Actor = req.Username
-	m.Driver.ID = moduleID
-	m.Driver.Name = req.Name
-	m.Driver.Description = req.Description
-	data, err := json.MarshalIndent(m, "", "  ")
+	data, err := json.MarshalIndent(pkg, "", "  ")
 	if err != nil {
-		return fmt.Errorf("序列化 module.json 失败: %w", err)
+		return fmt.Errorf("序列化 package.json 失败: %w", err)
 	}
-	return os.WriteFile(filepath.Join(moduleDir, "module.json"), data, 0o644)
+	if err := os.WriteFile(filepath.Join(moduleDir, "package.json"), data, 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(moduleDir, ".origin"), []byte(string(model.SkillRuntimeOriginUser)), 0o644)
 }
 
 // sanitizeUserModuleID 据展示名推导合法 module ID：小写 + [a-z0-9-]，其余折叠为单 -，

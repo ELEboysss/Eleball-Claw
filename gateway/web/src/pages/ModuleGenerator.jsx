@@ -6,9 +6,10 @@ import { moduleGeneratorApi, modelApi } from '../api/client'
 import DirectoryPicker from '../components/DirectoryPicker'
 import InterpreterMissingBanner from '../components/InterpreterMissingBanner'
 
-// 造秘技页（阶段 F1）：引导式生成用户 stdio MCP 模块。
+// 造秘技页（阶段 F1 + T3.1 秘技包）：引导式生成用户 stdio MCP 模块。
 // 流程：基本信息 + main.py 草稿（预填 echo 骨架，可编辑）+ 运行配置 + 凭证声明 -> 探测工具 -> 一键生成
-// 生成调 /mcp/generate（E3）：写 module.json+main.py -> rescan -> autostart -> DeriveSKUs。
+// 生成调 /mcp/generate（T3.1）：写 package.json+main.py+.origin -> RescanPackage 注册运行时 {pkg}-mcp-main
+//   + 派生 MCP SKU -> autostart -> TestCall 试跑。
 // 探测/生成遇到解释器缺失（D3）展示安装引导。
 //
 // 三方一致性约定：凭证 key `firecrawl_api_key` -> env 变量 `FIRECRAWL_API_KEY`（=key 大写）
@@ -96,6 +97,8 @@ export default function ModuleGenerator() {
 
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
+  const [version, setVersion] = useState('0.1.0')
+  const [category, setCategory] = useState('utility')
   const [moduleId, setModuleId] = useState('')
   const [command, setCommand] = useState('python')
   const [argsText, setArgsText] = useState('main.py')
@@ -214,6 +217,8 @@ export default function ModuleGenerator() {
         credentials_meta: credentialsMeta,
         name,
         description,
+        version: version || '0.1.0',
+        category: category || 'utility',
         module_id: moduleId || '',
         main_py_content: mainPy,
       })
@@ -273,7 +278,8 @@ export default function ModuleGenerator() {
     }
     setTest(tool.name, { calling: true, error: null, result: null })
     try {
-      const data = await moduleGeneratorApi.testCall(result.module_id, { tool_name: tool.name, arguments: args })
+      // T3.1：运行时 ID = {pkg}-mcp-main，TestCall 走运行时而非模块 ID
+      const data = await moduleGeneratorApi.testCall(result.runtime_id, { tool_name: tool.name, arguments: args })
       setTest(tool.name, { calling: false, result: data, error: null })
     } catch (e) {
       setTest(tool.name, { calling: false, error: e.message })
@@ -284,7 +290,7 @@ export default function ModuleGenerator() {
     <div>
       {/* 基本信息 */}
       <div className="card mb-4">
-        <SectionTitle icon={PackagePlus} desc="模块展示名与描述，会写进 module.json 与派生的秘技。">
+        <SectionTitle icon={PackagePlus} desc="模块展示名与描述，会写进 package.json 与派生的秘技。">
           基本信息
         </SectionTitle>
         <div className="grid sm:grid-cols-2 gap-3">
@@ -304,6 +310,24 @@ export default function ModuleGenerator() {
               value={moduleId}
               onChange={(e) => setModuleId(e.target.value)}
               placeholder="缺省据名称推导，如 my-translator"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-eleball-text-secondary mb-1">版本（x.y.z）</label>
+            <input
+              className="input text-sm font-mono"
+              value={version}
+              onChange={(e) => setVersion(e.target.value)}
+              placeholder="0.1.0"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-eleball-text-secondary mb-1">分类</label>
+            <input
+              className="input text-sm"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              placeholder="如 utility / workflow / research"
             />
           </div>
         </div>
@@ -602,7 +626,7 @@ export default function ModuleGenerator() {
             {(result.tools || []).length > 0 && (
               <div className="space-y-2">
                 <h3 className="text-xs font-semibold text-eleball-text-secondary">
-                  派生 {result.tools.length} 个工具，已自动上架为秘技（SKU ID：<span className="font-mono">{result.module_id}</span>-&lt;工具名&gt;）
+                  派生 {result.tools.length} 个工具，已自动上架为秘技（SKU ID：<span className="font-mono">{result.sku_id}</span>，运行时 <span className="font-mono">{result.runtime_id}</span>）
                 </h3>
                 {result.tools.map((t) => {
                   const st = testState[t.name] || {}

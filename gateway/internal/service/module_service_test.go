@@ -171,9 +171,9 @@ for line in sys.stdin:
     sys.stdout.write(json.dumps(r) + "\n"); sys.stdout.flush()
 `
 
-// TestModuleService_WriteUserModule E2E：/mcp/generate 全链路（阶段 E3）。
-// 探测用户脚本 -> 写 module.json+main.py 到 marketplace home -> rescan 注册 -> autostart 在线
-// -> supervisor 探活触发 DeriveSKUs 出 echo SKU。并验证官方模块防覆盖。
+// TestModuleService_WriteUserModule E2E：/mcp/generate 全链路（T3.1 秘技包）。
+// 探测用户脚本 -> 写 package.json+main.py+.origin 到 marketplace home -> RescanPackage 注册
+// 运行时 {pkg}-mcp-main + 派生 MCP SKU -> autostart 在线 -> TestCall 试跑返回结果。并验证官方模块防覆盖。
 func TestModuleService_WriteUserModule(t *testing.T) {
 	if !pythonAvailable() {
 		t.Skip("python 不在 PATH，跳过 stdio E2E 测试")
@@ -214,6 +214,8 @@ func TestModuleService_WriteUserModule(t *testing.T) {
 	result, err := svc.WriteUserModule(UserModuleGenerateRequest{
 		Name:        "My Echo Tool",
 		Description: "测试用户模块",
+		Version:     "1.2.3",
+		Category:    "utility",
 		Command:     "python",
 		Args:        []string{"main.py"},
 		WorkDir:     userScriptDir,
@@ -222,40 +224,61 @@ func TestModuleService_WriteUserModule(t *testing.T) {
 	// T6：新生成模块 ID = slug + uuid8 后缀，使重名模块不撞；后续断言用实际 ID 而非硬编码
 	assert.True(t, strings.HasPrefix(result.ModuleID, "my-echo-tool-"), "got %s", result.ModuleID)
 	moduleID := result.ModuleID
-	defer manager.Stop(moduleID)
+	runtimeID := result.RuntimeID
+	assert.Equal(t, moduleID+"-mcp-main", runtimeID, "运行时 ID = {pkg}-mcp-main")
+	defer manager.Stop(runtimeID)
 
-	// module.json + main.py 落盘
+	// package.json + main.py + .origin 落盘（T3.1 秘技包布局）
 	moduleDir := filepath.Join(root, moduleID)
-	require.FileExists(t, filepath.Join(moduleDir, "module.json"))
+	require.FileExists(t, filepath.Join(moduleDir, "package.json"))
 	require.FileExists(t, filepath.Join(moduleDir, "main.py"))
+	require.FileExists(t, filepath.Join(moduleDir, ".origin"))
 	// main.py 是用户脚本内容（含标记）而非骨架
 	data, err := os.ReadFile(filepath.Join(moduleDir, "main.py"))
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "user-echo-marker")
-	// module.json 含 auto_sku + mcp_stdio
-	mj, err := os.ReadFile(filepath.Join(moduleDir, "module.json"))
+	// .origin 侧车 = user（package.json 不声明 origin 防伪造，T1.3）
+	originBytes, err := os.ReadFile(filepath.Join(moduleDir, ".origin"))
 	require.NoError(t, err)
-	assert.Contains(t, string(mj), "\"auto_sku\": true")
-	assert.Contains(t, string(mj), "\"transport\": \"mcp_stdio\"")
-
-	// rescan 注册了 SkillRuntime（AutoSKU + DriverID）
-	rt, err := skillRuntimeRepo.GetByID(moduleID)
+	assert.Equal(t, "user", strings.TrimSpace(string(originBytes)))
+	// package.json 含 mcpServers.main（stdio）+ 版本/分类透传
+	pj, err := os.ReadFile(filepath.Join(moduleDir, "package.json"))
 	require.NoError(t, err)
-	assert.True(t, rt.AutoSKU)
-	assert.Equal(t, moduleID, rt.DriverID)
+	assert.Contains(t, string(pj), "\"mcpServers\"")
+	assert.Contains(t, string(pj), "\"transport\": \"stdio\"")
+	assert.Contains(t, string(pj), "\"version\": \"1.2.3\"")
+	assert.Contains(t, string(pj), "\"category\": \"utility\"")
+	// 结果透出 runtime/sku ID = {pkg}-mcp-main
+	assert.Equal(t, runtimeID, result.RuntimeID)
+	assert.Equal(t, runtimeID, result.SKUID)
 
-	// autostart -> 在线 -> DeriveSKUs 出 echo SKU
-	waitOnline(t, registry, moduleID, 10*time.Second)
-	deadline := time.Now().Add(15 * time.Second)
-	var echo *model.AgentItem
-	for time.Now().Before(deadline) {
-		if it, err := agentRepo.GetByID(moduleID + "-echo"); err == nil && it != nil {
-			echo = it
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	require.NotNil(t, echo, "echo SKU 未自动派生")
+	// rescan 注册了运行时 {pkg}-mcp-main（mcp_stdio/process，WorkDir=模块目录）
+	rt, err := skillRuntimeRepo.GetByID(runtimeID)
+	require.NoError(t, err)
+	assert.Equal(t, runtimeID, rt.DriverID)
+	assert.Equal(t, model.SkillRuntimeTransportMCPStdio, rt.Transport)
+	assert.Equal(t, model.SkillRuntimeDeploymentProcess, rt.Deployment)
+	assert.Equal(t, "python", rt.Command)
+	assert.Equal(t, moduleDir, rt.WorkDir)
+	assert.Equal(t, "1.2.3", rt.Version)
+
+	// WriteUserModule 内同步 RescanPackage -> 派生 MCP SKU {pkg}-mcp-main（非 auto_sku 派生）
+	sku, err := agentRepo.GetByID(runtimeID)
+	require.NoError(t, err)
+	skm, err := sku.Manifest()
+	require.NoError(t, err)
+	assert.Equal(t, "mcp", skm.Metadata["package_derived"])
+
+	// autostart -> 在线
+	waitOnline(t, registry, runtimeID, 10*time.Second)
+
+	// 试跑（T3.1 验收）：TestCall 直接调用 echo 工具返回结果
+	testCtx, cancelTest := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelTest()
+	tres, err := svc.TestCall(testCtx, runtimeID, TestCallRequest{ToolName: "echo", Arguments: map[string]interface{}{"message": "hi"}}, "u1")
+	require.NoError(t, err)
+	tcontent, _ := tres["content"].([]interface{})
+	require.NotEmpty(t, tcontent)
 
 	// main_py_content 优先：即便 work_dir 有同名脚本，web 编辑器草稿内容也应胜出落盘。
 	draftScript := "#!/usr/bin/env python3\n# drafted-content-marker\nimport sys\nsys.exit(0)\n"
@@ -267,7 +290,7 @@ func TestModuleService_WriteUserModule(t *testing.T) {
 		MainPyContent: draftScript,
 	}, tools)
 	require.NoError(t, err)
-	defer manager.Stop(result2.ModuleID)
+	defer manager.Stop(result2.RuntimeID)
 	// T6：drafted-tool-<uuid8>
 	assert.True(t, strings.HasPrefix(result2.ModuleID, "drafted-tool-"), "got %s", result2.ModuleID)
 	d2, err := os.ReadFile(filepath.Join(root, result2.ModuleID, "main.py"))
