@@ -405,7 +405,7 @@ func (h *ModuleHandler) ListCloudCatalog(c *gin.Context) {
 }
 
 // DownloadCloudModule 从云端下载完整秘技包并落盘（云端 GET /v1/market/modules/:id/package
-// -> moduleService.ApplyCloudPackage）。手动触发（D4：不自动拉取，用户主动点「下载到本地」）。
+// -> moduleService.ApplyPackage）。手动触发（D4：不自动拉取，用户主动点「下载到本地」）。
 // 透传用户 Authorization。返回落盘后的本地模块记录。
 func (h *ModuleHandler) DownloadCloudModule(c *gin.Context) {
 	id := c.Param("id")
@@ -444,7 +444,7 @@ func (h *ModuleHandler) DownloadCloudModule(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"code": 3001, "message": "解析云端模块包失败: " + err.Error()})
 		return
 	}
-	rec, err := h.moduleService.ApplyCloudPackage(cloudResp.Data)
+	rec, err := h.moduleService.ApplyPackage(cloudResp.Data)
 	if err != nil {
 		h.logger.Warn("应用云端模块包失败", zap.String("module_id", id), zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 5000, "message": "落盘失败: " + err.Error()})

@@ -627,17 +627,12 @@ func (s *ModuleService) WriteUserModule(req UserModuleGenerateRequest, tools []M
 	}, nil
 }
 
-// ApplyCloudPackage 将云端下载的模块元数据包落盘到 marketplace/<id>/ 并 rescan 注册。
-// 写 module.json + skus/*.json + docker-compose.claw.yml（image 引用，走 ACR pull_first），
-// 不写 main.py/Dockerfile（社区模块产物走 ACR 镜像，见 plan cloud-claw-module-download-sync D2）。
-//
-// 手动下载语义（D4：不自动拉取，用户主动触发）：已存在则覆盖 module.json/skus/compose，
-// 不删本地额外文件（如用户改过的 main.py / 凭证）。落盘后 best-effort 拉起（#6 L2）：
-// docker 触发 ACR pull_first 起 container，process 起 stdio；失败不阻断下载。
-// ApplyCloudPackage 下载整包落盘（云端 GET /v1/market/modules/:id/package -> PackageBundle）。
+// ApplyPackage 下载整包落盘（云端 GET /v1/market/modules/:id/package -> PackageBundle）。
 // 解包到 marketplace/<id>/：package.json + .origin 侧车 + skills/*/SKILL.md + skus/*.json +
 // tools_files（工具实现脚本/资源文件，含 docker-compose.claw.yml），然后 RescanPackage 物化 + best-effort 拉起。
-func (s *ModuleService) ApplyCloudPackage(pkg model.PackageBundle) (*model.SkillRuntime, error) {
+// skill/mcp/tool 三类：skill 经 skills/ 落盘、mcp 经 package.json.mcpServers 物化、tool 经 tools_files/skus 落盘。
+// 手动下载语义（D4：不自动拉取，用户主动触发）：已存在则覆盖同名字段，不删本地额外文件。
+func (s *ModuleService) ApplyPackage(pkg model.PackageBundle) (*model.SkillRuntime, error) {
 	if pkg.PackageID == "" || len(pkg.PackageJSON) == 0 {
 		return nil, errors.New("模块包缺少 package_id 或 package_json")
 	}

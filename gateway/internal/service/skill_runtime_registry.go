@@ -671,6 +671,13 @@ func (r *SkillRuntimeRegistry) setStatusExplicit(runtimeID string, status model.
 			zap.String("error", errMsg),
 		)
 	}
+	// 探活失败/离线时 version 为空：回退已记录版本，避免离线探测清空模块版本
+	// （version 是 manifest 属性，离线不代表版本未知；T4.4 更新检测依赖稳定版本比对）。
+	if version == "" {
+		if rt := r.Get(runtimeID); rt != nil {
+			version = rt.Version
+		}
+	}
 	st := &SkillRuntimeStatusSnapshot{
 		RuntimeID:    runtimeID,
 		Version:      version,

@@ -1,8 +1,10 @@
 package service
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/eleball/gateway/internal/model"
@@ -328,4 +330,70 @@ func TestRescanPackage_PackageOriginSidecar(t *testing.T) {
 	rt2, err := svc.GetModule("b-pkg-t1")
 	require.NoError(t, err)
 	assert.Equal(t, model.SkillRuntimeOriginBuiltin, rt2.Origin)
+}
+
+// TestApplyPackage_FullLanding 验证 T4.2 整包落盘：ApplyPackage 把 PackageBundle 解包到
+// marketplace/<id>/（package.json + .origin + skills/*/SKILL.md + skus/*.json + tools_files），
+// RescanPackage 物化 MCP 运行时 + 派生 SKU + 手写 SKU。skill/mcp/tool 三类全落盘。
+// mcpServers 用 http（External）避免测试 spawn 子进程；探活指向不可达端口快速失败。
+func TestApplyPackage_FullLanding(t *testing.T) {
+	svc, agentRepo, root := newRescanTestSvc(t)
+	bundle := model.PackageBundle{
+		PackageVersion: 2,
+		PackageID:      "demo-pkg",
+		Version:        "1.0.0",
+		PackageJSON: json.RawMessage(`{
+		  "name":"demo-pkg","version":"1.0.0","description":"demo package","level":2,
+		  "mcpServers":{"main":{"transport":"http","url":"http://127.0.0.1:1/mcp"}},
+		  "skills":[{"name":"writer","description":"写作"}]
+		}`),
+		Skills: []model.PackageBundleSkill{{Name: "writer", Content: "---\nname: writer\ndescription: 写作专家\n---\n\n你是写作专家\n"}},
+		ToolsFiles: map[string]string{
+			".origin": "user",
+			"main.py": "print('hi')\n",
+		},
+		SKUs: []model.PackageBundleSKU{{FileName: "echo", Content: json.RawMessage(`{"id":"demo-pkg-echo","name":"Echo","description":"回显","driver":"demo-pkg-mcp-main"}`)}},
+	}
+
+	rec, err := svc.ApplyPackage(bundle)
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	assert.Equal(t, "demo-pkg-mcp-main", rec.ID, "package 布局运行时 ID = {pkg}-mcp-main")
+
+	// 落盘完整性
+	modDir := filepath.Join(root, "demo-pkg")
+	assert.FileExists(t, filepath.Join(modDir, "package.json"))
+	originB, err := os.ReadFile(filepath.Join(modDir, ".origin"))
+	require.NoError(t, err)
+	assert.Equal(t, "user", strings.TrimSpace(string(originB)))
+	assert.FileExists(t, filepath.Join(modDir, "skills", "writer", "SKILL.md"))
+	assert.FileExists(t, filepath.Join(modDir, "main.py"))
+	assert.FileExists(t, filepath.Join(modDir, "skus", "echo.json"))
+
+	// MCP 运行时物化（http → MCPHTTP/External）
+	rt, err := svc.GetModule("demo-pkg-mcp-main")
+	require.NoError(t, err)
+	assert.Equal(t, model.SkillRuntimeOriginUser, rt.Origin, ".origin 侧车决定 provenance")
+	assert.Equal(t, model.SkillRuntimeTransportMCPHTTP, rt.Transport)
+	assert.Equal(t, model.SkillRuntimeDeploymentExternal, rt.Deployment)
+	assert.Equal(t, "http://127.0.0.1:1/mcp", rt.Endpoint)
+	assert.Equal(t, "1.0.0", rt.Version)
+
+	// 派生 MCP SKU + skill SKU + 手写 echo SKU 全部物化（skill/mcp/tool 三类）
+	for _, skuID := range []string{"demo-pkg-mcp-main", "demo-pkg-skill-writer", "demo-pkg-echo"} {
+		item, err := agentRepo.GetByID(skuID)
+		require.NoError(t, err, "SKU %s 应物化", skuID)
+		require.NotNil(t, item, "SKU %s 应物化", skuID)
+		assert.Equal(t, model.AgentStatusApproved, item.Status)
+	}
+	writer, err := agentRepo.GetByID("demo-pkg-skill-writer")
+	require.NoError(t, err)
+	assert.Equal(t, "你是写作专家", writer.SystemPrompt)
+
+	// 幂等：重复 ApplyPackage（同版本覆盖）不产生重复记录
+	_, err = svc.ApplyPackage(bundle)
+	require.NoError(t, err)
+	totalSKU, err := agentRepo.Count()
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), totalSKU)
 }
