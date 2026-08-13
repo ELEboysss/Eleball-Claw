@@ -115,6 +115,9 @@ type ToolManifest struct {
 	Description string `json:"description" binding:"required"`
 	// Driver 驱动类型
 	Driver ToolDriverType `json:"driver" binding:"required"`
+	// Version 派生 SKU 的来源版本（T2.3）：package.json version / module.json version。
+	// 与 AgentItem.Version 对齐，T4.4 更新检测据此比对；手写 skus/*.json 可显式声明。
+	Version string `json:"version,omitempty"`
 	// RuntimeType 模块运行时层级：builtin / wasm / sidecar / remote
 	// 用于描述工具实际运行环境，与 driver 字段配合决定调用路径。
 	RuntimeType string `json:"runtime_type,omitempty"`

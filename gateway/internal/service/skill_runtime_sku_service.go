@@ -31,7 +31,7 @@ type SkillRuntimeSKUService struct {
 	repo   *repository.AgentRepo
 	logger *zap.Logger
 	mu     sync.Mutex
-	last   map[string]string // runtime_id -> tools 签名（sha256），签名未变则跳过，避免每轮探活重复写库
+	last   map[string]string // runtime_id -> 派生缓存键（tools 签名 sha256 + "|" + version），未变则跳过，避免每轮探活重复写库
 }
 
 // NewSkillRuntimeSKUService 创建自动 SKU 派生服务
@@ -81,19 +81,21 @@ func FilterTools(rt *model.SkillRuntime, tools []MCPTool) []MCPTool {
 }
 
 // DeriveSKUs 根据 tools/list 结果为 auto_sku 运行时同步可购买 SKU。
-// 幂等：工具集签名（含 InputSchema）未变时直接跳过；失败不更新签名缓存，下次探活重试。
+// 幂等：缓存键（工具集签名含 InputSchema + 版本）未变时直接跳过；失败不更新缓存键，下次探活重试。
+// 版本并入缓存键：package 升级（版本变化）即使工具集不变也触发重派生，刷新已存在 SKU 的版本记录
+// （T2.3「version 驱动更新检测」——T4.4 消费 AgentItem.Version 比对）。
 // 空工具列表视为探活异常，跳过以免误下架全部 SKU。
 func (s *SkillRuntimeSKUService) DeriveSKUs(rt *model.SkillRuntime, tools []MCPTool) {
 	if rt == nil || !rt.AutoSKU || s.repo == nil || rt.DriverID == "" || len(tools) == 0 {
 		return
 	}
-	sig := toolsSignature(tools)
+	key := toolsSignature(tools) + "|" + rt.Version
 
 	// 全程持锁：派生是「读旧->算 diff->写新/改状态」的复合操作，串行化避免并发 Create 主键冲突。
-	// 探活周期 60s/5min，派生仅在工具集变化时触发，持锁耗时毫秒级，无 contention 顾虑。
+	// 探活周期 60s/5min，派生仅在工具集或版本变化时触发，持锁耗时毫秒级，无 contention 顾虑。
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.last[rt.ID] == sig {
+	if s.last[rt.ID] == key {
 		return
 	}
 	if err := s.deriveAndSync(rt, tools); err != nil {
@@ -104,7 +106,7 @@ func (s *SkillRuntimeSKUService) DeriveSKUs(rt *model.SkillRuntime, tools []MCPT
 		}
 		return
 	}
-	s.last[rt.ID] = sig
+	s.last[rt.ID] = key
 	if s.logger != nil {
 		s.logger.Info("自动派生 SKU 完成",
 			zap.String("runtime_id", rt.ID),
@@ -132,7 +134,7 @@ func (s *SkillRuntimeSKUService) deriveAndSync(rt *model.SkillRuntime, tools []M
 		skuID := moduleSKUID(rt.ID, t.Name)
 		seen[skuID] = true
 
-		manifest := buildDerivedManifest(rt, t)
+		manifest := buildDerivedManifest(rt, t, deriveKind(rt), rt.Version)
 		mfJSON, err := json.Marshal(manifest)
 		if err != nil {
 			continue
@@ -164,6 +166,7 @@ func (s *SkillRuntimeSKUService) deriveAndSync(rt *model.SkillRuntime, tools []M
 				Category:     manifest.Category,
 				Level:        model.AgentLevel(manifest.Level),
 				PriceDanwan:  manifest.PriceDanwan,
+				Version:      manifest.Version, // T2.3：版本随派生源记录
 				ManifestJSON: mfStr,
 				Status:       model.AgentStatusApproved,
 				CreatorID:    adminID,
@@ -197,12 +200,17 @@ func (s *SkillRuntimeSKUService) deriveAndSync(rt *model.SkillRuntime, tools []M
 
 // buildDerivedManifest 据 MCPTool + SkillRuntime 合成 ToolManifest。
 // - Driver=rt.DriverID：命中 SkillRuntimeDriver 别名，Execute 时 resolveRuntimeID 经 GetByDriverID 定位运行时。
+//   DriverID 已编码能力种类（package 三段：tool→{pkg}-{tool}、mcp→{pkg}-mcp-{key}），即 T2.3
+//   「按 kind 落 driver」：module/mcp 走运行时驱动，none（prompt-only skill）无运行时不会进入本路径。
+// - kind 标注能力种类（tool/mcp），写入 Metadata.package_derived（与 rescan 路径同键）。
+// - version=rt.Version（package.json version），写入 manifest.Version + Metadata.package_version，
+//   供 T4.4 更新检测比对。
 // - Metadata.module=rt.ID：AgentToolLoader 的在线门控（模块离线则不暴露工具）。
 // - Metadata.auto_sku_module=rt.ID：diff 时精确识别本服务派生的 SKU。
 // - Parameters=tool.InputSchema 透传（MCP JSON Schema 即 OpenAI function parameters）。
 // - Actions=[{Name:tool.Name}]：buildToolFunc 取首个 action 作为 tools/call 的 name。
 // - Credentials=rt.CredentialsMap()：从 module.json 透传，供 web 提示用户填写；env 模板 ${credentials.KEY} 引用同名 key。
-func buildDerivedManifest(rt *model.SkillRuntime, t MCPTool) model.ToolManifest {
+func buildDerivedManifest(rt *model.SkillRuntime, t MCPTool, kind, version string) model.ToolManifest {
 	name := t.Name
 	if t.Title != "" {
 		name = t.Title
@@ -229,6 +237,12 @@ func buildDerivedManifest(rt *model.SkillRuntime, t MCPTool) model.ToolManifest 
 		"module":          rt.ID,
 		"auto_sku_module": rt.ID,
 	}
+	if kind != "" {
+		metadata["package_derived"] = kind // T2.3：能力种类标注（tool/mcp），与 rescan 路径同键
+	}
+	if version != "" {
+		metadata["package_version"] = version // T2.3：随派生源记录，T4.4 更新检测比对
+	}
 	// M5：伪工具标注（read_resource/get_prompt 由协议层据 resources/prompts capability 合成），
 	// 供 UI 区分展示「资源读取器/提示获取器」而非普通工具。
 	switch t.Name {
@@ -243,6 +257,7 @@ func buildDerivedManifest(rt *model.SkillRuntime, t MCPTool) model.ToolManifest 
 		Name:        name,
 		Description: desc,
 		Driver:      model.ToolDriverType(rt.DriverID),
+		Version:     version,
 		RuntimeType: runtimeType,
 		Category:    rt.Name,
 		Level:       int(model.AgentLevelHuang),
@@ -251,6 +266,20 @@ func buildDerivedManifest(rt *model.SkillRuntime, t MCPTool) model.ToolManifest 
 		Actions:     []model.ToolAction{{Name: t.Name, Description: desc}},
 		Metadata:    metadata,
 		Credentials: rt.CredentialsMap(),
+	}
+}
+
+// deriveKind 判断 auto_sku 运行时的能力种类（T2.3）：MCP 传输（http/stdio/sse）→ mcp，
+// 其余（脚本/execute/http 工具）→ tool。prompt-only（skill）无运行时不会进入 DeriveSKUs。
+func deriveKind(rt *model.SkillRuntime) string {
+	if rt == nil {
+		return "tool"
+	}
+	switch rt.Transport {
+	case model.SkillRuntimeTransportMCPHTTP, model.SkillRuntimeTransportMCPStdio:
+		return "mcp" // T2.5 新增 mcp_sse 传输时在此并入
+	default:
+		return "tool"
 	}
 }
 

@@ -53,6 +53,7 @@ type AgentItem struct {
 	SystemPrompt  string      `gorm:"type:text" json:"system_prompt"`
 	ToolsJSON     string      `gorm:"type:text" json:"tools_json"`
 	ManifestJSON  string      `gorm:"type:text" json:"manifest_json"` // ToolManifest JSON，驱动与 SKU 标准描述
+	Version       string      `json:"version,omitempty"`              // T2.3：派生源版本（package.json/module.json），T4.4 更新检测比对；空=legacy/未知
 	Category      string      `gorm:"index" json:"category"`
 	PriceDanwan   int64       `json:"price_danwan"`
 	PriceElegant  *int64      `json:"price_elegant"`
@@ -204,6 +205,11 @@ func (a *AgentItem) SyncDerivedDisplay(mfStr string, m *ToolManifest) bool {
 	}
 	if a.Category != m.Category {
 		a.Category = m.Category
+		changed = true
+	}
+	// Version 为派生源属性（非展示字段，不受 pin 影响），随 manifest 刷新（T2.3）。
+	if a.Version != m.Version {
+		a.Version = m.Version
 		changed = true
 	}
 	if !a.IsPinned(pinFieldName) && a.Name != m.Name {

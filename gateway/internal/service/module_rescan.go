@@ -351,6 +351,7 @@ func (s *ModuleService) upsertPackageToolSKU(modName string, pkg *model.PackageM
 		Name:           t.Name,
 		Description:    t.Description,
 		Driver:         model.ToolDriverType(driverID),
+		Version:        pkg.Version, // T2.3：版本随派生源记录，T4.4 更新检测比对
 		RuntimeType:    runtimeType,
 		Category:       pkg.Category,
 		Level:          pkg.Level,
@@ -372,6 +373,7 @@ func (s *ModuleService) upsertPackageMCPDerivedSKU(modName string, pkg *model.Pa
 		Name:        key,
 		Description: "MCP 服务器 " + key,
 		Driver:      model.ToolDriverType(driverID),
+		Version:     pkg.Version, // T2.3：版本随派生源记录
 		RuntimeType: "remote",
 		Category:    pkg.Category,
 		Level:       pkg.Level,
@@ -397,6 +399,7 @@ func (s *ModuleService) upsertPackageSkillSKU(modName string, pkg *model.Package
 		Name:        sk.Name,
 		Description: sk.Description,
 		Driver:      model.ToolDriverNone,
+		Version:     pkg.Version, // T2.3：版本随派生源记录
 		RuntimeType: "prompt",
 		Category:    pkg.Category,
 		Level:       pkg.Level,
@@ -458,6 +461,7 @@ func (s *ModuleService) upsertHandwrittenSKU(modName, skuDir, fileName, adminID 
 		Level:        model.AgentLevel(mf.Level),
 		PriceDanwan:  mf.PriceDanwan,
 		PriceElegant: mf.PriceElegant,
+		Version:      mf.Version, // T2.3：手写 skus/*.json 可显式声明版本
 		ManifestJSON: mfStr,
 		Status:       model.AgentStatusApproved,
 		CreatorID:    adminID,
@@ -518,13 +522,14 @@ func (s *ModuleService) upsertPromptSKU(mf model.ToolManifest, body, adminID str
 		existing = nil
 	}
 	if existing != nil {
-		if existing.SystemPrompt == body && existing.Name == mf.Name && existing.Description == mf.Description {
+		if existing.SystemPrompt == body && existing.Name == mf.Name && existing.Description == mf.Description && existing.Version == mf.Version {
 			return
 		}
 		existing.ManifestJSON = mfStr
 		existing.Name = mf.Name
 		existing.Description = mf.Description
 		existing.Category = mf.Category
+		existing.Version = mf.Version // T2.3：版本变化（package 升级）触发刷新
 		existing.SystemPrompt = body
 		if existing.Status != model.AgentStatusApproved {
 			existing.Status = model.AgentStatusApproved
@@ -539,6 +544,7 @@ func (s *ModuleService) upsertPromptSKU(mf model.ToolManifest, body, adminID str
 		Name:         mf.Name,
 		Description:  mf.Description,
 		Category:     mf.Category,
+		Version:      mf.Version, // T2.3：skill 随 package.json version 记录
 		SystemPrompt: body,
 		ManifestJSON: mfStr,
 		Status:       model.AgentStatusApproved,
@@ -589,6 +595,7 @@ func (s *ModuleService) upsertSKUFromManifest(mf model.ToolManifest, adminID str
 		Level:        model.AgentLevel(mf.Level),
 		PriceDanwan:  mf.PriceDanwan,
 		PriceElegant: mf.PriceElegant,
+		Version:      mf.Version, // T2.3：版本随派生源记录
 		ManifestJSON: mfStr,
 		Status:       model.AgentStatusApproved,
 		CreatorID:    adminID,

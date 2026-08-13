@@ -127,12 +127,14 @@ func TestRescanPackage_PackageDir(t *testing.T) {
 	assert.Equal(t, model.SkillRuntimeDeploymentProcess, calcRT.Deployment)
 	assert.Equal(t, "python3", calcRT.Command)
 	assert.Equal(t, modDir, calcRT.WorkDir)
+	assert.Equal(t, "1.0.0", calcRT.Version) // T2.3：SkillRuntime 记录 package version
 
 	fetchRT, err := svc.GetModule("demo-pkg-web_fetch")
 	require.NoError(t, err)
 	assert.Equal(t, model.SkillRuntimeTransportRawHTTP, fetchRT.Transport)
 	assert.Equal(t, model.SkillRuntimeDeploymentExternal, fetchRT.Deployment)
 	assert.Equal(t, "https://api.example.com/fetch", fetchRT.Endpoint)
+	assert.Equal(t, "1.0.0", fetchRT.Version)
 
 	// mcpServers → SkillRuntime
 	mcpRT, err := svc.GetModule("demo-pkg-mcp-search")
@@ -141,6 +143,7 @@ func TestRescanPackage_PackageDir(t *testing.T) {
 	cfg := mcpRT.GetMCPServerConfig()
 	require.NotNil(t, cfg)
 	assert.Equal(t, "https://mcp.example.com/search", cfg.URL)
+	assert.Equal(t, "1.0.0", mcpRT.Version)
 
 	// 派生 SKU
 	calc, err := agentRepo.GetByID("demo-pkg-calc")
@@ -148,14 +151,18 @@ func TestRescanPackage_PackageDir(t *testing.T) {
 	assert.Equal(t, model.AgentStatusApproved, calc.Status)
 	assert.Equal(t, "工具", calc.Category)
 	assert.Equal(t, model.AgentLevelXuan, calc.Level)
+	assert.Equal(t, "1.0.0", calc.Version) // T2.3：AgentItem 记录派生源版本
 	mc, err := calc.Manifest()
 	require.NoError(t, err)
 	assert.Equal(t, model.ToolDriverType("demo-pkg-calc"), mc.Driver)
 	assert.Equal(t, "demo-pkg", mc.Metadata["package_module"])
+	assert.Equal(t, "1.0.0", mc.Version)
+	assert.Equal(t, "tool", mc.Metadata["package_derived"])
 
 	fetch, err := agentRepo.GetByID("demo-pkg-web_fetch")
 	require.NoError(t, err)
 	assert.Equal(t, model.AgentStatusApproved, fetch.Status)
+	assert.Equal(t, "1.0.0", fetch.Version)
 	mf, err := fetch.Manifest()
 	require.NoError(t, err)
 	assert.Equal(t, "remote", mf.RuntimeType)
@@ -163,11 +170,16 @@ func TestRescanPackage_PackageDir(t *testing.T) {
 	mcp, err := agentRepo.GetByID("demo-pkg-mcp-search")
 	require.NoError(t, err)
 	assert.Equal(t, model.AgentStatusApproved, mcp.Status)
+	assert.Equal(t, "1.0.0", mcp.Version)
+	mm, err := mcp.Manifest()
+	require.NoError(t, err)
+	assert.Equal(t, "mcp", mm.Metadata["package_derived"])
 
 	// skills → prompt-only 派生 SKU（body 即 SystemPrompt）
 	writer, err := agentRepo.GetByID("demo-pkg-skill-writer")
 	require.NoError(t, err)
 	assert.Equal(t, "你是写作专家", writer.SystemPrompt)
+	assert.Equal(t, "1.0.0", writer.Version)
 	mw, err := writer.Manifest()
 	require.NoError(t, err)
 	assert.Equal(t, model.ToolDriverNone, mw.Driver)
@@ -180,6 +192,40 @@ func TestRescanPackage_PackageDir(t *testing.T) {
 	totalSKU, err := agentRepo.Count()
 	require.NoError(t, err)
 	assert.Equal(t, int64(4), totalSKU)
+}
+
+// TestRescanPackage_VersionBump 升级 package.json version 后重扫 → SkillRuntime 与派生 SKU 的
+// Version 同步刷新（T2.3「version 驱动更新检测」的数据地基；比对逻辑在 T4.4 消费）。
+func TestRescanPackage_VersionBump(t *testing.T) {
+	svc, agentRepo, root := newRescanTestSvc(t)
+	modDir := filepath.Join(root, "ver-pkg")
+	require.NoError(t, os.MkdirAll(modDir, 0o755))
+	writeVerPkg := func(version string) {
+		pkgJSON := `{"name":"ver-pkg","version":"` + version + `","description":"ver pkg","tools":[{"name":"t1","description":"t","transport":"process","command":["python3","t.py"]}]}`
+		require.NoError(t, os.WriteFile(filepath.Join(modDir, "package.json"), []byte(pkgJSON), 0o644))
+	}
+
+	writeVerPkg("1.0.0")
+	require.NoError(t, svc.RescanPackage("claw", zap.NewNop()))
+	rt, err := svc.GetModule("ver-pkg-t1")
+	require.NoError(t, err)
+	assert.Equal(t, "1.0.0", rt.Version)
+	sku, err := agentRepo.GetByID("ver-pkg-t1")
+	require.NoError(t, err)
+	assert.Equal(t, "1.0.0", sku.Version)
+
+	// 升级到 2.0.0：重扫后版本同步刷新
+	writeVerPkg("2.0.0")
+	require.NoError(t, svc.RescanPackage("claw", zap.NewNop()))
+	rt2, err := svc.GetModule("ver-pkg-t1")
+	require.NoError(t, err)
+	assert.Equal(t, "2.0.0", rt2.Version)
+	sku2, err := agentRepo.GetByID("ver-pkg-t1")
+	require.NoError(t, err)
+	assert.Equal(t, "2.0.0", sku2.Version)
+	mf2, err := sku2.Manifest()
+	require.NoError(t, err)
+	assert.Equal(t, "2.0.0", mf2.Version)
 }
 
 // TestRescanPackage_DelistsStaleHandwritten 源 skus/*.json 删除后重扫 → 手写 SKU 下架

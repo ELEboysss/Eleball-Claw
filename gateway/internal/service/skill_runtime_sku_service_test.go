@@ -339,3 +339,77 @@ func TestDeriveSKUs_PinProtectsOverriddenFields(t *testing.T) {
 	require.Equal(t, "派生名", mf.Name, "manifest.Name 为派生源值，不受 pin 影响")
 	require.Equal(t, "派生描述", mf.Description)
 }
+
+// TestDeriveSKUs_RecordsVersionAndKind T2.3：派生 SKU 记录版本与能力种类。
+// 版本写入 AgentItem.Version + manifest.Version + metadata.package_version；kind 写入 package_derived。
+func TestDeriveSKUs_RecordsVersionAndKind(t *testing.T) {
+	repo := newSKUServiceTestDB(t)
+	svc := NewSkillRuntimeSKUService(repo, nil)
+	rt := autoSKUTestRuntime("mod-v", "drv_v")
+	rt.Version = "1.2.0"
+
+	svc.DeriveSKUs(rt, mcpTestTools("echo"))
+
+	item, err := repo.GetByID("mod-v-echo")
+	require.NoError(t, err)
+	require.Equal(t, "1.2.0", item.Version, "AgentItem.Version 记录派生源版本")
+
+	mf, err := item.Manifest()
+	require.NoError(t, err)
+	require.Equal(t, "1.2.0", mf.Version, "manifest.Version 记录派生源版本")
+	require.Equal(t, "1.2.0", mf.Metadata["package_version"])
+	require.Equal(t, "mcp", mf.Metadata["package_derived"], "stdio MCP 运行时 → kind=mcp")
+}
+
+// TestDeriveSKUs_ToolKind 非 MCP 传输（execute）的 auto_sku 运行时 → kind=tool。
+func TestDeriveSKUs_ToolKind(t *testing.T) {
+	repo := newSKUServiceTestDB(t)
+	svc := NewSkillRuntimeSKUService(repo, nil)
+	rt := autoSKUTestRuntime("mod-tv", "drv_tv")
+	rt.Version = "3.0.0"
+	rt.Transport = model.SkillRuntimeTransportExecute
+
+	svc.DeriveSKUs(rt, mcpTestTools("run"))
+
+	item, err := repo.GetByID("mod-tv-run")
+	require.NoError(t, err)
+	mf, err := item.Manifest()
+	require.NoError(t, err)
+	require.Equal(t, "tool", mf.Metadata["package_derived"], "execute 运行时 → kind=tool")
+	require.Equal(t, "3.0.0", item.Version)
+}
+
+// TestDeriveSKUs_SyncsVersionOnUpgrade 版本并入缓存键：tools 不变但 package 升级（版本变化）时
+// 重派生，已存在 SKU 的 Version 同步刷新（T2.3「version 驱动更新检测」数据地基）。
+func TestDeriveSKUs_SyncsVersionOnUpgrade(t *testing.T) {
+	repo := newSKUServiceTestDB(t)
+	svc := NewSkillRuntimeSKUService(repo, nil)
+	rt := autoSKUTestRuntime("mod-u", "drv_u")
+	tools := mcpTestTools("echo", "ping")
+
+	rt.Version = "1.0.0"
+	svc.DeriveSKUs(rt, tools)
+	ping, err := repo.GetByID("mod-u-ping")
+	require.NoError(t, err)
+	require.Equal(t, "1.0.0", ping.Version)
+
+	// package 升级：tools 不变，仅版本变化 -> 触发重派生并刷新版本
+	rt.Version = "2.0.0"
+	svc.DeriveSKUs(rt, tools)
+	ping, err = repo.GetByID("mod-u-ping")
+	require.NoError(t, err)
+	require.Equal(t, "2.0.0", ping.Version, "版本升级应刷新已存在 SKU 的 Version")
+	require.Equal(t, model.AgentStatusApproved, ping.Status, "重派生不应影响 status")
+	mf, err := ping.Manifest()
+	require.NoError(t, err)
+	require.Equal(t, "2.0.0", mf.Version)
+
+	// 同版本再扫 -> 幂等跳过（缓存键未变）
+	svc.DeriveSKUs(rt, tools)
+	ping, err = repo.GetByID("mod-u-ping")
+	require.NoError(t, err)
+	require.Equal(t, "2.0.0", ping.Version)
+	items, err := repo.ListByModuleSKUs("mod-u")
+	require.NoError(t, err)
+	require.Len(t, items, 2, "幂等：不产生重复 SKU")
+}
