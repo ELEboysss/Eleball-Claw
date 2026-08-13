@@ -44,10 +44,10 @@ func (s *AgentMarketService) SetLocalFreeOnly(b bool) {
 }
 
 // IsCloudPurchasedAgent 判定某秘技是否为云端安装来源（provenance）。
-// 用于 claw 云端秘技激活门控：SourceOrigin=="eleball_cloud" 的需 VIP1+；
-// claw 本地扫描/内置秘技（SourceOrigin 为 eleball_builtin 或空，如 SearchWeb）免门控。
-// 从 DB 读 skill_runtimes（非 registry 内存副本）：InstallFromCloudMeta 会把云端下发的
-// 来源属性写入 DB 副本，而 registry 内存副本可能是安装前注册的旧值。
+// 用于 claw 云端秘技激活门控：Origin=="cloud" 且非官方（claw 内置/官方免费模块）的需 VIP1+；
+// 官方维护模块（cloud+OfficialModuleIDs，如 agent-reach/mcp-hello）与 claw 内置（builtin）
+// /本地创作（user）免门控。从 DB 读 skill_runtimes（非 registry 内存副本）：
+// InstallFromCloudMeta 会把云端下发的来源属性写入 DB 副本，而 registry 内存副本可能是安装前注册的旧值。
 func (s *AgentMarketService) IsCloudPurchasedAgent(agentID string) bool {
 	item, err := s.agentRepo.GetByID(agentID)
 	if err != nil || item == nil {
@@ -66,7 +66,7 @@ func (s *AgentMarketService) IsCloudPurchasedAgent(agentID string) bool {
 	if err := s.db.First(&rt, "id = ?", moduleID).Error; err != nil {
 		return false
 	}
-	return rt.SourceOrigin == model.SkillRuntimeOriginEleballCloud
+	return rt.Origin == model.SkillRuntimeOriginCloud && !rt.Origin.IsOfficial(rt.ID)
 }
 
 // SetAgentToolLoader 设置动态工具加载器，用于购买后激活动态工具

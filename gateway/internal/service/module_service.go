@@ -140,8 +140,8 @@ func (s *ModuleService) ListInstalledModulesForUser(userID string, since *time.T
 			TransportType: string(rt.Transport),
 			DriverID:      rt.DriverID,
 			Official:      rt.Official,
-			SourceOrigin:  string(rt.SourceOrigin),
-			SourceActor:   rt.SourceActor,
+			Origin:        string(rt.Origin),
+			Actor:         rt.Actor,
 			Capabilities:  rt.CapabilitiesList(),
 			Manifest:      json.RawMessage(item.ManifestJSON),
 			AuthToken:     rt.AuthToken,
@@ -379,8 +379,8 @@ type ModuleInstallMeta struct {
 	TransportType string           `json:"transport_type"`
 	DriverID      string           `json:"driver_id,omitempty"`
 	Official      bool             `json:"official"`
-	SourceOrigin  string           `json:"source_origin,omitempty"` // 模块来源属性（eleball_cloud/eleball_builtin/user/mcp），云端下发，InstallFromCloudMeta 持久化到本地运行时
-	SourceActor   string           `json:"source_actor,omitempty"`  // 来源主体（user=用户名 / mcp=MCP 名）；eleball_* 为空
+	Origin        string           `json:"origin,omitempty"` // 模块来源（builtin/cloud/user），云端下发，InstallFromCloudMeta 持久化到本地运行时
+	Actor         string           `json:"actor,omitempty"`  // 来源主体（user 时为作者）；builtin/cloud（eleball）为空
 	Capabilities  []string         `json:"capabilities,omitempty"`
 	Image         *ModuleImageMeta `json:"image,omitempty"`
 	Signature     string           `json:"signature,omitempty"`
@@ -406,14 +406,13 @@ type marketplaceModuleManifest struct {
 	TransportType     string                         `json:"transport_type"`                // 兼容旧格式
 	Deployment        string                         `json:"deployment"`                    // 新格式
 	Source            string                         `json:"source"`                        // 新格式
-	SourceOrigin      string                         `json:"source_origin,omitempty"`       // 模块来源属性，缺失由 Register 按 side 默认
-	SourceActor       string                         `json:"source_actor,omitempty"`        // 来源主体（user=用户名 / mcp=MCP 名）
+	Origin            string                         `json:"origin,omitempty"` // 模块来源（builtin/cloud/user），缺失由 Register 按 side 默认
+	Actor             string                         `json:"actor,omitempty"`  // 来源主体（user 时为作者）
 	Command           string                         `json:"command,omitempty"`             // process/stdio 启动命令
 	Args              []string                       `json:"args,omitempty"`                // process/stdio 参数
 	Env               map[string]string              `json:"env,omitempty"`                 // process/stdio 环境变量
 	WorkDir           string                         `json:"work_dir,omitempty"`            // process/stdio 工作目录
 	DockerComposePath string                         `json:"docker_compose_path,omitempty"` // 新格式
-	SKUScope          string                         `json:"sku_scope"`
 	AutoSKU           bool                           `json:"auto_sku,omitempty"`         // true=探活后自动派生 SKU，免手写 skus/*.json
 	Credentials       map[string]model.CredentialDef `json:"credentials,omitempty"`      // auto_sku 模块凭证声明，派生 SKU 时透传进 manifest
 	AllowedTools      []string                       `json:"allowed_tools,omitempty"`    // G2 工具白名单（非空时仅保留）
@@ -525,7 +524,7 @@ type UserModuleGenerateRequest struct {
 	Description     string                         `json:"description"`      // 模块描述
 	ModuleID        string                         `json:"module_id"`        // 模块 ID（缺省据 name 生成）
 	MainPyContent   string                         `json:"main_py_content"`  // main.py 草稿内容（web 编辑器；非空时优先落盘，见 writeUserMainPy）
-	Username        string                         `json:"username"`         // 创建者用户名（写 module.json source_actor；前端 T5 传入，缺失则空）
+	Username        string                         `json:"username"`         // 创建者用户名（写 module.json actor；前端 T5 传入，缺失则空）
 }
 
 // UserModuleGenerateResult 生成结果
@@ -615,7 +614,7 @@ func (s *ModuleService) ApplyCloudPackage(pkg model.ModulePackage) (*model.Skill
 	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建模块目录失败: %w", err)
 	}
-	// module.json（云端原文，含 source_origin 显式标记，ensureMarketplaceModules 据此标 Official）
+	// module.json（云端原文，含 origin 显式标记，ensureMarketplaceModules 据 IsOfficial 推断 Official）
 	if err := os.WriteFile(filepath.Join(moduleDir, "module.json"), pkg.ModuleJSON, 0o644); err != nil {
 		return nil, fmt.Errorf("写 module.json 失败: %w", err)
 	}
@@ -691,14 +690,13 @@ func writeUserModuleJSON(moduleDir, moduleID string, req UserModuleGenerateReque
 		Deployment:   "process",
 		Command:      command,
 		Args:         args,
-		SKUScope:     "claw",
 		AutoSKU:      true,
 		Env:          req.Env,
 		Credentials:  req.CredentialsMeta,
 		Capabilities: caps,
 	}
-	m.SourceOrigin = "user" // type4a：/studio 脚本造秘技，actor=创建者用户名
-	m.SourceActor = req.Username
+	m.Origin = "user" // type4a：/studio 脚本造秘技，actor=创建者用户名
+	m.Actor = req.Username
 	m.Driver.ID = moduleID
 	m.Driver.Name = req.Name
 	m.Driver.Description = req.Description
@@ -968,20 +966,25 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 			existing = nil
 		}
 
+		// Official 据 origin 推断（T1.3，防伪造）：builtin 恒官方；cloud 仅官方维护列表内官方；
+		// user 一律非官方。T11 发布的 user 模块 module.json 带 origin=user，扫描回读即正确标非官方。
+		origin := model.SkillRuntimeOrigin(m.Origin)
+		official := origin.IsOfficial(moduleID)
+
 		rt := &model.SkillRuntime{
 			ID:                moduleID,
 			Name:              m.Name,
 			Description:       m.Description,
 			Source:            model.SkillRuntimeSource(m.Source),
-			SourceOrigin:      model.SkillRuntimeSourceOrigin(m.SourceOrigin),
-			SourceActor:       m.SourceActor,
+			Origin:            origin,
+			Actor:             m.Actor,
 			Transport:         transport,
 			Deployment:        deployment,
 			Endpoint:          endpoint,
 			Command:           m.Command,
 			WorkDir:           m.WorkDir,
 			DockerComposePath: m.DockerComposePath,
-			Official:          true,
+			Official:          official,
 			DriverID:          m.Driver.ID,
 			AutoSKU:           m.AutoSKU,
 		}
@@ -1139,8 +1142,8 @@ func (s *ModuleService) InstallMCPRuntime(req *MCPInstallRequest, tools []MCPToo
 		DriverID:    runtimeID, // 自驱动
 		Status:      model.SkillRuntimeStatusOffline,
 	}
-	rt.SourceOrigin = model.SkillRuntimeOriginMCP // type4b：MCP 安装，actor=MCP 名
-	rt.SourceActor = req.Name
+	rt.Origin = model.SkillRuntimeOriginUser // type4b：MCP 安装 fold 进 user，actor=MCP 名
+	rt.Actor = req.Name
 	caps := make([]string, 0, len(tools))
 	for _, t := range tools {
 		caps = append(caps, t.Name)
@@ -1322,15 +1325,16 @@ func parseSkillRuntimeDeployment(s string) model.SkillRuntimeDeployment {
 //   - official=true：直接激活本地预置（marketplace/ 已扫描注册），无需拉镜像。
 //   - 第三方：ImageInstaller 拉镜像 + 签名校验 + 启动容器，再写入 registry 激活。
 //
-// applyCloudSourceOrigin 把云端下发的来源属性写到本地运行时（type3：云端下载模块）。
-// meta.SourceOrigin 非空时覆盖本地扫描值（云端为权威来源）；空则保留本地值。返回是否有变更。
-func applyCloudSourceOrigin(rt *model.SkillRuntime, meta ModuleInstallMeta) bool {
-	if meta.SourceOrigin == "" {
+// applyCloudOrigin 把云端下发的来源属性写到本地运行时（type3：云端下载模块）。
+// meta.Origin 非空时覆盖本地扫描值（云端为权威来源）；空则保留本地值。返回是否有变更。
+// official 不写：据 origin 由 IsOfficial 推断（防伪造），InstallFromCloudMeta 不落 official 声明。
+func applyCloudOrigin(rt *model.SkillRuntime, meta ModuleInstallMeta) bool {
+	if meta.Origin == "" {
 		return false
 	}
-	changed := string(rt.SourceOrigin) != meta.SourceOrigin || rt.SourceActor != meta.SourceActor
-	rt.SourceOrigin = model.SkillRuntimeSourceOrigin(meta.SourceOrigin)
-	rt.SourceActor = meta.SourceActor
+	changed := string(rt.Origin) != meta.Origin || rt.Actor != meta.Actor
+	rt.Origin = model.SkillRuntimeOrigin(meta.Origin)
+	rt.Actor = meta.Actor
 	return changed
 }
 
@@ -1343,7 +1347,7 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Ski
 	var record *model.SkillRuntime
 	if existing, err := s.repo.GetByID(meta.ModuleID); err == nil && existing != nil {
 		// 幂等：校正云端下发的来源属性
-		if applyCloudSourceOrigin(existing, meta) {
+		if applyCloudOrigin(existing, meta) {
 			if err := s.repo.CreateOrUpdate(existing); err != nil {
 				return nil, fmt.Errorf("持久化模块来源属性失败: %w", err)
 			}
@@ -1355,7 +1359,7 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Ski
 		if err != nil || rec == nil {
 			return nil, fmt.Errorf("官方模块 %s 未在本地预置，请确认 marketplace/ 已包含", meta.ModuleID)
 		}
-		if applyCloudSourceOrigin(rec, meta) {
+		if applyCloudOrigin(rec, meta) {
 			if err := s.repo.CreateOrUpdate(rec); err != nil {
 				return nil, fmt.Errorf("持久化模块来源属性失败: %w", err)
 			}
@@ -1372,7 +1376,7 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Ski
 		if err != nil {
 			return nil, err
 		}
-		applyCloudSourceOrigin(rt, meta) // Register 持久化（含来源属性）
+		applyCloudOrigin(rt, meta) // Register 持久化（含来源属性）
 		if err := s.registry.Register(rt); err != nil {
 			return nil, fmt.Errorf("注册模块到 registry 失败: %w", err)
 		}

@@ -109,6 +109,8 @@ func main() {
 	// 用于迁移后判断该列是否本次新增、是否需要回填存量数据
 	migrator := db.Migrator()
 	hadSupportsChatColumn := migrator.HasColumn(&model.EleAgentModelConfig{}, "supports_chat")
+	hadOriginColumn := migrator.HasColumn(&model.SkillRuntime{}, "origin")
+	hadLegacySourceOriginColumn := migrator.HasColumn(&model.SkillRuntime{}, "source_origin")
 
 	// 自动迁移
 	if err := db.AutoMigrate(
@@ -150,6 +152,27 @@ func main() {
 	if !hadSupportsChatColumn {
 		if err := db.Exec("UPDATE ele_agent_model_configs SET supports_chat = ? WHERE protocol IN ('openai_compatible','anthropic_messages')", true).Error; err != nil {
 			logger.Warn("回填 ele_agent_model_configs.supports_chat 失败", zap.Error(err))
+		}
+	}
+
+	// 兼容迁移：旧 source_origin/source_actor 列 → 新 origin/actor（T1.3 字段改名）。
+	// 值映射：eleball_cloud→cloud、eleball_builtin→builtin、user→user、mcp→user（MCP 安装并入 user，actor 存 MCP 名）。
+	if hadLegacySourceOriginColumn {
+		if err := db.Exec(`UPDATE skill_runtimes SET
+			origin = CASE source_origin
+				WHEN 'eleball_cloud' THEN 'cloud'
+				WHEN 'eleball_builtin' THEN 'builtin'
+				ELSE 'user' END,
+			actor = COALESCE(NULLIF(source_actor, ''), '')
+			WHERE source_origin IS NOT NULL AND source_origin != ''`).Error; err != nil {
+			logger.Warn("迁移 skill_runtimes.source_origin→origin 失败", zap.Error(err))
+		}
+	}
+	// 兼容迁移：origin 为本次新增列时，回填存量 mcp_remote 运行时为 user（MCP 安装，actor 由写入点设置）。
+	// 仅加列当次执行（幂等）；后续由各写入点显式设置 origin，Register 兜底默认。
+	if !hadOriginColumn {
+		if err := db.Exec("UPDATE skill_runtimes SET origin = ? WHERE source = ?", "user", "mcp_remote").Error; err != nil {
+			logger.Warn("回填 skill_runtimes.origin 失败", zap.Error(err))
 		}
 	}
 
@@ -320,10 +343,10 @@ func main() {
 		logger.Warn("自动补齐内置 SkillRuntime 失败", zap.Error(err))
 	}
 
-	// 泛化同步官方 SKU（module.json sku_scope=cloud，如 agent-reach/mcp-hello）：
+	// 泛化同步官方 SKU（claw 收录本地 marketplace 全部，含 builtin 内置 + cloud 官方副本）：
 	// 启动即按 marketplace/<mod>/skus/*.json 同步 manifest（含 credentials/price），
 	// 不再依赖 --seed。已存在且 manifest 一致则跳过，保留 rating/counts 等统计。
-	if err := seed.SyncOfficialSKUs(agentRepo, "cloud", logger); err != nil {
+	if err := seed.SyncOfficialSKUs(agentRepo, "claw", logger); err != nil {
 		logger.Warn("同步官方 SKU 失败", zap.Error(err))
 	}
 

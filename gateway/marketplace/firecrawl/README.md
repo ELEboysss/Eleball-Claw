@@ -40,4 +40,4 @@ Firecrawl Cloud API 需要 API Key，在 `module.json` 顶层声明：
 3. SKU manifest 的 `driver=firecrawl` 命中 SkillRuntimeDriver 别名，`metadata.module=firecrawl` 做在线门控。
 4. 模块离线时，网关不会在 Agent 工作流中加载该工具。
 
-> 云端（cloud）不做 process autostart，故 firecrawl 仅在 claw 本地派生 SKU（`sku_scope=claw`）。
+> 云端（cloud）不做 process autostart，故 firecrawl 仅在 claw 本地派生 SKU（claw 本地收录 `origin=cloud` 官方模块副本，据 `OfficialModuleIDs` 推断 official）。

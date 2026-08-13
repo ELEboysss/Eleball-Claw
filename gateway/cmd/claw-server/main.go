@@ -123,7 +123,8 @@ func main() {
 	}
 
 	migrator := db.Migrator()
-	hadSourceOriginColumn := migrator.HasColumn(&model.SkillRuntime{}, "source_origin")
+	hadOriginColumn := migrator.HasColumn(&model.SkillRuntime{}, "origin")
+	hadLegacySourceOriginColumn := migrator.HasColumn(&model.SkillRuntime{}, "source_origin")
 
 	// 自动迁移：保留云端全表（claw 复用既有模型；裁剪在路由层）。
 	// claw 不迁移 users 表：账户统一走云端，本地无 user 行（VIPService.SetUnrestricted + agent SetUnrestricted 均不查本地 user）。
@@ -164,13 +165,24 @@ func main() {
 		logger.Fatal("数据库迁移失败", zap.Error(err))
 	}
 
-	// 兼容迁移：skill_runtimes.source_origin 为本次新增列时，回填存量 mcp_remote 运行时为 mcp。
-	// AutoMigrate 加列默认值（eleball_builtin）对所有存量行生效，内置集市模块正确；但 mcp_remote（MCP 安装）
-	// 应为 mcp，需显式修正。仅加列当次执行（幂等）；后续由各写入点显式设置 source_origin，Register 兜底默认。
-	// 注：云端下载模块（type3，应为 eleball_cloud）由下载写入点显式设置，不在此回填范围。
-	if !hadSourceOriginColumn {
-		if err := db.Exec("UPDATE skill_runtimes SET source_origin = ? WHERE source = ?", "mcp", "mcp_remote").Error; err != nil {
-			logger.Warn("回填 skill_runtimes.source_origin 失败", zap.Error(err))
+	// 兼容迁移：旧 source_origin/source_actor 列 → 新 origin/actor（T1.3 字段改名）。
+	// 值映射：eleball_cloud→cloud、eleball_builtin→builtin、user→user、mcp→user（MCP 安装并入 user，actor 存 MCP 名）。
+	if hadLegacySourceOriginColumn {
+		if err := db.Exec(`UPDATE skill_runtimes SET
+			origin = CASE source_origin
+				WHEN 'eleball_cloud' THEN 'cloud'
+				WHEN 'eleball_builtin' THEN 'builtin'
+				ELSE 'user' END,
+			actor = COALESCE(NULLIF(source_actor, ''), '')
+			WHERE source_origin IS NOT NULL AND source_origin != ''`).Error; err != nil {
+			logger.Warn("迁移 skill_runtimes.source_origin→origin 失败", zap.Error(err))
+		}
+	}
+	// 兼容迁移：origin 为本次新增列时，回填存量 mcp_remote 运行时为 user（MCP 安装，actor 由写入点设置）。
+	// 仅加列当次执行（幂等）；后续由各写入点显式设置 origin，Register 兜底默认。
+	if !hadOriginColumn {
+		if err := db.Exec("UPDATE skill_runtimes SET origin = ? WHERE source = ?", "user", "mcp_remote").Error; err != nil {
+			logger.Warn("回填 skill_runtimes.origin 失败", zap.Error(err))
 		}
 	}
 
@@ -301,7 +313,7 @@ func main() {
 		logger.Warn("自动补齐内置 SkillRuntime 失败", zap.Error(err))
 	}
 
-	// 泛化同步本地官方 SKU（module.json sku_scope=claw，如 search-web 免费搜索两变体）
+	// 泛化同步本地官方 SKU（claw 收录 marketplace 全部，如 search-web 免费搜索两变体）
 	if err := seed.SyncOfficialSKUs(agentRepo, "claw", logger); err != nil {
 		logger.Warn("同步本地官方 SKU 失败", zap.Error(err))
 	}

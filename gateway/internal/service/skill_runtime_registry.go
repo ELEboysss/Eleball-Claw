@@ -195,10 +195,10 @@ func (r *SkillRuntimeRegistry) Register(runtime *model.SkillRuntime) error {
 	if runtime.Capabilities == "" {
 		runtime.Capabilities = "[]"
 	}
-	// 模块来源属性缺失时按 side 默认（claw=eleball_builtin），覆盖所有写入路径
-	// （集市扫描/RegisterDriver/迁移）；云端下载=eleball_cloud、user/mcp 由各写入点显式设置后此处保留。
-	if runtime.SourceOrigin == "" {
-		runtime.SourceOrigin = model.SkillRuntimeOriginEleballBuiltin
+	// 模块来源缺失时按 side 默认（云端=cloud），覆盖所有写入路径
+	// （集市扫描/RegisterDriver/迁移）；user 由各写入点显式设置后此处保留。
+	if runtime.Origin == "" {
+		runtime.Origin = model.SkillRuntimeOriginCloud
 	}
 
 	if r.runtimeRepo != nil {

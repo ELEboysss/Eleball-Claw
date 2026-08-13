@@ -331,8 +331,8 @@ func (h *ModuleHandler) SubmitForReview(c *gin.Context) {
 		ModuleID:     rec.ID,
 		Name:         rec.Name,
 		Description:  rec.Description,
-		SourceOrigin: string(rec.SourceOrigin),
-		SourceActor:  rec.SourceActor,
+		Origin:       string(rec.Origin),
+		Actor:        rec.Actor,
 		Version:      rec.Version,
 		Capabilities: rec.CapabilitiesList(),
 	}

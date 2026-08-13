@@ -7,7 +7,7 @@
   "deployment": "docker",
   "endpoint": "http://localhost:8081/mcp",
   "docker_compose_path": "marketplace/mcp-hello/docker-compose.yml",
-  "sku_scope": "claw",
+  "origin": "cloud",
   "capabilities": ["hello", "echo"],
   "mcp_server_config": {
     "url": "http://localhost:8081/mcp",

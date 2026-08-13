@@ -15,22 +15,42 @@ const (
 	SkillRuntimeSourceMCPRemote   SkillRuntimeSource = "mcp_remote"  // 远端 MCP
 )
 
-// SkillRuntimeSourceOrigin 模块来源属性（provenance），刻画 todo 四类模块「谁提供的」。
+// SkillRuntimeOrigin 模块来源（provenance），刻画「谁提供的」。
 // 与 Source（运行时分类 builtin/marketplace/user_local/mcp_remote）正交：Source 区分运行时形态，
-// SourceOrigin 区分来源主体。集市扫描默认 cloud=eleball_cloud / claw=eleball_builtin；
-// 用户造模块=user（actor=用户名）、MCP 安装=mcp（actor=MCP 名）、云端下载=eleball_cloud。
-type SkillRuntimeSourceOrigin string
+// Origin 区分来源主体。cloud=云端市场（cloud 侧扫描默认 / claw 从云端下载）、builtin=随 claw 内置、
+// user=本地创作或安装（/studio 脚本造秘技 / MCP 安装，actor=作者名）。
+type SkillRuntimeOrigin string
 
 const (
-	// SkillRuntimeOriginEleballCloud eleball 云端：type1（云端运行）+ type3（claw 从云端下载）。
-	SkillRuntimeOriginEleballCloud SkillRuntimeSourceOrigin = "eleball_cloud"
-	// SkillRuntimeOriginEleballBuiltin eleball 内置：type2（claw 仓库预置）。
-	SkillRuntimeOriginEleballBuiltin SkillRuntimeSourceOrigin = "eleball_builtin"
-	// SkillRuntimeOriginUser 用户经 /studio 脚本造秘技：type4a（actor=用户名）。
-	SkillRuntimeOriginUser SkillRuntimeSourceOrigin = "user"
-	// SkillRuntimeOriginMCP 用户 MCP 安装：type4b（actor=MCP 名）。
-	SkillRuntimeOriginMCP SkillRuntimeSourceOrigin = "mcp"
+	// SkillRuntimeOriginBuiltin eleball 内置：随 claw 仓库分发（如 search-web）。
+	SkillRuntimeOriginBuiltin SkillRuntimeOrigin = "builtin"
+	// SkillRuntimeOriginCloud eleball 云端市场：cloud 侧扫描默认 / claw 从云端下载。
+	SkillRuntimeOriginCloud SkillRuntimeOrigin = "cloud"
+	// SkillRuntimeOriginUser 用户本地创作/安装：type4a /studio 脚本（actor=用户名）
+	// + type4b MCP 安装（actor=MCP 名）。
+	SkillRuntimeOriginUser SkillRuntimeOrigin = "user"
 )
+
+// OfficialModuleIDs eleball 官方维护的云端模块 ID。cloud 来源中仅这些为官方（免费直接下载，D9）；
+// builtin 恒官方；user 一律非官方。package.json/module.json 不声明 official（防伪造），一律由 IsOfficial 推断。
+var OfficialModuleIDs = map[string]bool{
+	"agent-reach": true,
+	"firecrawl":   true,
+	"mcp-hello":   true,
+}
+
+// IsOfficial 据 origin + moduleID 推断是否官方模块（official 不落库声明，防伪造）：
+// builtin 恒官方；cloud 仅官方维护列表内为官方；user 一律非官方。
+func (o SkillRuntimeOrigin) IsOfficial(moduleID string) bool {
+	switch o {
+	case SkillRuntimeOriginBuiltin:
+		return true
+	case SkillRuntimeOriginCloud:
+		return OfficialModuleIDs[moduleID]
+	default:
+		return false
+	}
+}
 
 // SkillRuntimeTransport 通信协议
 type SkillRuntimeTransport string
@@ -78,11 +98,11 @@ type SkillRuntime struct {
 	Name        string             `gorm:"not null" json:"name"`
 	Description string             `json:"description"`
 	Source      SkillRuntimeSource `gorm:"default:marketplace" json:"source"`
-	// SourceOrigin 模块来源属性（eleball_cloud/eleball_builtin/user/mcp），见 SkillRuntimeSourceOrigin。
-	// 集市扫描默认 eleball_builtin（claw 内置）；云端下载=eleball_cloud、用户造模块=user、MCP 安装=mcp 由各写入点显式设置。
-	SourceOrigin SkillRuntimeSourceOrigin `gorm:"default:eleball_builtin" json:"source_origin,omitempty"`
-	// SourceActor 来源主体：user 时为用户名、mcp 时为 MCP 名；eleball_* 为空。
-	SourceActor       string                 `json:"source_actor,omitempty"`
+	// Origin 模块来源（builtin/cloud/user），见 SkillRuntimeOrigin。
+	// 集市扫描默认 cloud（云端）；claw 内置模块扫描默认 builtin；用户造模块/MCP 安装=user。
+	Origin SkillRuntimeOrigin `gorm:"default:cloud" json:"origin"`
+	// Actor 来源主体：user 时为作者（用户名 / MCP 名）；builtin/cloud（eleball 维护）为空。
+	Actor             string                 `json:"actor,omitempty"`
 	Transport         SkillRuntimeTransport  `gorm:"not null" json:"transport"`
 	Deployment        SkillRuntimeDeployment `gorm:"not null" json:"deployment"`
 	Endpoint          string                 `json:"endpoint,omitempty"` // HTTP 类 transport 连接地址

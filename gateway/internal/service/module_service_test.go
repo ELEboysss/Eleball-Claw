@@ -41,6 +41,7 @@ func TestModuleService_RescanMarketplace_MCP(t *testing.T) {
   "module_id": "mcp-hello",
   "name": "MCP Hello",
   "description": "test",
+  "origin": "cloud",
   "transport_type": "mcp",
   "capabilities": ["hello"],
   "mcp_server_config": {"url": "http://mcp-hello:8080/mcp"},

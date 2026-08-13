@@ -93,7 +93,7 @@ func newArchiveTestSvc(t *testing.T) (*ModuleService, *gorm.DB) {
 }
 
 // TestPackageModule_ScriptModule 验证脚本模块打包：递归收录 module.json/main.py/skus/，
-// 排除 __pycache__/*.pyc 构建产物；且产物可被扫描器原样读回（含 source_origin=user 来源）。
+// 排除 __pycache__/*.pyc 构建产物；且产物可被扫描器原样读回（含 origin=user 来源）。
 func TestPackageModule_ScriptModule(t *testing.T) {
 	svc, _ := newArchiveTestSvc(t)
 
@@ -109,14 +109,13 @@ func TestPackageModule_ScriptModule(t *testing.T) {
   "name": "我的脚本",
   "description": "user script",
   "source": "marketplace",
-  "source_origin": "user",
-  "source_actor": "alice",
+  "origin": "user",
+  "actor": "alice",
   "transport": "mcp_stdio",
   "deployment": "process",
   "command": "python",
   "args": ["main.py"],
   "auto_sku": true,
-  "sku_scope": "claw",
   "capabilities": ["echo"],
   "driver": {"driver_id": "my-script-mod", "name": "我的脚本"}
 }`), 0o644))
@@ -153,15 +152,15 @@ func TestPackageModule_ScriptModule(t *testing.T) {
 	assert.Equal(t, "我的脚本", rt.Name)
 	assert.Equal(t, model.SkillRuntimeTransportMCPStdio, rt.Transport)
 	assert.Equal(t, model.SkillRuntimeDeploymentProcess, rt.Deployment)
-	assert.Equal(t, model.SkillRuntimeOriginUser, rt.SourceOrigin)
-	assert.Equal(t, "alice", rt.SourceActor)
+	assert.Equal(t, model.SkillRuntimeOriginUser, rt.Origin)
+	assert.Equal(t, "alice", rt.Actor)
 	assert.Equal(t, moduleID, rt.DriverID)
 	assert.True(t, rt.AutoSKU)
 	assert.Equal(t, []string{"echo"}, rt.CapabilitiesList())
 }
 
 // TestPackageModule_MCPRuntime 验证 DB-only MCP 安装模块打包：无磁盘文件时从 SkillRuntime
-// 物化 module.json，产物可被扫描器读回（含 source_origin=mcp 来源、transport/deployment 配置）。
+// 物化 module.json，产物可被扫描器读回（含 origin=user 来源（MCP fold 进 user）、transport/deployment 配置）。
 func TestPackageModule_MCPRuntime(t *testing.T) {
 	svc, _ := newArchiveTestSvc(t)
 
@@ -170,17 +169,17 @@ func TestPackageModule_MCPRuntime(t *testing.T) {
 
 	const moduleID = "mcp-remote-testpack"
 	rt := &model.SkillRuntime{
-		ID:           moduleID,
-		Name:         "TestPack MCP",
-		Description:  "db-only mcp",
-		Source:       model.SkillRuntimeSourceMCPRemote,
-		SourceOrigin: model.SkillRuntimeOriginMCP,
-		SourceActor:  "TestPack MCP",
-		Transport:    model.SkillRuntimeTransportMCPStdio,
-		Deployment:   model.SkillRuntimeDeploymentProcess,
-		Command:      "python",
-		AutoSKU:      true,
-		DriverID:     moduleID,
+		ID:          moduleID,
+		Name:        "TestPack MCP",
+		Description: "db-only mcp",
+		Source:      model.SkillRuntimeSourceMCPRemote,
+		Origin:      model.SkillRuntimeOriginUser, // type4b：MCP 安装 fold 进 user，actor=MCP 名
+		Actor:       "TestPack MCP",
+		Transport:   model.SkillRuntimeTransportMCPStdio,
+		Deployment:  model.SkillRuntimeDeploymentProcess,
+		Command:     "python",
+		AutoSKU:     true,
+		DriverID:    moduleID,
 	}
 	rt.SetArgs([]string{"main.py"})
 	rt.SetCapabilities([]string{"tool_a", "tool_b"})
@@ -201,12 +200,11 @@ func TestPackageModule_MCPRuntime(t *testing.T) {
 	assert.Equal(t, "TestPack MCP", m.Name)
 	assert.Equal(t, "mcp_stdio", m.GetTransport())
 	assert.Equal(t, "process", m.GetDeployment())
-	assert.Equal(t, "mcp", m.SourceOrigin)
-	assert.Equal(t, "TestPack MCP", m.SourceActor)
+	assert.Equal(t, "user", m.Origin)
+	assert.Equal(t, "TestPack MCP", m.Actor)
 	assert.Equal(t, moduleID, m.Driver.ID)
 	assert.True(t, m.AutoSKU)
 	assert.Equal(t, []string{"tool_a", "tool_b"}, m.Capabilities)
-	assert.Equal(t, "claw", m.SKUScope) // process -> claw
 
 	// 回扫验证
 	root2 := t.TempDir()
@@ -218,8 +216,8 @@ func TestPackageModule_MCPRuntime(t *testing.T) {
 	assert.Equal(t, "TestPack MCP", rt2.Name)
 	assert.Equal(t, model.SkillRuntimeTransportMCPStdio, rt2.Transport)
 	assert.Equal(t, model.SkillRuntimeDeploymentProcess, rt2.Deployment)
-	assert.Equal(t, model.SkillRuntimeOriginMCP, rt2.SourceOrigin)
-	assert.Equal(t, "TestPack MCP", rt2.SourceActor)
+	assert.Equal(t, model.SkillRuntimeOriginUser, rt2.Origin)
+	assert.Equal(t, "TestPack MCP", rt2.Actor)
 	assert.Equal(t, moduleID, rt2.DriverID)
 	assert.True(t, rt2.AutoSKU)
 	assert.Equal(t, []string{"tool_a", "tool_b"}, rt2.CapabilitiesList())

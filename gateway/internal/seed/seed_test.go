@@ -27,7 +27,7 @@ func setupSeedTestRepo(t *testing.T) *repository.AgentRepo {
 	return repository.NewAgentRepo(db)
 }
 
-// TestSyncClawOfficialSKUs 泛化扫描本地官方 SKU（sku_scope=claw，即 search-web
+// TestSyncClawOfficialSKUs 泛化扫描本地官方 SKU（origin=builtin，即 search-web
 // 百度千帆/必应两条免费 SKU），manifest 含 credentials 声明，幂等重跑不产生重复。
 func TestSyncClawOfficialSKUs(t *testing.T) {
 	repo := setupSeedTestRepo(t)

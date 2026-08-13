@@ -7,7 +7,7 @@
   "deployment": "docker",
   "endpoint": "http://localhost:8091",
   "docker_compose_path": "marketplace/search-web/docker-compose.yml",
-  "sku_scope": "claw",
+  "origin": "builtin",
   "capabilities": [
     "list_sources",
     "search",

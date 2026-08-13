@@ -7,7 +7,7 @@
   "deployment": "process",
   "command": "python",
   "args": ["main.py"],
-  "sku_scope": "claw",
+  "origin": "builtin",
   "capabilities": ["echo", "ping"],
   "driver": {
     "driver_id": "mcp_stdio_echo",

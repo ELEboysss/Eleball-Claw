@@ -56,13 +56,13 @@ type ModuleShareRequest struct {
 // ModuleSubmissionMeta 发往云端的审核元数据（T8）。
 // 仅供云端审核列表展示（T10），避免为列展示而逐个解压 tarball；
 // 权威注册信息以 tarball 内 module.json 为准（T11 解压发布时读取）。
-// 与云端 T9 submission 记录字段镜像；source_origin/source_actor 跨端保留 provenance。
+// 与云端 T9 submission 记录字段镜像；origin/actor 跨端保留 provenance。
 type ModuleSubmissionMeta struct {
 	ModuleID     string   `json:"module_id"`
 	Name         string   `json:"name"`
 	Description  string   `json:"description"`
-	SourceOrigin string   `json:"source_origin"`
-	SourceActor  string   `json:"source_actor"`
+	Origin       string   `json:"origin"`
+	Actor        string   `json:"actor"`
 	Version      string   `json:"version"`
 	Capabilities []string `json:"capabilities"`
 }
@@ -77,7 +77,7 @@ type ModulePackage struct {
 	SKUs           []ModulePackageSKU `json:"skus"`                    // skus/*.json
 	ComposeContent string             `json:"compose_content"`         // claw 版 docker-compose.yml（image 引用）
 	Version        string             `json:"version,omitempty"`       // 模块语义版本（可选，claw 比对更新用）
-	SourceOrigin   string             `json:"source_origin,omitempty"` // 归属（eleball_cloud/user/...）
+	Origin         string             `json:"origin,omitempty"`        // 归属（cloud/user/...）
 	UpdatedAt      time.Time          `json:"updated_at"`              // 云端最后更新时间（claw 比对本地决定是否更新）
 }
 
@@ -94,8 +94,8 @@ type ModuleCatalogItem struct {
 	Name         string    `json:"name"`
 	Description  string    `json:"description"`
 	Version      string    `json:"version,omitempty"`
-	SourceOrigin string    `json:"source_origin,omitempty"` // 归属（eleball_cloud/user/...）
-	SourceActor  string    `json:"source_actor,omitempty"`  // 来源主体（user=用户名）
+	Origin       string    `json:"origin,omitempty"` // 归属（cloud/user/...）
+	Actor        string    `json:"actor,omitempty"`  // 来源主体（user 时为作者）
 	Transport    string    `json:"transport"`
 	Capabilities []string  `json:"capabilities,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at"` // 云端最后更新时间（claw 比对本地决定是否更新）

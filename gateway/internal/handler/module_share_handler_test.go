@@ -51,14 +51,13 @@ func seedShareModule(t *testing.T, registry *service.SkillRuntimeRegistry, root,
   "name": "分享模块",
   "description": "for share test",
   "source": "marketplace",
-  "source_origin": "user",
-  "source_actor": "alice",
+  "origin": "user",
+  "actor": "alice",
   "transport": "mcp_stdio",
   "deployment": "process",
   "command": "python",
   "args": ["main.py"],
   "auto_sku": true,
-  "sku_scope": "claw",
   "capabilities": ["echo"],
   "driver": {"driver_id": "share-mod", "name": "分享模块"}
 }`), 0o644))
@@ -66,14 +65,14 @@ func seedShareModule(t *testing.T, registry *service.SkillRuntimeRegistry, root,
 	require.NoError(t, os.WriteFile(filepath.Join(modDir, "skus", "echo.json"), []byte(`{"name":"echo"}`), 0o644))
 
 	rt := &model.SkillRuntime{
-		ID:           moduleID,
-		Name:         "分享模块",
-		Description:  "for share test",
-		SourceOrigin: model.SkillRuntimeOriginUser,
-		SourceActor:  "alice",
-		Transport:    model.SkillRuntimeTransportMCPStdio,
-		Deployment:   model.SkillRuntimeDeploymentProcess,
-		Version:      "1.0.0",
+		ID:          moduleID,
+		Name:        "分享模块",
+		Description: "for share test",
+		Origin:      model.SkillRuntimeOriginUser,
+		Actor:       "alice",
+		Transport:   model.SkillRuntimeTransportMCPStdio,
+		Deployment:  model.SkillRuntimeDeploymentProcess,
+		Version:     "1.0.0",
 	}
 	rt.SetCapabilities([]string{"echo"})
 	require.NoError(t, registry.Register(rt))
@@ -154,11 +153,11 @@ func TestSubmitForReview_ShareToCloud(t *testing.T) {
 	assert.Equal(t, "sub-1", data["submission_id"])
 	assert.Equal(t, "pending", data["status"])
 
-	// 云端收到的元数据携带 provenance（source_origin/user + source_actor/alice）
+	// 云端收到的元数据携带 provenance（origin/user + actor/alice）
 	assert.Equal(t, "share-mod", gotMeta["module_id"])
 	assert.Equal(t, "分享模块", gotMeta["name"])
-	assert.Equal(t, "user", gotMeta["source_origin"])
-	assert.Equal(t, "alice", gotMeta["source_actor"])
+	assert.Equal(t, "user", gotMeta["origin"])
+	assert.Equal(t, "alice", gotMeta["actor"])
 	assert.Equal(t, "1.0.0", gotMeta["version"])
 	assert.Equal(t, []interface{}{"echo"}, gotMeta["capabilities"])
 

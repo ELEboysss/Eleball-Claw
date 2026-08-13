@@ -54,13 +54,11 @@ func AutoEnsureMarketplaceModules(svc *service.ModuleService, logger *zap.Logger
 
 // SyncOfficialSKUs 泛化扫描 marketplace/<module>/skus/*.json，按 manifest 同步官方 SKU。
 // 替代原先每个官方模块手写的 AgentReachSKUs/FirecrawlSKUs/SearchWebSKUs：新增官方模块
-// 只需在 marketplace/<mod>/ 下放 module.json（含 sku_scope）+ skus/*.json，无需改 Go。
+// 只需在 marketplace/<mod>/ 下放 module.json + skus/*.json，无需改 Go。
 //
-// side 决定收录哪些模块（按 module.json 的 sku_scope）：
-//   - 无 sku_scope（社区模块，source_origin=eleball_cloud/user）：两端都收录（社区模块天然跨端通用）
-//   - "cloud": 仅云端收录（cloud-only 模块）
-//   - "claw":  仅 claw 收录（claw-only 内置模块，如 search-web/mcp-stdio-echo）
-//   - "both":  两端收录（等价无 sku_scope，兼容旧标记）
+// 收录规则（T1.3）：按 origin 判定（取代旧 sku_scope）——
+//   - cloud 侧不收录 builtin（claw 内置模块，如 mcp-stdio-echo 不应出现在云端 seed/catalog）
+//   - claw 侧收录本地 marketplace 全部（builtin 内置 + cloud 官方副本 + user 本地创作）
 //
 // AgentItem.ID 约定 "{module}-{sku_file}"（与历史预置一致，不破坏已购记录）。
 // 已存在且 manifest 与文件一致则跳过；manifest 变化（如新增 credentials/price）则同步
@@ -86,8 +84,7 @@ func SyncOfficialSKUs(repo *repository.AgentRepo, side string, logger *zap.Logge
 			continue
 		}
 		modName := modEntry.Name()
-		scope, ok := readModuleSKUScope(filepath.Join(root, modName, "module.json"))
-		if !ok {
+		if !moduleDirHasJSON(filepath.Join(root, modName, "module.json")) {
 			// 无 module.json：尝试 SKILL.md prompt-only skill（Anthropic 标准，
 			// 1 SKILL.md = 1 SKU，body 即 SystemPrompt，不建 SkillRuntime）。
 			c, sy, sk := syncPromptSkillSKU(repo, root, modName, adminID, now, logger)
@@ -96,7 +93,7 @@ func SyncOfficialSKUs(repo *repository.AgentRepo, side string, logger *zap.Logge
 			skipped += sk
 			continue
 		}
-		if !scopeIncluded(scope, side) {
+		if !originIncluded(readModuleOrigin(filepath.Join(root, modName, "module.json")), side) {
 			continue
 		}
 		skuDir := filepath.Join(root, modName, "skus")
@@ -243,42 +240,49 @@ func resolveMarketplaceRoot() string {
 	return ""
 }
 
-// readModuleSKUScope 读 module.json 的 sku_scope。返回 (scope, ok)；无 module.json
-// 或缺 id/module_id 时 ok=false（视为非官方模块目录，跳过）。
+// moduleDirHasJSON 判断模块目录有合法 module.json（含 id）。sku_scope 已随 T1.3 移除，
+// 本函数仅用于区分「有 module.json 的模块」与「仅 SKILL.md 的 prompt-only skill」目录。
 // 支持新格式 id 与旧格式 module_id。
-func readModuleSKUScope(path string) (string, bool) {
+func moduleDirHasJSON(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", false
+		return false
 	}
 	var mod struct {
 		ID       string `json:"id"`
 		ModuleID string `json:"module_id"` // 兼容旧格式
-		SKUScope string `json:"sku_scope"`
 	}
 	if err := json.Unmarshal(data, &mod); err != nil {
-		return "", false
+		return false
 	}
 	id := mod.ID
 	if id == "" {
 		id = mod.ModuleID
 	}
-	if id == "" {
-		return "", false
-	}
-	return mod.SKUScope, true
+	return id != ""
 }
 
-// scopeIncluded 判断该模块的 sku_scope 是否被当前 side 收录。
-func scopeIncluded(scope, side string) bool {
-	if scope == "" {
-		// 无 sku_scope：社区模块两端通用（source_origin 为主分类维度，sku_scope 仅标记端专属）。
+// readModuleOrigin 读 module.json 的 origin（T1.3 取代旧 sku_scope）。
+func readModuleOrigin(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var mod struct {
+		Origin string `json:"origin"`
+	}
+	_ = json.Unmarshal(data, &mod)
+	return mod.Origin
+}
+
+// originIncluded 判断该模块的 origin 是否被当前 side 收录（T1.3 取代旧 scopeIncluded）。
+// cloud 侧不收录 builtin（claw 内置模块，如 mcp-stdio-echo 不应出现在云端 seed/catalog）；
+// claw 侧收录本地 marketplace 全部（builtin 内置 + cloud 官方副本 + user 本地创作）。
+func originIncluded(origin, side string) bool {
+	if side == "claw" {
 		return true
 	}
-	if side == "claw" {
-		return scope == "claw" || scope == "both"
-	}
-	return scope == "cloud" || scope == "both"
+	return origin != "builtin"
 }
 
 // shouldSyncManifest 判断是否需要用 marketplace 文件中的 manifest 覆盖数据库值。
@@ -299,8 +303,8 @@ func shouldSyncManifest(existing, fromFile string) bool {
 // 派生 SKU ID = skillmd-<frontmatter.name>，driver=none（checkModuleOnline/
 // checkDriverRegistered 对 none 一律返回 可用/已注册，故可展示可购买）。
 //
-// side 不过滤：SKILL.md 出现在哪一侧的 marketplace 就在哪一侧注册
-// （cloud/claw 的 marketplace 目录内容不同，自然区分；Anthropic 标准无 sku_scope 概念）。
+// 端不过滤：SKILL.md 出现在哪一侧的 marketplace 就在哪一侧注册
+// （cloud/claw 的 marketplace 目录内容不同，自然区分；各端只收录本端目录）。
 // frontmatter metadata.category 可覆盖默认分类「提示」。
 //
 // 返回 (created, synced, skipped) 计数，由调用方累加。无 SKILL.md 或解析失败时全 0（跳过）。

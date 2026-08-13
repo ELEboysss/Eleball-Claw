@@ -3,12 +3,11 @@
   "name": "Firecrawl 网页抓取",
   "description": "网页抓取、批量爬取、结构化数据提取。Docker MCP HTTP 模块，调用 Firecrawl API（须配 API Key）。",
   "source": "marketplace",
-  "source_origin": "eleball_cloud",
+  "origin": "cloud",
   "transport": "mcp_http",
   "deployment": "docker",
   "endpoint": "http://localhost:8095",
   "docker_compose_path": "marketplace/firecrawl/docker-compose.yml",
-  "sku_scope": "claw",
   "auto_sku": true,
   "mcp_server_config": {
     "url": "http://localhost:8095",

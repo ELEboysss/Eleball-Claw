@@ -23,8 +23,8 @@ import (
 //
 // tar 条目相对模块根扁平存放（module.json / main.py / skus/*.json ...，无 <id>/ 前缀）。
 // T11 云端审批通过后解压到 marketplace/<finalID>/，<finalID> 可由 cloud generateUniqueModuleID
-// 据冲突重命名，故扁平布局使「解压到云端自定目录」最自然。module.json 内已含 source_origin/
-// source_actor（脚本模块由 writeUserModuleJSON 写入、MCP 模块由 manifestFromSkillRuntime 物化），
+// 据冲突重命名，故扁平布局使「解压到云端自定目录」最自然。module.json 内已含 origin/
+// actor（脚本模块由 writeUserModuleJSON 写入、MCP 模块由 manifestFromSkillRuntime 物化），
 // 云端扫描器（ensureMarketplaceModules）读回即还原 provenance，无需额外元数据文件。
 
 // moduleArchiveExcludes 打包时排除的构建产物/系统文件，避免把 __pycache__/*.pyc 等带入分享产物。
@@ -174,15 +174,14 @@ func packageMCPRuntime(moduleID string, rt *model.SkillRuntime) (*PackageModuleR
 
 // manifestFromSkillRuntime 把 SkillRuntime 反序列化为 marketplaceModuleManifest，
 // 镜像 ensureMarketplaceModules 的读取侧，使物化的 module.json 可被扫描器原样读回。
-// sku_scope：process 模块云端不做 autostart（见 firecrawl/README）-> claw；external(http) 可跨端 -> both。
 func manifestFromSkillRuntime(rt *model.SkillRuntime) marketplaceModuleManifest {
 	m := marketplaceModuleManifest{
 		ID:              rt.ID,
 		Name:            rt.Name,
 		Description:     rt.Description,
 		Source:          string(rt.Source),
-		SourceOrigin:    string(rt.SourceOrigin),
-		SourceActor:     rt.SourceActor,
+		Origin:          string(rt.Origin),
+		Actor:           rt.Actor,
 		Transport:       string(rt.Transport),
 		Deployment:      string(rt.Deployment),
 		Endpoint:        rt.Endpoint,
@@ -198,11 +197,6 @@ func manifestFromSkillRuntime(rt *model.SkillRuntime) marketplaceModuleManifest 
 	}
 	if cfg := rt.GetMCPServerConfig(); cfg != nil {
 		m.MCPServerConfig = cfg
-	}
-	if rt.Deployment == model.SkillRuntimeDeploymentProcess {
-		m.SKUScope = "claw"
-	} else {
-		m.SKUScope = "both"
 	}
 	m.Driver.ID = rt.DriverID
 	m.Driver.Name = rt.Name

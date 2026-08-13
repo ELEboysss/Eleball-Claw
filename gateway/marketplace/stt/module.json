@@ -7,7 +7,7 @@
   "deployment": "docker",
   "endpoint": "http://localhost:8092",
   "docker_compose_path": "marketplace/stt/docker-compose.yml",
-  "sku_scope": "claw",
+  "origin": "builtin",
   "capabilities": [
     "transcribe"
   ],

@@ -50,13 +50,14 @@ func setupCloudInstallTest(t *testing.T) (*ModuleService, *AgentMarketService, *
 	registry.SetRepo(skillRuntimeRepo)
 	manager := NewSkillRuntimeManager(registry, nil)
 
-	// 预置 official 模块（marketplace 扫描的等价物）
+	// 预置 official 模块（marketplace 扫描的等价物：search-web 为 claw 内置，origin=builtin）
 	rt := &model.SkillRuntime{
 		ID:           "search-web",
 		Name:         "Search Web",
 		Endpoint:     server.URL,
 		Transport:    model.SkillRuntimeTransportExecute,
 		Deployment:   model.SkillRuntimeDeploymentDocker,
+		Origin:       model.SkillRuntimeOriginBuiltin,
 		Official:     true,
 		DriverID:     "search-web",
 		Status:       model.SkillRuntimeStatusOffline,
@@ -96,7 +97,7 @@ func cloudInstallMeta() ModuleInstallMeta {
 		TransportType: "module",
 		DriverID:      "search-web",
 		Official:      true,
-		SourceOrigin:  "eleball_cloud",
+		Origin:        "cloud",
 		Manifest:      raw,
 		AuthToken:     "tok-search-web",
 	}
@@ -111,7 +112,7 @@ func TestInstallFromCloudMeta_OfficialUpsertsDriver(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, record)
 	assert.True(t, record.Official)
-	assert.Equal(t, model.SkillRuntimeOriginEleballCloud, record.SourceOrigin)
+	assert.Equal(t, model.SkillRuntimeOriginCloud, record.Origin)
 
 	rt, err := moduleSvc.repo.GetByID("search-web")
 	require.NoError(t, err)
@@ -126,38 +127,38 @@ func TestInstallFromCloudMeta_OfficialUpsertsDriver(t *testing.T) {
 	assert.Equal(t, "search-web", rt.DriverID)
 }
 
-// TestInstallFromCloudMeta_PersistsSourceOrigin 云端下发的来源属性持久化到本地运行时
-// （type3：official 模块扫描默认 eleball_builtin，云端下发 eleball_cloud 时校正）。
-func TestInstallFromCloudMeta_PersistsSourceOrigin(t *testing.T) {
+// TestInstallFromCloudMeta_PersistsOrigin 云端下发的来源属性持久化到本地运行时
+// （type3：official 模块本地预置为 builtin，云端下发 cloud/user 时校正）。
+func TestInstallFromCloudMeta_PersistsOrigin(t *testing.T) {
 	moduleSvc, _, _ := setupCloudInstallTest(t)
 
-	// 预置模块经 Register 兜底默认为 eleball_builtin（claw 侧）
+	// 预置模块为 claw 内置（origin=builtin，见 setupCloudInstallTest）
 	rt0, err := moduleSvc.repo.GetByID("search-web")
 	require.NoError(t, err)
-	assert.Equal(t, model.SkillRuntimeOriginEleballBuiltin, rt0.SourceOrigin)
+	assert.Equal(t, model.SkillRuntimeOriginBuiltin, rt0.Origin)
 
-	// 云端下发 eleball_cloud -> 幂等路径校正并持久化
+	// 云端下发 cloud -> 幂等路径校正并持久化
 	meta := cloudInstallMeta()
-	meta.SourceOrigin = "eleball_cloud"
+	meta.Origin = "cloud"
 	_, err = moduleSvc.InstallFromCloudMeta(meta)
 	require.NoError(t, err)
 	rt, err := moduleSvc.repo.GetByID("search-web")
 	require.NoError(t, err)
-	assert.Equal(t, model.SkillRuntimeOriginEleballCloud, rt.SourceOrigin)
+	assert.Equal(t, model.SkillRuntimeOriginCloud, rt.Origin)
 
 	// 用户共享模块（user + actor）-> 幂等重装校正
 	meta2 := cloudInstallMeta()
-	meta2.SourceOrigin = "user"
-	meta2.SourceActor = "alice"
+	meta2.Origin = "user"
+	meta2.Actor = "alice"
 	_, err = moduleSvc.InstallFromCloudMeta(meta2)
 	require.NoError(t, err)
 	rt2, err := moduleSvc.repo.GetByID("search-web")
 	require.NoError(t, err)
-	assert.Equal(t, model.SkillRuntimeOriginUser, rt2.SourceOrigin)
-	assert.Equal(t, "alice", rt2.SourceActor)
+	assert.Equal(t, model.SkillRuntimeOriginUser, rt2.Origin)
+	assert.Equal(t, "alice", rt2.Actor)
 }
 
-// TestIsCloudPurchasedAgent_LocalPresetExempt 本地扫描预置模块（SourceOrigin=eleball_builtin）的秘技免 VIP 门控
+// TestIsCloudPurchasedAgent_LocalPresetExempt 本地扫描预置模块（Origin=builtin）的秘技免 VIP 门控
 func TestIsCloudPurchasedAgent_LocalPresetExempt(t *testing.T) {
 	_, agentSvc, agentRepo := setupCloudInstallTest(t)
 
@@ -223,7 +224,7 @@ func TestEnsureCloudAgentProvision(t *testing.T) {
 	require.Len(t, tools, 1)
 	assert.Equal(t, "agent-search-web", tools[0].ID)
 
-	// 云端安装的官方模块 SourceOrigin=eleball_cloud，provenance 判定为云端来源（激活需 VIP1+）
+	// 云端安装的官方模块 Origin=cloud，provenance 判定为云端来源（激活需 VIP1+）
 	assert.True(t, agentSvc.IsCloudPurchasedAgent("agent-search-web"))
 
 	// 再次 toggle 为关闭
