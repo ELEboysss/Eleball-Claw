@@ -56,6 +56,20 @@ func getGitSHA() string {
 	return "unknown"
 }
 
+// mapConnStatusToRuntime 将 MCP 连接管理器状态映射为运行时状态（T2.5 状态推送）。
+func mapConnStatusToRuntime(s service.MCPConnectionStatus) model.SkillRuntimeStatus {
+	switch s {
+	case service.MCPConnectionStatusConnected:
+		return model.SkillRuntimeStatusActive
+	case service.MCPConnectionStatusFailed:
+		return model.SkillRuntimeStatusDegraded
+	case service.MCPConnectionStatusDisabled:
+		return model.SkillRuntimeStatusDisabled
+	default:
+		return model.SkillRuntimeStatusActivating
+	}
+}
+
 func main() {
 	// 子命令：module（模块管理，不启动网关）；setup-python（预装托管 Python，不启动网关）；
 	// setup-node（预装托管 Node.js）；serve 默认（剥离 serve 让 flag 正常解析）。
@@ -307,6 +321,16 @@ func main() {
 	skillRuntimeSKUService := service.NewSkillRuntimeSKUService(agentRepo, logger)
 	skillRuntimeManager.SetSKUService(skillRuntimeSKUService)
 	skillRuntimeRegistry.SetSKUService(skillRuntimeSKUService)
+	// T2.5：MCP 连接管理器成为 MCP 连接权威。HTTP 与 stdio 协议实例与 Registry 共享，
+	// 状态跃迁经 onStatusChange 推回 Registry（列表时现算 ModuleOnline，无持久化列/缓存层）。
+	mcpHTTPProtocol := service.NewMCPHTTPProtocol(nil)
+	skillRuntimeRegistry.SetMCPHTTPProtocol(mcpHTTPProtocol)
+	mcpConnMgr := service.NewMCPConnectionManager(mcpHTTPProtocol, mcpStdioProtocol, logger)
+	mcpConnMgr.SetConnectTimeout(10 * time.Second)
+	skillRuntimeRegistry.SetMCPConnectionManager(mcpConnMgr)
+	mcpConnMgr.SetStatusChangeHandler(func(runtimeID string, st service.MCPConnectionStatus) {
+		skillRuntimeRegistry.SetStatus(runtimeID, mapConnStatusToRuntime(st), nil, "")
+	})
 	// F1 收尾：skill-maker AI 起草 main.py 注入对话服务（能力描述 -> 对话模型生成 stdio MCP 脚本）
 	moduleService.SetChatProxyService(chatService)
 	// 控制台「启动服务」按钮拉起 docker 模块：注入 docker compose up 回调（逻辑在本 cmd 内）。

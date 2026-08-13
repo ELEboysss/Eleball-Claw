@@ -48,6 +48,7 @@ type SkillRuntimeRegistry struct {
 	mcpHTTP       *MCPHTTPProtocol        // 用于 MCP HTTP 探活
 	mcpStdio      *MCPStdioProtocol       // 用于 MCP stdio 探活与调用（与 Manager 共享）
 	skuService    *SkillRuntimeSKUService // auto_sku 运行时探活成功后自动派生 SKU
+	mcpManager    *MCPConnectionManager   // T2.5 MCP 连接权威：非 nil 时 MCP probe/execute 委托（状态机+重连+推送）
 }
 
 // NewSkillRuntimeRegistry 创建运行时注册表
@@ -92,6 +93,25 @@ func (r *SkillRuntimeRegistry) SetMCPStdioProtocol(p *MCPStdioProtocol) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.mcpStdio = p
+}
+
+// SetMCPHTTPProtocol 注入共享的 HTTP MCP 协议实例（T2.5：与 MCPConnectionManager 共享，
+// 由 main 创建后覆盖内部默认实例）。logger 非空时一并注入，保证探活/协商日志一致。
+func (r *SkillRuntimeRegistry) SetMCPHTTPProtocol(p *MCPHTTPProtocol) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.mcpHTTP = p
+	if p != nil && r.logger != nil {
+		p.SetLogger(r.logger)
+	}
+}
+
+// SetMCPConnectionManager 注入 MCP 连接管理器（T2.5 连接权威）。非 nil 时 MCP probe/execute
+// 委托管理器（连接状态机 + 超时 + 重连 + onStatusChange 推送）；nil 保持既有直连路径（默认/测试）。
+func (r *SkillRuntimeRegistry) SetMCPConnectionManager(mgr *MCPConnectionManager) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.mcpManager = mgr
 }
 
 // SetSKUService 注入自动 SKU 派生服务。mcp_http 探活成功并拿到 tools/list 后，
@@ -398,6 +418,10 @@ func (r *SkillRuntimeRegistry) rawHTTPProtocol(endpoint, action string, params m
 }
 
 func (r *SkillRuntimeRegistry) mcpHTTPProtocol(rt *model.SkillRuntime, action string, params map[string]interface{}, userID string) (map[string]interface{}, error) {
+	// T2.5：注入 manager 后委托其执行（传输转发 + 连接语义统一）；nil 保持既有直连路径。
+	if r.mcpManager != nil {
+		return r.mcpManager.Execute(rt, action, params, userID)
+	}
 	if r.mcpHTTP == nil {
 		return nil, errors.New("MCP HTTP 协议未初始化")
 	}
@@ -410,6 +434,10 @@ func (r *SkillRuntimeRegistry) mcpHTTPProtocol(rt *model.SkillRuntime, action st
 }
 
 func (r *SkillRuntimeRegistry) mcpStdioProtocol(rt *model.SkillRuntime, action string, params map[string]interface{}, userID string) (map[string]interface{}, error) {
+	// T2.5：注入 manager 后委托其执行（传输转发 + 连接语义统一）；nil 保持既有直连路径。
+	if r.mcpManager != nil {
+		return r.mcpManager.Execute(rt, action, params, userID)
+	}
 	if r.mcpStdio == nil {
 		return nil, errors.New("MCP stdio 协议未初始化")
 	}
@@ -511,6 +539,10 @@ func (r *SkillRuntimeRegistry) probeMCPHTTP(runtimeID string) *SkillRuntimeStatu
 	if rt == nil {
 		return r.setStatus(runtimeID, false, "", nil, "runtime 记录不存在")
 	}
+	// T2.5：注入 manager 后经其探活（连接状态机 + 重连 + 推送）；nil 保持既有直连路径。
+	if r.mcpManager != nil {
+		return r.probeMCPViaManager(rt, runtimeID)
+	}
 
 	// MCP 探活使用 tools/list 而不是 /health；发送字面量请求头（G3 远端 MCP 鉴权）
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -545,6 +577,10 @@ func (r *SkillRuntimeRegistry) probeMCPStdio(runtimeID string) *SkillRuntimeStat
 	if rt == nil {
 		return r.setStatus(runtimeID, false, "", nil, "runtime 记录不存在")
 	}
+	// T2.5：注入 manager 后经其探活（连接状态机 + 重连 + 推送）；nil 保持既有直连路径。
+	if r.mcpManager != nil {
+		return r.probeMCPViaManager(rt, runtimeID)
+	}
 	// 无 stdio 会话（未启动 / 已断开 / 重连超限）时判定为离线，不返回旧缓存。
 	// 旧缓存可能是上次在线的陈旧态：会让集市卡片误显示在线，并让 SkillRuntimeDriver
 	// 在线门控放行后在下抛 "stdio MCP 会话未注册"（runtime_call_failed），状态与实际不符。
@@ -568,6 +604,33 @@ func (r *SkillRuntimeRegistry) probeMCPStdio(runtimeID string) *SkillRuntimeStat
 			zap.String("runtime_id", runtimeID),
 			zap.Int("tools_count", len(tools)),
 		)
+	}
+	return r.setStatus(runtimeID, true, rt.Version, caps, "")
+}
+
+// probeMCPViaManager 经 MCPConnectionManager 探活（http/stdio 共用）：manager.Connect
+// （强制 initialize + tools/list）成功后，FilterTools -> caps -> DeriveSKUs -> setStatus。
+// 连接状态跃迁已由 manager.onStatusChange 先行推送（registry.SetStatus），此处 setStatus 幂等
+// （状态未变不重复推送），仅刷新 capabilities/version 快照。
+func (r *SkillRuntimeRegistry) probeMCPViaManager(rt *model.SkillRuntime, runtimeID string) *SkillRuntimeStatusSnapshot {
+	conn, err := r.mcpManager.Connect(rt)
+	if err != nil {
+		return r.setStatus(runtimeID, false, "", nil, err.Error())
+	}
+	tools := FilterTools(rt, conn.Tools)
+	caps := make([]string, 0, len(tools))
+	for _, t := range tools {
+		caps = append(caps, t.Name)
+	}
+	if r.logger != nil {
+		r.logger.Info("MCP 运行时健康探测完成（manager）",
+			zap.String("runtime_id", runtimeID),
+			zap.String("transport", string(rt.Transport)),
+			zap.Int("tools_count", len(tools)),
+		)
+	}
+	if r.skuService != nil {
+		r.skuService.DeriveSKUs(rt, tools)
 	}
 	return r.setStatus(runtimeID, true, rt.Version, caps, "")
 }

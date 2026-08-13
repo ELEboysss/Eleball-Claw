@@ -276,8 +276,8 @@ func deriveKind(rt *model.SkillRuntime) string {
 		return "tool"
 	}
 	switch rt.Transport {
-	case model.SkillRuntimeTransportMCPHTTP, model.SkillRuntimeTransportMCPStdio:
-		return "mcp" // T2.5 新增 mcp_sse 传输时在此并入
+	case model.SkillRuntimeTransportMCPHTTP, model.SkillRuntimeTransportMCPStdio, model.SkillRuntimeTransportMCPSSE:
+		return "mcp" // T2.5：mcp_sse 一并归入 mcp 类（当前探活不路由 sse，此分支前置声明）
 	default:
 		return "tool"
 	}

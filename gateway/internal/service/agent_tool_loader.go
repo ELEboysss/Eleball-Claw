@@ -103,6 +103,11 @@ func (l *AgentToolLoader) buildTool(item *model.AgentItem) (*Tool, error) {
 	if toolName == "" {
 		toolName = fmt.Sprintf("Agent_%s", sanitizeToolName(item.ID))
 	}
+	// T2.5：MCP SKU（派生/手写）按 mcp__{server}__{tool} 逐工具命名（kimi-code 式工具面），
+	// 权限规则 mcp__.* 与新形状匹配；非 MCP 或解析不出 server/tool 时保持旧名（SKU id）。
+	if server, tool, ok := l.mcpToolRef(manifest); ok {
+		toolName = mcpToolName(server, tool)
+	}
 
 	parameters := manifest.Parameters
 	if parameters == nil {
@@ -406,4 +411,34 @@ func sanitizeToolName(name string) string {
 		s = s[:64]
 	}
 	return s
+}
+
+// mcpToolName 构造 kimi-code 式 MCP 工具名：mcp__{server}__{tool}（经 64 字符 sanitize）。
+// server 取 MCP server 运行时 ID（如 demo-pkg-mcp-search），tool 取 MCP 工具名。
+func mcpToolName(server, tool string) string {
+	return sanitizeToolName("mcp__" + server + "__" + tool)
+}
+
+// mcpToolRef 判断 manifest 是否 MCP SKU 并返回 (server, tool) 引用（T2.5 mcp__ 命名）。
+// 纯 manifest 判断、不查库：
+// - 派生 MCP SKU（buildDerivedManifest / rescan 均标 Metadata.package_derived=mcp）：
+//   server=Metadata.module（=SkillRuntime.ID），tool=Actions[0].Name。
+// - 手写 MCP SKU（Driver=mcp）：server=Metadata.module（无则不改名，保持旧 SKU id 命名）。
+// - 非 MCP（execute/raw_http/prompt 等）或解析不出 server/tool 返回 false（保持旧命名）。
+func (l *AgentToolLoader) mcpToolRef(manifest *model.ToolManifest) (string, string, bool) {
+	if manifest == nil || manifest.Metadata == nil {
+		return "", "", false
+	}
+	tool := ""
+	if len(manifest.Actions) > 0 {
+		tool = manifest.Actions[0].Name
+	}
+	if manifest.Metadata["package_derived"] == "mcp" || manifest.Driver == model.ToolDriverMCP {
+		server := manifest.Metadata["module"]
+		if server == "" || tool == "" {
+			return "", "", false
+		}
+		return server, tool, true
+	}
+	return "", "", false
 }

@@ -62,6 +62,9 @@ const (
 	SkillRuntimeTransportMCPHTTP SkillRuntimeTransport = "mcp_http"
 	// SkillRuntimeTransportMCPStdio stdio JSON-RPC MCP
 	SkillRuntimeTransportMCPStdio SkillRuntimeTransport = "mcp_stdio"
+	// SkillRuntimeTransportMCPSSE HTTP+SSE JSON-RPC MCP（T2.5：仅声明传输常量，客户端后置未实现；
+	// 不并入 IsMCP() 与探活分发，避免提前把 SSE runtime 路由进 MCP 路径）
+	SkillRuntimeTransportMCPSSE SkillRuntimeTransport = "mcp_sse"
 	// SkillRuntimeTransportRawHTTP 直接 HTTP POST（原 remote_url）
 	SkillRuntimeTransportRawHTTP SkillRuntimeTransport = "raw_http"
 )
