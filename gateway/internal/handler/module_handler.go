@@ -370,8 +370,8 @@ func (h *ModuleHandler) SubmitForReview(c *gin.Context) {
 	c.JSON(resp.StatusCode, cloudResp)
 }
 
-// ListCloudCatalog 拉取云端社区模块目录（转发云端 GET /v1/market/modules/catalog）。
-// claw web 据此展示「云端模块」tab + 比对本地（module_id + updated_at）决定下载/更新。
+// ListCloudCatalog 拉取云端秘技包目录（转发云端 GET /v1/market/modules/catalog）。
+// claw web 据此展示「云端模块」tab + 比对本地（package_id + version）决定下载/更新。
 // 透传用户 Authorization（云端 catalog 为 auth 端点）。
 func (h *ModuleHandler) ListCloudCatalog(c *gin.Context) {
 	if h.cloudAPIBase == "" {
@@ -394,7 +394,7 @@ func (h *ModuleHandler) ListCloudCatalog(c *gin.Context) {
 	var cloudResp struct {
 		Code int `json:"code"`
 		Data struct {
-			Items []model.ModuleCatalogItem `json:"items"`
+			Items []model.PackageCatalogItem `json:"items"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&cloudResp); err != nil {
@@ -404,7 +404,7 @@ func (h *ModuleHandler) ListCloudCatalog(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": gin.H{"items": cloudResp.Data.Items}})
 }
 
-// DownloadCloudModule 从云端下载模块元数据包并落盘（云端 GET /v1/market/modules/:id/package
+// DownloadCloudModule 从云端下载完整秘技包并落盘（云端 GET /v1/market/modules/:id/package
 // -> moduleService.ApplyCloudPackage）。手动触发（D4：不自动拉取，用户主动点「下载到本地」）。
 // 透传用户 Authorization。返回落盘后的本地模块记录。
 func (h *ModuleHandler) DownloadCloudModule(c *gin.Context) {
@@ -438,7 +438,7 @@ func (h *ModuleHandler) DownloadCloudModule(c *gin.Context) {
 	}
 	var cloudResp struct {
 		Code int                 `json:"code"`
-		Data model.ModulePackage `json:"data"`
+		Data model.PackageBundle `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&cloudResp); err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"code": 3001, "message": "解析云端模块包失败: " + err.Error()})

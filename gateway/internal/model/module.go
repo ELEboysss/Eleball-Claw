@@ -67,36 +67,45 @@ type ModuleSubmissionMeta struct {
 	Capabilities []string `json:"capabilities"`
 }
 
-// ModulePackage cloud->claw 下载的模块元数据包（GET /v1/market/modules/:id/package）。
-// 含 module.json + skus/*.json + claw 版 docker-compose.yml（image 引用，走 ACR pull_first），
-// 不含 main.py/Dockerfile（社区模块产物走 ACR 镜像，见 plan cloud-claw-module-download-sync D2）。
-type ModulePackage struct {
-	PackageVersion int                `json:"package_version"`         // 打包格式版本（当前 1）
-	ModuleID       string             `json:"module_id"`
-	ModuleJSON     json.RawMessage    `json:"module_json"`             // module.json 原文
-	SKUs           []ModulePackageSKU `json:"skus"`                    // skus/*.json
-	ComposeContent string             `json:"compose_content"`         // claw 版 docker-compose.yml（image 引用）
-	Version        string             `json:"version,omitempty"`       // 模块语义版本（可选，claw 比对更新用）
-	Origin         string             `json:"origin,omitempty"`        // 归属（cloud/user/...）
-	UpdatedAt      time.Time          `json:"updated_at"`              // 云端最后更新时间（claw 比对本地决定是否更新）
+// PackageCatalogItem claw 云端秘技包目录单项（GET /v1/market/modules/catalog）。
+// claw 据此比对本地（package_id + version）决定下载/更新。契约见 specs/api-schema.yml PackageCatalogItem。
+type PackageCatalogItem struct {
+	PackageID   string    `json:"package_id"` // 包 ID（package.json name，slug，目录名）
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Version     string    `json:"version"`         // 包语义版本，claw 比对更新主键
+	Origin      string    `json:"origin"`          // builtin/cloud/user（builtin 不出现在云端 catalog）
+	Official    bool      `json:"official"`        // 是否官方包（据 origin 推断；cloud 包以官方维护列表判定，user 恒 false）
+	Actor       string    `json:"actor,omitempty"` // 来源主体；origin=user 时为作者
+	Category    string    `json:"category,omitempty"`
+	Level       int       `json:"level,omitempty"` // 使用等级要求 1-6
+	UpdatedAt   time.Time `json:"updated_at"`      // 云端最后更新时间（claw 比对本地决定是否更新）
 }
 
-// ModulePackageSKU 打包包内的单个 SKU 文件条目。
-type ModulePackageSKU struct {
+// PackageBundleSkill 整包内的 skill 文件条目（skills/<name>/SKILL.md）。
+type PackageBundleSkill struct {
+	Name    string `json:"name"`
+	Content string `json:"content"` // SKILL.md 原文（含 frontmatter）
+}
+
+// PackageBundleSKU 整包内的手写 SKU 文件条目（skus/*.json；能力派生 SKU 由 package_json 在 RescanPackage 时再生成）。
+type PackageBundleSKU struct {
 	FileName string          `json:"file_name"` // 如 "github"（不含 .json）
 	Content  json.RawMessage `json:"content"`   // SKU manifest 原文
 }
 
-// ModuleCatalogItem claw 云端模块目录单项（GET /v1/market/modules/catalog）。
-// claw 据此比对本地（module_id + updated_at）决定下载/更新。见 plan cloud-claw-module-download-sync C2。
-type ModuleCatalogItem struct {
-	ModuleID     string    `json:"module_id"`
-	Name         string    `json:"name"`
-	Description  string    `json:"description"`
-	Version      string    `json:"version,omitempty"`
-	Origin       string    `json:"origin,omitempty"` // 归属（cloud/user/...）
-	Actor        string    `json:"actor,omitempty"`  // 来源主体（user 时为作者）
-	Transport    string    `json:"transport"`
-	Capabilities []string  `json:"capabilities,omitempty"`
-	UpdatedAt    time.Time `json:"updated_at"` // 云端最后更新时间（claw 比对本地决定是否更新）
+// PackageBundle cloud->claw 秘技包下载包（GET /v1/market/modules/{id}/package），完整 package：
+// package.json + skills/*/SKILL.md + 工具实现脚本 + skus/*.json + mcp 配置。claw 解包落盘
+// marketplace/<id>/ 后触发 RescanPackage 物化。契约见 specs/api-schema.yml PackageBundle。
+// 注：provenance 经 tools_files[".origin"] 侧车下发（package.json 不声明 origin 防伪造，T1.3）。
+type PackageBundle struct {
+	PackageVersion int                         `json:"package_version"` // 打包格式版本（当前 2）
+	PackageID      string                      `json:"package_id"`
+	PackageJSON    json.RawMessage             `json:"package_json"` // package.json 原文（claw 解包写入 marketplace/<id>/package.json）
+	Skills         []PackageBundleSkill        `json:"skills,omitempty"`
+	ToolsFiles     map[string]string           `json:"tools_files,omitempty"` // 工具实现脚本/资源文件（相对路径: 文本内容），含 .origin 侧车
+	SKUs           []PackageBundleSKU          `json:"skus,omitempty"`
+	MCPConfigs     map[string]PackageMCPServer `json:"mcp_configs,omitempty"` // mcpServers 各 server 连接配置（与 package_json.mcpServers 对应）
+	Version        string                      `json:"version"`               // 包语义版本
+	UpdatedAt      time.Time                   `json:"updated_at"`
 }

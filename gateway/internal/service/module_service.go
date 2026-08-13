@@ -22,10 +22,10 @@ import (
 // ModuleService 集市模块业务层（兼容层）。
 // 底层已统一为 SkillRuntime，本层保留原有方法签名，负责与旧 API/admin-web 的字段转换。
 type ModuleService struct {
-	registry   *SkillRuntimeRegistry
-	manager    *SkillRuntimeManager
-	repo       *repository.SkillRuntimeRepo
-	agentRepo  *repository.AgentRepo // 可选：用于「已购模块」接口查询用户已购 SKU
+	registry  *SkillRuntimeRegistry
+	manager   *SkillRuntimeManager
+	repo      *repository.SkillRuntimeRepo
+	agentRepo *repository.AgentRepo // 可选：用于「已购模块」接口查询用户已购 SKU
 	// chatService 可选：skill-maker AI 起草 main.py 草稿（F1 收尾，调对话模型生成 stdio MCP 脚本）。
 	chatService *ChatProxyService
 	// bootstrap 可选：H2 装依赖时确保解释器可用（python/node 托管下载，H1）。
@@ -447,17 +447,17 @@ type marketplaceModuleManifest struct {
 	TransportType     string                         `json:"transport_type"`                // 兼容旧格式
 	Deployment        string                         `json:"deployment"`                    // 新格式
 	Source            string                         `json:"source"`                        // 新格式
-	Origin            string                         `json:"origin,omitempty"` // 模块来源（builtin/cloud/user），缺失由 Register 按 side 默认
-	Actor             string                         `json:"actor,omitempty"`  // 来源主体（user 时为作者）
+	Origin            string                         `json:"origin,omitempty"`              // 模块来源（builtin/cloud/user），缺失由 Register 按 side 默认
+	Actor             string                         `json:"actor,omitempty"`               // 来源主体（user 时为作者）
 	Command           string                         `json:"command,omitempty"`             // process/stdio 启动命令
 	Args              []string                       `json:"args,omitempty"`                // process/stdio 参数
 	Env               map[string]string              `json:"env,omitempty"`                 // process/stdio 环境变量
 	WorkDir           string                         `json:"work_dir,omitempty"`            // process/stdio 工作目录
 	DockerComposePath string                         `json:"docker_compose_path,omitempty"` // 新格式
-	AutoSKU           bool                           `json:"auto_sku,omitempty"`         // true=探活后自动派生 SKU，免手写 skus/*.json
-	Credentials       map[string]model.CredentialDef `json:"credentials,omitempty"`      // auto_sku 模块凭证声明，派生 SKU 时透传进 manifest
-	AllowedTools      []string                       `json:"allowed_tools,omitempty"`    // G2 工具白名单（非空时仅保留）
-	DisallowedTools   []string                       `json:"disallowed_tools,omitempty"` // G2 工具黑名单（始终排除）
+	AutoSKU           bool                           `json:"auto_sku,omitempty"`            // true=探活后自动派生 SKU，免手写 skus/*.json
+	Credentials       map[string]model.CredentialDef `json:"credentials,omitempty"`         // auto_sku 模块凭证声明，派生 SKU 时透传进 manifest
+	AllowedTools      []string                       `json:"allowed_tools,omitempty"`       // G2 工具白名单（非空时仅保留）
+	DisallowedTools   []string                       `json:"disallowed_tools,omitempty"`    // G2 工具黑名单（始终排除）
 	Capabilities      []string                       `json:"capabilities"`
 	Version           string                         `json:"version,omitempty"` // 模块语义版本（可选，catalog/下载比对用）
 	MCPServerConfig   *model.MCPServerConfig         `json:"mcp_server_config,omitempty"`
@@ -553,9 +553,9 @@ type UserModuleGenerateRequest struct {
 
 // UserModuleGenerateResult 生成结果（T3.1 秘技包：package.json + main.py 落盘 marketplace/{id}/）
 type UserModuleGenerateResult struct {
-	ModuleID  string    `json:"module_id"`   // 包名 = marketplace 目录名（slug）
-	RuntimeID string    `json:"runtime_id"`  // 物化 SkillRuntime ID = {pkg}-mcp-main（TestCall 用）
-	SKUID     string    `json:"sku_id"`      // 派生 SKU ID = {pkg}-mcp-main
+	ModuleID  string    `json:"module_id"`  // 包名 = marketplace 目录名（slug）
+	RuntimeID string    `json:"runtime_id"` // 物化 SkillRuntime ID = {pkg}-mcp-main（TestCall 用）
+	SKUID     string    `json:"sku_id"`     // 派生 SKU ID = {pkg}-mcp-main
 	ModuleDir string    `json:"module_dir"`
 	Tools     []MCPTool `json:"tools"`
 }
@@ -634,23 +634,44 @@ func (s *ModuleService) WriteUserModule(req UserModuleGenerateRequest, tools []M
 // 手动下载语义（D4：不自动拉取，用户主动触发）：已存在则覆盖 module.json/skus/compose，
 // 不删本地额外文件（如用户改过的 main.py / 凭证）。落盘后 best-effort 拉起（#6 L2）：
 // docker 触发 ACR pull_first 起 container，process 起 stdio；失败不阻断下载。
-func (s *ModuleService) ApplyCloudPackage(pkg model.ModulePackage) (*model.SkillRuntime, error) {
-	if pkg.ModuleID == "" || len(pkg.ModuleJSON) == 0 {
-		return nil, errors.New("模块包缺少 module_id 或 module_json")
+// ApplyCloudPackage 下载整包落盘（云端 GET /v1/market/modules/:id/package -> PackageBundle）。
+// 解包到 marketplace/<id>/：package.json + .origin 侧车 + skills/*/SKILL.md + skus/*.json +
+// tools_files（工具实现脚本/资源文件，含 docker-compose.claw.yml），然后 RescanPackage 物化 + best-effort 拉起。
+func (s *ModuleService) ApplyCloudPackage(pkg model.PackageBundle) (*model.SkillRuntime, error) {
+	if pkg.PackageID == "" || len(pkg.PackageJSON) == 0 {
+		return nil, errors.New("模块包缺少 package_id 或 package_json")
 	}
 	root := ResolveMarketplaceRoot()
 	if root == "" {
 		return nil, errors.New("无法定位 marketplace 目录（设 CLAW_MARKETPLACE_DIR 或在仓库内运行）")
 	}
-	moduleDir := filepath.Join(root, pkg.ModuleID)
+	moduleDir := filepath.Join(root, pkg.PackageID)
 	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建模块目录失败: %w", err)
 	}
-	// module.json（云端原文，含 origin 显式标记，RescanPackage 据 IsOfficial 推断 Official）
-	if err := os.WriteFile(filepath.Join(moduleDir, "module.json"), pkg.ModuleJSON, 0o644); err != nil {
-		return nil, fmt.Errorf("写 module.json 失败: %w", err)
+	// package.json（云端原文；RescanPackage 据 mcpServers 物化 package 运行时）
+	if err := os.WriteFile(filepath.Join(moduleDir, "package.json"), pkg.PackageJSON, 0o644); err != nil {
+		return nil, fmt.Errorf("写 package.json 失败: %w", err)
 	}
-	// skus/*.json（手写 SKU；auto_sku 模块云端不打 skus，留空由 rescan + DeriveSKUs 派生）
+	// .origin 侧车（provenance，防伪造——package.json 不声明 origin，T1.3）
+	origin := pkg.ToolsFiles[".origin"]
+	if origin == "" {
+		origin = "cloud"
+	}
+	if err := os.WriteFile(filepath.Join(moduleDir, ".origin"), []byte(origin), 0o644); err != nil {
+		return nil, fmt.Errorf("写 .origin 失败: %w", err)
+	}
+	// skills/*/SKILL.md
+	for _, sk := range pkg.Skills {
+		skDir := filepath.Join(moduleDir, "skills", sk.Name)
+		if err := os.MkdirAll(skDir, 0o755); err != nil {
+			return nil, fmt.Errorf("创建 skills/%s 失败: %w", sk.Name, err)
+		}
+		if err := os.WriteFile(filepath.Join(skDir, "SKILL.md"), []byte(sk.Content), 0o644); err != nil {
+			return nil, fmt.Errorf("写 skills/%s/SKILL.md 失败: %w", sk.Name, err)
+		}
+	}
+	// skus/*.json（手写 SKU；能力派生 SKU 由 rescan + DeriveSKUs 再生成）
 	if len(pkg.SKUs) > 0 {
 		skuDir := filepath.Join(moduleDir, "skus")
 		if err := os.MkdirAll(skuDir, 0o755); err != nil {
@@ -663,23 +684,34 @@ func (s *ModuleService) ApplyCloudPackage(pkg model.ModulePackage) (*model.Skill
 			}
 		}
 	}
-	// docker-compose.claw.yml（image 引用，serve 拉起时 pull_first 从 ACR 拉）
-	if pkg.ComposeContent != "" {
-		if err := os.WriteFile(filepath.Join(moduleDir, "docker-compose.claw.yml"), []byte(pkg.ComposeContent), 0o644); err != nil {
-			return nil, fmt.Errorf("写 docker-compose.claw.yml 失败: %w", err)
+	// tools_files 工具实现脚本/资源文件（含 docker-compose.claw.yml——docker 模块 serve 拉起时 ACR pull_first）
+	for rel, content := range pkg.ToolsFiles {
+		if rel == ".origin" || rel == "" || strings.Contains(rel, "..") {
+			continue
+		}
+		target := filepath.Join(moduleDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return nil, fmt.Errorf("创建 %s 目录失败: %w", rel, err)
+		}
+		if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+			return nil, fmt.Errorf("写 %s 失败: %w", rel, err)
 		}
 	}
-	// rescan 注册 SkillRuntime
+	// rescan 注册 SkillRuntime + SKU（package 布局物化为 {id}-mcp-{key} 运行时）
 	if err := s.RescanPackage("claw", nil); err != nil {
 		return nil, fmt.Errorf("rescan 失败: %w", err)
 	}
-	rec, err := s.GetModule(pkg.ModuleID)
+	rec, err := s.GetModule(pkg.PackageID)
 	if err != nil || rec == nil {
-		return nil, fmt.Errorf("模块 %s 落盘后 rescan 未注册成功", pkg.ModuleID)
+		// package 布局运行时 ID 形如 {package_id}-mcp-main，兼容回退
+		rec, err = s.GetModule(pkg.PackageID + "-mcp-main")
 	}
-	// #6 L2：best-effort 拉起（docker 触发 ACR pull_first 起 container，process 起 stdio）。
+	if err != nil || rec == nil {
+		return nil, fmt.Errorf("模块 %s 落盘后 rescan 未注册成功", pkg.PackageID)
+	}
+	// best-effort 拉起（docker 触发 ACR pull_first 起 container，process 起 stdio）。
 	// 异步启动，立即返回可能 offline；失败不阻断下载（模块已落盘，前端 refresh 看最终状态）。
-	_, _ = s.Start(pkg.ModuleID)
+	_, _ = s.Start(rec.ID)
 	return rec, nil
 }
 
