@@ -194,42 +194,97 @@ func TestPackageModule_MCPRuntime(t *testing.T) {
 	assert.Equal(t, "mcp-remote-testpack.tar.gz", res.Filename)
 
 	files := readTarGz(t, res.Data)
-	assert.Len(t, files, 1, "DB-only MCP 产物应仅含 module.json")
-	assert.Contains(t, files, "module.json")
+	assert.Len(t, files, 2, "DB-only MCP 产物应含 package.json + .origin")
+	assert.Contains(t, files, "package.json")
+	assert.Contains(t, files, ".origin")
 
-	// 物化的 module.json 字段
-	var m marketplaceModuleManifest
-	require.NoError(t, json.Unmarshal([]byte(files["module.json"]), &m))
-	assert.Equal(t, moduleID, m.GetID())
-	assert.Equal(t, "TestPack MCP", m.Name)
-	assert.Equal(t, "mcp_stdio", m.GetTransport())
-	assert.Equal(t, "process", m.GetDeployment())
-	assert.Equal(t, "user", m.Origin)
-	assert.Equal(t, "TestPack MCP", m.Actor)
-	assert.Equal(t, moduleID, m.Driver.ID)
-	assert.True(t, m.AutoSKU)
-	assert.Equal(t, []string{"tool_a", "tool_b"}, m.Capabilities)
+	// 物化的 package.json：mcpServers.main（stdio）+ version 缺省 0.1.0 + author=actor
+	var pm model.PackageManifest
+	require.NoError(t, json.Unmarshal([]byte(files["package.json"]), &pm))
+	assert.Equal(t, moduleID, pm.Name)
+	assert.Equal(t, "0.1.0", pm.Version)
+	assert.Equal(t, "TestPack MCP", pm.Author)
+	srv, ok := pm.MCPServers["main"]
+	require.True(t, ok)
+	assert.Equal(t, "stdio", srv.Transport)
+	assert.Equal(t, []string{"python", "main.py"}, srv.Command)
+	// .origin 侧车随包传输（T1.3 provenance，云端读回还原 origin）
+	assert.Equal(t, "user", strings.TrimSpace(files[".origin"]))
 
-	// 回扫验证
+	// 回扫验证：解压到 marketplace/<id>/ 后 RescanPackage 按 package 路径物化运行时 {id}-mcp-main
 	root2 := t.TempDir()
 	extractTarGzTo(t, res.Data, filepath.Join(root2, moduleID))
 	// 本测试已 t.Setenv 过 CLAW_MARKETPLACE_DIR（root），此处手动切到 root2 后回扫
 	os.Setenv("CLAW_MARKETPLACE_DIR", root2)
 	defer os.Unsetenv("CLAW_MARKETPLACE_DIR")
 	require.NoError(t, svc.RescanPackage("claw", zap.NewNop()))
-	rt2, err := svc.repo.GetByID(moduleID)
+	rt2, err := svc.repo.GetByID(moduleID + "-mcp-main")
 	require.NoError(t, err)
 	require.NotNil(t, rt2)
-	assert.Equal(t, "TestPack MCP", rt2.Name)
 	assert.Equal(t, model.SkillRuntimeTransportMCPStdio, rt2.Transport)
 	assert.Equal(t, model.SkillRuntimeDeploymentProcess, rt2.Deployment)
-	assert.Equal(t, model.SkillRuntimeOriginUser, rt2.Origin)
-	assert.Equal(t, "TestPack MCP", rt2.Actor)
-	assert.Equal(t, moduleID, rt2.DriverID)
-	assert.True(t, rt2.AutoSKU)
-	assert.Equal(t, []string{"tool_a", "tool_b"}, rt2.CapabilitiesList())
+	assert.Equal(t, model.SkillRuntimeOriginUser, rt2.Origin) // .origin 侧车读回
+	assert.Equal(t, moduleID+"-mcp-main", rt2.DriverID)
+	assert.Equal(t, "0.1.0", rt2.Version)
 	assert.Equal(t, "python", rt2.Command)
 	assert.Equal(t, []string{"main.py"}, rt2.ArgsList())
+}
+
+// TestPackageModule_PackageLayout 验证 T3.1 秘技包布局打包：package.json+main.py+.origin+skus/
+// 递归收录，.origin 随包传输；解压回扫按 package 路径物化运行时 {id}-mcp-main（origin=user）。
+func TestPackageModule_PackageLayout(t *testing.T) {
+	svc, _ := newArchiveTestSvc(t)
+	root := t.TempDir()
+	t.Setenv("CLAW_MARKETPLACE_DIR", root)
+
+	const moduleID = "my-pkg-layout"
+	modDir := filepath.Join(root, moduleID)
+	require.NoError(t, os.MkdirAll(filepath.Join(modDir, "skus"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(modDir, "package.json"), []byte(`{
+  "name": "my-pkg-layout",
+  "version": "1.2.3",
+  "description": "package layout script",
+  "category": "utility",
+  "level": 1,
+  "mcpServers": {
+    "main": {"transport": "stdio", "command": ["python"], "args": ["main.py"]}
+  }
+}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(modDir, ".origin"), []byte("user"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(modDir, "main.py"), []byte("print('hi')\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(modDir, "skus", "echo.json"), []byte(`{"name":"echo"}`), 0o644))
+
+	res, err := svc.PackageModule(moduleID)
+	require.NoError(t, err)
+	assert.Equal(t, "my-pkg-layout.tar.gz", res.Filename)
+	assert.NotEmpty(t, res.Data)
+
+	files := readTarGz(t, res.Data)
+	assert.Contains(t, files, "package.json")
+	assert.Contains(t, files, "main.py")
+	assert.Contains(t, files, ".origin")
+	assert.Contains(t, files, "skus/echo.json")
+	assert.Equal(t, "user", strings.TrimSpace(files[".origin"]), "provenance 随包传输")
+	// 无 <id>/ 前缀（扁平布局）
+	for name := range files {
+		assert.False(t, strings.HasPrefix(name, moduleID+"/"), "产物应为扁平布局: %s", name)
+	}
+
+	// 回扫：解压到新 marketplace 根后 RescanPackage 物化运行时 {id}-mcp-main（origin=user）
+	root2 := t.TempDir()
+	extractTarGzTo(t, res.Data, filepath.Join(root2, moduleID))
+	os.Setenv("CLAW_MARKETPLACE_DIR", root2)
+	defer os.Unsetenv("CLAW_MARKETPLACE_DIR")
+	require.NoError(t, svc.RescanPackage("claw", zap.NewNop()))
+	rt, err := svc.repo.GetByID(moduleID + "-mcp-main")
+	require.NoError(t, err)
+	require.NotNil(t, rt)
+	assert.Equal(t, model.SkillRuntimeTransportMCPStdio, rt.Transport)
+	assert.Equal(t, model.SkillRuntimeDeploymentProcess, rt.Deployment)
+	assert.Equal(t, model.SkillRuntimeOriginUser, rt.Origin)
+	assert.Equal(t, "1.2.3", rt.Version)
+	assert.Equal(t, "python", rt.Command)
+	assert.Equal(t, []string{"main.py"}, rt.ArgsList())
 }
 
 // TestPackageModule_NotFound 无磁盘目录且未注册的模块应返回错误。

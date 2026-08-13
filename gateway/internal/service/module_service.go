@@ -213,6 +213,48 @@ func (s *ModuleService) GetModule(moduleID string) (*model.SkillRuntime, error) 
 	return rt, nil
 }
 
+// ModuleSubmissionMetaFor 据模块 ID 构造分享审核元数据（T3.2 对齐 package 布局）。
+// 优先读 marketplace/<id>/package.json —— T3.1 生成模块的唯一事实源（其运行时是 {pkg}-mcp-main，
+// 无同名运行时记录，GetModule 查不到）；origin 读 .origin 侧车（缺省 user）。无 package.json 时
+// 回退运行时记录（legacy module.json 目录 / DB-only MCP 模块，运行时 ID == 模块 ID）。
+func (s *ModuleService) ModuleSubmissionMetaFor(moduleID string) (*model.ModuleSubmissionMeta, error) {
+	if root := ResolveMarketplaceRoot(); root != "" {
+		modDir := filepath.Join(root, moduleID)
+		if b, err := os.ReadFile(filepath.Join(modDir, "package.json")); err == nil {
+			pkg, perr := model.ParsePackageManifest(b)
+			if perr != nil {
+				return nil, fmt.Errorf("模块 %s 的 package.json 解析失败: %w", moduleID, perr)
+			}
+			origin := string(model.SkillRuntimeOriginUser)
+			if ob, oerr := os.ReadFile(filepath.Join(modDir, ".origin")); oerr == nil {
+				if s := strings.TrimSpace(string(ob)); s != "" {
+					origin = s
+				}
+			}
+			return &model.ModuleSubmissionMeta{
+				ModuleID:    moduleID,
+				Name:        pkg.Name,
+				Description: pkg.Description,
+				Origin:      origin,
+				Version:     pkg.Version,
+			}, nil
+		}
+	}
+	rt, err := s.GetModule(moduleID)
+	if err != nil {
+		return nil, err
+	}
+	return &model.ModuleSubmissionMeta{
+		ModuleID:     rt.ID,
+		Name:         rt.Name,
+		Description:  rt.Description,
+		Origin:       string(rt.Origin),
+		Actor:        rt.Actor,
+		Version:      rt.Version,
+		Capabilities: rt.CapabilitiesList(),
+	}, nil
+}
+
 // requiredEnv 据 SkillRuntime 部署方式 + 启动命令推断所需本地环境，供控制台离线说明展示。
 // docker -> "docker"；process -> 据 command（python* / node，缺省 python）；none/external -> ""。
 func requiredEnvFor(rt *model.SkillRuntime) string {

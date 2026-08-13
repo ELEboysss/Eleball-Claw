@@ -311,30 +311,21 @@ func (h *ModuleHandler) SubmitForReview(c *gin.Context) {
 		return
 	}
 
-	// 查本地记录取审核列表展示用元数据（权威信息以 tarball 内 module.json 为准）
-	rec, err := h.moduleService.GetModule(req.ModuleID)
-	if err != nil || rec == nil {
+	// 元数据（供云端审核列表展示，无需解压 tarball；T3.2 对齐 package 布局）。
+	// 先取元数据校验模块存在（package.json 目录或运行时记录，缺失 404），再打包。
+	meta, err := h.moduleService.ModuleSubmissionMetaFor(req.ModuleID)
+	if err != nil || meta == nil {
 		c.JSON(http.StatusNotFound, gin.H{"code": 4004, "message": "本地模块不存在: " + req.ModuleID})
 		return
 	}
 
-	// 打包 tarball（T7：脚本模块递归 tar 磁盘目录 / MCP 安装模块 DB 物化 module.json）
+	// 打包 tarball（T7：脚本模块递归 tar 磁盘目录 / MCP 安装模块 DB 物化 package.json；
+	// 权威信息以 tarball 内 package.json + .origin 为准）
 	pkg, err := h.moduleService.PackageModule(req.ModuleID)
 	if err != nil {
 		h.logger.Warn("模块打包失败", zap.String("module_id", req.ModuleID), zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 3001, "message": "模块打包失败: " + err.Error()})
 		return
-	}
-
-	// 元数据（供云端审核列表展示，无需解压 tarball）
-	meta := model.ModuleSubmissionMeta{
-		ModuleID:     rec.ID,
-		Name:         rec.Name,
-		Description:  rec.Description,
-		Origin:       string(rec.Origin),
-		Actor:        rec.Actor,
-		Version:      rec.Version,
-		Capabilities: rec.CapabilitiesList(),
 	}
 	metaJSON, _ := json.Marshal(meta)
 

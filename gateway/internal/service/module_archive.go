@@ -18,14 +18,16 @@ import (
 // 本文件实现 T7：本地模块产物打包，供 T8「分享到云端」上传审核。
 //
 // 两类模块：
-//   - 脚本模块（/studio 生成，marketplace/<id>/ 有文件）：递归打包模块目录内容。
-//   - MCP 安装模块（InstallMCPRuntime 创建，DB-only 无文件）：从 SkillRuntime 物化 module.json 再打包。
+//   - 秘技包模块（/studio 生成，marketplace/<id>/ 有文件）：递归打包模块目录内容
+//     （package.json + main.py + skills/ + skus/ + .origin，T3.2 对齐 package 布局）。
+//   - MCP 安装模块（InstallMCPRuntime 创建，DB-only 无文件）：从 SkillRuntime 物化
+//     package.json（mcpServers 描述）再打包。
 //
-// tar 条目相对模块根扁平存放（module.json / main.py / skus/*.json ...，无 <id>/ 前缀）。
+// tar 条目相对模块根扁平存放（package.json / main.py / skus/*.json ...，无 <id>/ 前缀）。
 // T11 云端审批通过后解压到 marketplace/<finalID>/，<finalID> 可由 cloud generateUniqueModuleID
-// 据冲突重命名，故扁平布局使「解压到云端自定目录」最自然。module.json 内已含 origin/
-// actor（脚本模块由 writeUserModuleJSON 写入、MCP 模块由 manifestFromSkillRuntime 物化），
-// 云端扫描器（ensureMarketplaceModules）读回即还原 provenance，无需额外元数据文件。
+// 据冲突重命名，故扁平布局使「解压到云端自定目录」最自然。package.json 不声明 origin 防伪造
+// （T1.3），provenance 走 .origin 侧车随包传输：脚本模块由 writeUserPackageJSON 写入 user，
+// MCP 模块由 packageMCPRuntime 写入 rt.Origin，云端读回即还原 origin，无需额外元数据文件。
 
 // moduleArchiveExcludes 打包时排除的构建产物/系统文件，避免把 __pycache__/*.pyc 等带入分享产物。
 var moduleArchiveExcludes = map[string]bool{
@@ -66,10 +68,12 @@ func (s *ModuleService) PackageModule(moduleID string) (*PackageModuleResult, er
 }
 
 // packageModuleDir 递归打包脚本模块目录（扁平条目，排除构建产物）。
-// 要求目录内存在 module.json，否则产物无法被扫描器识别。
+// T3.2：要求目录内存在 package.json（秘技包布局）或遗留 module.json，否则产物无法被扫描器识别。
 func packageModuleDir(moduleID, moduleDir string) (*PackageModuleResult, error) {
-	if _, err := os.Stat(filepath.Join(moduleDir, "module.json")); err != nil {
-		return nil, fmt.Errorf("模块目录 %s 缺少 module.json，无法打包: %w", moduleDir, err)
+	if _, perr := os.Stat(filepath.Join(moduleDir, "package.json")); perr != nil {
+		if _, merr := os.Stat(filepath.Join(moduleDir, "module.json")); merr != nil {
+			return nil, fmt.Errorf("模块目录 %s 缺少 package.json（或遗留 module.json），无法打包: %w", moduleDir, merr)
+		}
 	}
 
 	buf := &bytes.Buffer{}
@@ -136,32 +140,37 @@ func packageModuleDir(moduleID, moduleDir string) (*PackageModuleResult, error) 
 	return &PackageModuleResult{Data: buf.Bytes(), Filename: moduleID + ".tar.gz"}, nil
 }
 
-// packageMCPRuntime 从 SkillRuntime 物化 module.json 并打包（DB-only MCP 安装模块无磁盘文件）。
+// packageMCPRuntime 从 SkillRuntime 物化 package.json + .origin 并打包（DB-only MCP 安装模块无磁盘文件）。
 func packageMCPRuntime(moduleID string, rt *model.SkillRuntime) (*PackageModuleResult, error) {
 	manifest := manifestFromSkillRuntime(rt)
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("序列化 module.json 失败: %w", err)
+		return nil, fmt.Errorf("序列化 package.json 失败: %w", err)
 	}
 
 	buf := &bytes.Buffer{}
 	gw := gzip.NewWriter(buf)
 	tw := tar.NewWriter(gw)
-	hdr := &tar.Header{
-		Name:     "module.json",
-		Mode:     0o644,
-		Size:     int64(len(data)),
-		Typeflag: tar.TypeReg,
+	writeEntry := func(name string, content []byte, mode int64) error {
+		hdr := &tar.Header{Name: name, Mode: mode, Size: int64(len(content)), Typeflag: tar.TypeReg}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return fmt.Errorf("写 %s tar 头失败: %w", name, err)
+		}
+		if _, err := tw.Write(content); err != nil {
+			return fmt.Errorf("写 %s 内容失败: %w", name, err)
+		}
+		return nil
 	}
-	if err := tw.WriteHeader(hdr); err != nil {
+	if err := writeEntry("package.json", data, 0o644); err != nil {
 		_ = tw.Close()
 		_ = gw.Close()
-		return nil, fmt.Errorf("写 module.json tar 头失败: %w", err)
+		return nil, err
 	}
-	if _, err := tw.Write(data); err != nil {
+	// .origin 侧车随包传输（package.json 不声明 origin 防伪造，T1.3）：云端读回还原 provenance。
+	if err := writeEntry(".origin", []byte(string(rt.Origin)), 0o644); err != nil {
 		_ = tw.Close()
 		_ = gw.Close()
-		return nil, fmt.Errorf("写 module.json 内容失败: %w", err)
+		return nil, err
 	}
 	if err := tw.Close(); err != nil {
 		return nil, err
@@ -172,34 +181,45 @@ func packageMCPRuntime(moduleID string, rt *model.SkillRuntime) (*PackageModuleR
 	return &PackageModuleResult{Data: buf.Bytes(), Filename: moduleID + ".tar.gz"}, nil
 }
 
-// manifestFromSkillRuntime 把 SkillRuntime 反序列化为 marketplaceModuleManifest，
-// 镜像 ensureMarketplaceModules 的读取侧，使物化的 module.json 可被扫描器原样读回。
-func manifestFromSkillRuntime(rt *model.SkillRuntime) marketplaceModuleManifest {
-	m := marketplaceModuleManifest{
-		ID:              rt.ID,
-		Name:            rt.Name,
-		Description:     rt.Description,
-		Source:          string(rt.Source),
-		Origin:          string(rt.Origin),
-		Actor:           rt.Actor,
-		Transport:       string(rt.Transport),
-		Deployment:      string(rt.Deployment),
-		Endpoint:        rt.Endpoint,
-		Command:         rt.Command,
-		Args:            rt.ArgsList(),
-		Env:             rt.EnvMap(),
-		WorkDir:         rt.WorkDir,
-		AutoSKU:         rt.AutoSKU,
-		Credentials:     rt.CredentialsMap(),
-		AllowedTools:    rt.AllowedToolsList(),
-		DisallowedTools: rt.DisallowedToolsList(),
-		Capabilities:    rt.CapabilitiesList(),
+// manifestFromSkillRuntime 把 SkillRuntime 反序列化为 model.PackageManifest（T3.2 改写 package.json）。
+// mcpServers.main 描述该 MCP 服务器：stdio=command/args/env，http/sse=url/headers。
+// version 缺省 0.1.0；author 取 actor（MCP 安装模块 fold 进 user 时 actor=MCP 名）。
+// 用 GetMCPServerConfig（权威配置）优先，缺省回退 rt 顶层字段。
+func manifestFromSkillRuntime(rt *model.SkillRuntime) model.PackageManifest {
+	version := rt.Version
+	if version == "" {
+		version = "0.1.0"
 	}
+	m := model.PackageManifest{
+		Name:        rt.ID,
+		Version:     version,
+		Description: rt.Description,
+		Author:      rt.Actor,
+		Level:       1,
+	}
+
+	srv := model.PackageMCPServer{}
 	if cfg := rt.GetMCPServerConfig(); cfg != nil {
-		m.MCPServerConfig = cfg
+		srv.Env = cfg.Env
+		srv.Headers = cfg.Headers
+		srv.URL = cfg.URL
+		argv := append([]string{}, cfg.Command)
+		argv = append(argv, cfg.Args...)
+		srv.Command = argv
+	} else {
+		argv := append([]string{rt.Command}, rt.ArgsList()...)
+		srv.Command = argv
+		srv.Env = rt.EnvMap()
+		srv.URL = rt.Endpoint
 	}
-	m.Driver.ID = rt.DriverID
-	m.Driver.Name = rt.Name
-	m.Driver.Description = rt.Description
+	switch rt.Transport {
+	case model.SkillRuntimeTransportMCPHTTP:
+		srv.Transport = "http"
+	case model.SkillRuntimeTransportMCPSSE:
+		srv.Transport = "sse"
+	default:
+		srv.Transport = "stdio"
+	}
+	m.MCPServers = map[string]model.PackageMCPServer{"main": srv}
 	return m
 }

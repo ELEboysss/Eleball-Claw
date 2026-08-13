@@ -169,6 +169,74 @@ func TestSubmitForReview_ShareToCloud(t *testing.T) {
 	assert.True(t, entries["skus/echo.json"])
 }
 
+// TestSubmitForReview_PackageLayout 验证 T3.2 秘技包布局分享：目录仅 package.json+.origin+main.py
+// （无同名运行时记录，运行时是 {id}-mcp-main，GetModule 查不到），元数据读 package.json，
+// tarball 含完整 package（package.json/main.py/.origin），不再要求 module.json。
+func TestSubmitForReview_PackageLayout(t *testing.T) {
+	svc, _ := newShareHandlerSvc(t)
+	root := t.TempDir()
+	t.Setenv("CLAW_MARKETPLACE_DIR", root)
+	const moduleID = "my-share-pkg"
+	modDir := filepath.Join(root, moduleID)
+	require.NoError(t, os.MkdirAll(modDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(modDir, "package.json"), []byte(`{
+  "name": "my-share-pkg",
+  "version": "2.0.0",
+  "description": "package layout share",
+  "category": "utility",
+  "level": 1,
+  "mcpServers": {
+    "main": {"transport": "stdio", "command": ["python"], "args": ["main.py"]}
+  }
+}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(modDir, ".origin"), []byte("user"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(modDir, "main.py"), []byte("print('hi')\n"), 0o644))
+
+	var gotMeta map[string]interface{}
+	var gotTarball []byte
+	cloudMux := http.NewServeMux()
+	cloudMux.HandleFunc("/market/modules/submissions", func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseMultipartForm(32<<20))
+		require.NoError(t, json.Unmarshal([]byte(r.MultipartForm.Value["metadata"][0]), &gotMeta))
+		f, _, err := r.FormFile("tarball")
+		require.NoError(t, err)
+		gotTarball, _ = io.ReadAll(f)
+		_ = f.Close()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"code": 0, "message": "success",
+			"data": map[string]string{"submission_id": "sub-pkg", "status": "pending"},
+		})
+	})
+	cloud := httptest.NewServer(cloudMux)
+	defer cloud.Close()
+
+	h := handler.NewModuleHandler(svc, zap.NewNop())
+	h.SetCloudAPIBase(cloud.URL)
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/claw-console/modules/submit-review", h.SubmitForReview)
+
+	req := httptest.NewRequest(http.MethodPost, "/claw-console/modules/submit-review",
+		bytes.NewReader([]byte(`{"module_id":"my-share-pkg"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	// 元数据读 package.json（name=slug、version 透传），无同名运行时记录也不 404
+	assert.Equal(t, "my-share-pkg", gotMeta["module_id"])
+	assert.Equal(t, "my-share-pkg", gotMeta["name"])
+	assert.Equal(t, "2.0.0", gotMeta["version"])
+	assert.Equal(t, "user", gotMeta["origin"])
+	// tarball 含完整 package 布局
+	entries := tarEntries(t, gotTarball)
+	assert.True(t, entries["package.json"])
+	assert.True(t, entries["main.py"])
+	assert.True(t, entries[".origin"])
+}
+
 // TestSubmitForReview_NoCloudBase 未配置云端 API Base 时返回 503。
 func TestSubmitForReview_NoCloudBase(t *testing.T) {
 	svc, _ := newShareHandlerSvc(t)
