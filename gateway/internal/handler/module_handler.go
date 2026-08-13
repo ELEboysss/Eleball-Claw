@@ -453,5 +453,12 @@ func (h *ModuleHandler) DownloadCloudModule(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 5000, "message": "落盘失败: " + err.Error()})
 		return
 	}
+	// T5.2：官方免费包下载即补齐派生 SKU 购买记录（「一键激活全部」可用）；付费 SKU 保持门禁。
+	// 幂等（已购跳过），失败仅告警不阻断下载成功返回。
+	userIDVal, _ := c.Get("user_id")
+	userID, _ := userIDVal.(string)
+	if err := h.moduleService.EnsurePackageProvision(id, userID); err != nil {
+		h.logger.Warn("下载包后补购买记录失败", zap.String("module_id", id), zap.Error(err))
+	}
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": rec})
 }

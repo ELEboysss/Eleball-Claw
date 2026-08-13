@@ -59,6 +59,16 @@ const categoryIcons = {
   '创意': Sparkles
 }
 
+// T5.2：云端模块本地状态徽标（T1.4 SkillRuntimeStatus 枚举：not_installed/installed/activating/active/degraded/needs_update/disabled）
+const cloudStatusBadge = {
+  installed: { label: '已安装', cls: 'bg-stone-100 text-stone-600' },
+  activating: { label: '启动中', cls: 'bg-blue-50 text-blue-600' },
+  active: { label: '运行中', cls: 'bg-emerald-50 text-emerald-600' },
+  degraded: { label: '异常', cls: 'bg-red-50 text-red-600' },
+  needs_update: { label: '需更新', cls: 'bg-amber-50 text-amber-600' },
+  disabled: { label: '已停用', cls: 'bg-stone-100 text-stone-500' }
+}
+
 // 模块来源标签：eleball_cloud->eleball云端 / eleball_builtin->eleball内置 / user·mcp->主体名；
 // source_origin 缺失（旧云端）回退 official 合成「官方/第三方」。
 function sourceLabel(origin, actor, official) {
@@ -97,6 +107,11 @@ export default function AgentMarket() {
   // 云端已购秘技（ModuleInstallMeta 列表）与安装中 module_id
   const [cloudMetas, setCloudMetas] = useState([])
   const [installingId, setInstallingId] = useState(null)
+  // T5.2：云端模块目录（富化 CloudCatalogEnriched）+ 下载/激活进行态
+  const [cloudCatalog, setCloudCatalog] = useState([])
+  const [cloudLoading, setCloudLoading] = useState(false)
+  const [downloadingId, setDownloadingId] = useState(null)
+  const [activatingId, setActivatingId] = useState(null)
   // H2：依赖管理弹窗（模块级，stdio+process 模块的 requirements.txt/package.json）
   const [depsModal, setDepsModal] = useState(null) // agent 卡片对象
   const [depsStatus, setDepsStatus] = useState(null)
@@ -144,6 +159,11 @@ export default function AgentMarket() {
   const loadAgents = () => {
     // 「我的助手」Tab 不加载秘技列表，助手数据由 AssistantManager 自行加载
     if (filter === 'assistants') return
+    // 「云端模块」Tab 加载富化云端目录（本地列表不经此处）
+    if (filter === 'cloud') {
+      loadCloudCatalog()
+      return
+    }
     setLoading(true)
     setMessage('')
     agentMarketApi
@@ -168,6 +188,16 @@ export default function AgentMarket() {
       .listInstalledModules()
       .then((d) => setCloudMetas(d?.items || d || []))
       .catch(() => {})
+  }
+
+  // T5.2：加载富化云端目录（GET /v1/market/cloud/catalog -> CloudCatalogEnriched[]）
+  const loadCloudCatalog = () => {
+    setCloudLoading(true)
+    clawMarketApi
+      .listCloudCatalog()
+      .then((data) => setCloudCatalog(data?.items || data || []))
+      .catch((err) => setMessage(err.message || '加载云端模块目录失败'))
+      .finally(() => setCloudLoading(false))
   }
 
   const loadPurchasedAgents = () => {
@@ -361,6 +391,59 @@ export default function AgentMarket() {
       }
     } finally {
       setInstallingId(null)
+    }
+  }
+
+  // T5.2：下载/更新云端模块整包（官方免费包下载即自动领取派生 SKU，可直接一键激活）
+  const handleDownloadCloud = async (pkg) => {
+    if (!isLoggedIn) {
+      setLoginOpen(true)
+      return
+    }
+    const isUpdate = pkg.installed
+    const name = pkg.name || pkg.package_id
+    const hint = isUpdate
+      ? `确定将「${name}」更新到 v${pkg.version}？（当前本地 v${pkg.local_version || '-'}）`
+      : `确定下载并安装「${name}」v${pkg.version} 到本地？`
+    if (!window.confirm(hint)) return
+    setDownloadingId(pkg.package_id)
+    setMessage('')
+    try {
+      await clawMarketApi.downloadCloudModule(pkg.package_id)
+      setMessage(isUpdate ? `「${name}」已更新到 v${pkg.version}` : `「${name}」已下载到本地，可一键激活使用`)
+      loadCloudCatalog()
+    } catch (err) {
+      if (err.code === 4002) {
+        setMessage(`${err.message || '该云端模块需 VIP1 及以上'}，请升级 VIP 后重试`)
+      } else {
+        setMessage(err.message || '下载失败')
+      }
+    } finally {
+      setDownloadingId(null)
+    }
+  }
+
+  // T5.2：一键激活包内全部已购/免费派生 SKU（ActivatePackageSKUs）
+  const handleActivatePackage = async (pkg) => {
+    if (!isLoggedIn) {
+      setLoginOpen(true)
+      return
+    }
+    setActivatingId(pkg.package_id)
+    setMessage('')
+    try {
+      const res = await clawMarketApi.activatePackage(pkg.package_id)
+      const n = res?.activated ?? 0
+      setMessage(n > 0 ? `已激活 ${n} 个秘技` : '包内没有可激活的秘技（凭证未配置的 SKU 会跳过）')
+      loadCloudCatalog()
+    } catch (err) {
+      if (err.code === 4002) {
+        setMessage(`${err.message || '该云端模块需 VIP1 及以上'}，请升级 VIP 后重试`)
+      } else {
+        setMessage(err.message || '激活失败')
+      }
+    } finally {
+      setActivatingId(null)
     }
   }
 
@@ -576,13 +659,15 @@ export default function AgentMarket() {
       <div className="text-center mb-6">
         <PageHero
           align="center"
-          title={filter === 'owned' ? '我的秘技' : filter === 'assistants' ? '我的助手' : '秘技集市'}
+          title={filter === 'owned' ? '我的秘技' : filter === 'assistants' ? '我的助手' : filter === 'cloud' ? '云端模块' : '秘技集市'}
           subtitle={
             filter === 'owned'
               ? '你已购买和激活的秘技'
               : filter === 'assistants'
                 ? '助手是已激活秘技的命名组合，在对话页绑定后仅载入组合内的工具'
-                : 'agent 模式下可使用的 skills 及 MCP 工具'
+                : filter === 'cloud'
+                  ? '从云端下载官方秘技包，下载后即可一键激活使用'
+                  : 'agent 模式下可使用的 skills 及 MCP 工具'
           }
         />
         <Link
@@ -644,6 +729,16 @@ export default function AgentMarket() {
           >
             我的助手
           </button>
+          <button
+            onClick={() => setFilter('cloud')}
+            className={`px-5 py-2 rounded-lg text-sm font-medium transition-all ${
+              filter === 'cloud'
+                ? 'bg-white text-eleball-primary shadow-sm'
+                : 'text-eleball-text-secondary hover:text-eleball-text'
+            }`}
+          >
+            云端模块
+          </button>
         </div>
       </div>
 
@@ -676,6 +771,111 @@ export default function AgentMarket() {
         )}
       </div>
 
+      {/* T5.2：云端模块目录（富化目录 / 下载 / 更新 / 一键激活 / 状态） */}
+      {filter === 'cloud' ? (
+        <div className="mb-6">
+          {cloudLoading && (
+            <div className="flex justify-center py-12">
+              <Loader2 className="w-8 h-8 animate-spin text-eleball-primary" />
+            </div>
+          )}
+          {!cloudLoading && cloudCatalog.length === 0 && (
+            <div className="text-center py-16 text-eleball-text-secondary">
+              <Cloud className="w-12 h-12 mx-auto mb-4 opacity-40" />
+              <p>云端暂无可用模块。去 Studio 构建上传，或等待官方发布</p>
+            </div>
+          )}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {cloudCatalog.map((pkg) => {
+              const Icon = categoryIcons[pkg.category] || Cloud
+              const status = cloudStatusBadge[pkg.local_status] || null
+              const busy = !!downloadingId || !!activatingId
+              return (
+                <div key={pkg.package_id} className="card p-5 flex flex-col hover:border-eleball-primary/40 transition-colors">
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="w-12 h-12 rounded-2xl bg-eleball-primary-light flex items-center justify-center shrink-0">
+                      <Icon className="w-6 h-6 text-eleball-primary" />
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {pkg.official && (
+                        <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-emerald-50 text-emerald-600 flex items-center gap-1">
+                          <Star className="w-3 h-3" />
+                          官方
+                        </span>
+                      )}
+                      {status && (
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium flex items-center gap-1 ${status.cls}`}>
+                          {pkg.installed ? <Cloud className="w-3 h-3" /> : <CloudOff className="w-3 h-3" />}
+                          {status.label}
+                        </span>
+                      )}
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${levelColors[pkg.level] || levelColors[1]}`}>
+                        {levelNames[pkg.level] || '秘技'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <h3 className="font-semibold text-eleball-text mb-1">{pkg.name || pkg.package_id}</h3>
+                  <p className="text-xs text-eleball-text-secondary line-clamp-2 mb-3">{pkg.description || ''}</p>
+
+                  <div className="flex items-center gap-1 text-xs text-eleball-text-tertiary mb-4">
+                    <span>云端 v{pkg.version}</span>
+                    {pkg.installed && (
+                      <>
+                        <span className="mx-1">·</span>
+                        <span>本地 {pkg.local_version || '-'}</span>
+                      </>
+                    )}
+                    <span className="mx-1">·</span>
+                    <span>{pkg.actor || (pkg.official ? 'eleball 官方' : '云端用户')}</span>
+                  </div>
+
+                  <div className="flex items-center gap-2 mt-auto pt-2">
+                    {!pkg.installed ? (
+                      <button
+                        onClick={() => handleDownloadCloud(pkg)}
+                        disabled={busy}
+                        className="btn-primary text-xs px-4 py-2 flex-1 justify-center inline-flex items-center gap-1 disabled:opacity-50"
+                      >
+                        {downloadingId === pkg.package_id ? <Loader2 className="w-3 h-3 animate-spin" /> : <CloudDownload className="w-3 h-3" />}
+                        下载到本地
+                      </button>
+                    ) : pkg.has_update ? (
+                      <button
+                        onClick={() => handleDownloadCloud(pkg)}
+                        disabled={busy}
+                        className="btn-primary text-xs px-4 py-2 flex-1 justify-center inline-flex items-center gap-1 disabled:opacity-50"
+                      >
+                        {downloadingId === pkg.package_id ? <Loader2 className="w-3 h-3 animate-spin" /> : <CloudDownload className="w-3 h-3" />}
+                        更新到 v{pkg.version}
+                      </button>
+                    ) : (
+                      <span className="flex-1 text-center text-xs px-2 py-2 rounded-lg bg-eleball-surface-variant text-eleball-text-tertiary">
+                        已是最新版本
+                      </span>
+                    )}
+                    {pkg.installed && pkg.official && (
+                      <button
+                        onClick={() => handleActivatePackage(pkg)}
+                        disabled={busy}
+                        className="btn-secondary text-xs px-4 py-2 inline-flex items-center gap-1 disabled:opacity-50"
+                        title="激活包内全部已购/免费派生秘技（凭证未配置的会跳过）"
+                      >
+                        {activatingId === pkg.package_id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
+                        一键激活全部
+                      </button>
+                    )}
+                  </div>
+                  {pkg.installed && !pkg.official && (
+                    <p className="text-[11px] text-eleball-text-tertiary mt-2">付费秘技请在云端购买后，到「我的秘技」按 SKU 激活</p>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      ) : (
+      <>
       {/* 筛选、排序、搜索 */}
       <div className="flex flex-col md:flex-row md:items-center gap-4 mb-6">
         <div className="flex flex-wrap gap-2">
@@ -835,6 +1035,8 @@ export default function AgentMarket() {
           )
         })}
       </div>
+      </>
+      )}
       </>
       )}
 

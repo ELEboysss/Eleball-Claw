@@ -1627,3 +1627,51 @@ func (s *ModuleService) EnsureCloudAgentProvision(meta ModuleInstallMeta, userID
 	}
 	return nil
 }
+
+// EnsurePackageProvision 下载云端秘技包后为包内派生 SKU 补齐本地购买记录（T5.2）。
+// D9「官方免费直下」的本地体现：官方包 auto_sku 派生 SKU 免费（PriceDanwan==0），下载即视为已领取，
+// 使「一键激活全部」（ActivatePackageSKUs）可直接生效；付费 SKU（PriceDanwan>0）跳过，保持云端购买门禁
+// （激活仍 ErrNotPurchased → 402 引导）。幂等：已购买跳过。仅收包归属 SKU（Metadata.package_module 精确匹配）。
+func (s *ModuleService) EnsurePackageProvision(packageID, userID string) error {
+	if s.agentRepo == nil || userID == "" {
+		return nil
+	}
+	items, err := s.agentRepo.ListByModuleSKUs(packageID)
+	if err != nil {
+		return fmt.Errorf("枚举包 %s 派生 SKU 失败: %w", packageID, err)
+	}
+	for _, item := range items {
+		if item.Status != model.AgentStatusApproved {
+			continue
+		}
+		manifest, err := item.Manifest()
+		if err != nil || manifest == nil || manifest.Metadata == nil {
+			continue
+		}
+		if manifest.Metadata["package_module"] != packageID {
+			continue // 前缀粗筛可能命中同名前缀的其他包 SKU，精确按 package_module 归属
+		}
+		if item.PriceDanwan > 0 {
+			continue // 付费 SKU 不自动领取，激活仍走购买门禁
+		}
+		purchased, err := s.agentRepo.HasPurchased(item.ID, userID)
+		if err != nil {
+			continue
+		}
+		if purchased {
+			continue
+		}
+		if err := s.agentRepo.CreatePurchase(&model.AgentPurchase{
+			ID:              uuid.New().String(),
+			AgentID:         item.ID,
+			BuyerID:         userID,
+			PricePaid:       0,
+			Currency:        "cloud-purchased",
+			CreatorEarnings: 0,
+			PlatformFee:     0,
+		}); err != nil {
+			return fmt.Errorf("写入包 %s 秘技购买记录失败: %w", packageID, err)
+		}
+	}
+	return nil
+}

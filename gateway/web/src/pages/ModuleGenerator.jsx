@@ -1,8 +1,9 @@
 import { useState, useMemo, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import useSEO from '../hooks/useSEO'
-import { Loader2, Plus, Trash2, FolderOpen, Play, PackagePlus, CheckCircle2, Wrench, Sparkles, Terminal } from 'lucide-react'
-import { moduleGeneratorApi, modelApi } from '../api/client'
+import { Loader2, Plus, Trash2, FolderOpen, Play, PackagePlus, CheckCircle2, Wrench, Sparkles, Terminal, CloudUpload } from 'lucide-react'
+import { moduleGeneratorApi, modelApi, agentMarketApi } from '../api/client'
+import { useAuth } from '../context/AuthContext'
 import DirectoryPicker from '../components/DirectoryPicker'
 import InterpreterMissingBanner from '../components/InterpreterMissingBanner'
 
@@ -93,6 +94,9 @@ function defaultArgsFromSchema(schema) {
 }
 
 export default function ModuleGenerator() {
+  const { isLoggedIn } = useAuth()
+  const [submitting, setSubmitting] = useState(false)
+  const [submitMsg, setSubmitMsg] = useState(null) // {ok, text}
   // 嵌入 DDIY 工作室（Studio）内容区，页头/SEO 由 Studio 统一负责。
 
   const [name, setName] = useState('')
@@ -283,6 +287,29 @@ export default function ModuleGenerator() {
       setTest(tool.name, { calling: false, result: data, error: null })
     } catch (e) {
       setTest(tool.name, { calling: false, error: e.message })
+    }
+  }
+
+  // T5.2：上传本地模块到云端审核（POST /v1/claw-console/modules/submit-review，body {module_id}）
+  const handleSubmitReview = async () => {
+    if (!result?.module_id) return
+    if (!isLoggedIn) {
+      setSubmitMsg({ ok: false, text: '请先登录账号，再上传到云端审核' })
+      return
+    }
+    setSubmitting(true)
+    setSubmitMsg(null)
+    try {
+      const res = await agentMarketApi.submitForReview(result.module_id)
+      const sid = res?.submission_id || ''
+      setSubmitMsg({
+        ok: true,
+        text: `已提交审核${sid ? `（submission_id: ${sid}）` : ''}，待管理员审批通过后即可在「云端模块」目录下载`
+      })
+    } catch (e) {
+      setSubmitMsg({ ok: false, text: e.message || '提交审核失败' })
+    } finally {
+      setSubmitting(false)
     }
   }
 
@@ -670,10 +697,25 @@ export default function ModuleGenerator() {
               <Link to="/agents" className="btn-primary text-xs px-4 py-2">
                 去秘技市场配置凭证并启用
               </Link>
+              <button
+                type="button"
+                onClick={handleSubmitReview}
+                disabled={submitting}
+                className="btn-secondary text-xs px-4 py-2 inline-flex items-center gap-1 disabled:opacity-50"
+                title="打包上传到云端，经管理员审批后在「云端模块」目录发布"
+              >
+                {submitting ? <Loader2 className="w-3 h-3 animate-spin" /> : <CloudUpload className="w-3 h-3" />}
+                上传到云端审核
+              </button>
               <span className="text-[11px] text-eleball-text-tertiary">
                 生成的秘技默认未启用；需在市场填写凭证（若有）后开启。修改脚本后重新生成会自动重启模块加载新代码。
               </span>
             </div>
+            {submitMsg && (
+              <div className={`text-xs px-3 py-2 rounded-xl ${submitMsg.ok ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'}`}>
+                {submitMsg.text}
+              </div>
+            )}
           </div>
         )}
       </div>

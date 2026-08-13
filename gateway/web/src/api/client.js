@@ -553,8 +553,9 @@ export const agentMarketApi = {
   // SKU 凭证（本地）
   getCredentials: (id) => client.get(`/agents/${id}/credentials`),
   saveCredentials: (id, values) => client.post(`/agents/${id}/credentials`, { values }),
-  // 提交本地秘技到云端审核（转发云端 register 接口）
-  submitForReview: (payload) => cloudClient.post('/market/modules/register', payload),
+  // 提交本地秘技到云端审核（T5.2：委托 claw /claw-console/modules/submit-review，body 仅 module_id；
+  // 云端 register 旧流程已退役，见 T3.4）
+  submitForReview: (moduleId) => client.post('/claw-console/modules/submit-review', { module_id: moduleId }),
   // 本地购买：仅免费 SKU 可成功，付费 SKU 由后端返回「付费秘技请到云端购买」
   purchaseLocal: (id, currency = 'danwan') =>
     client.post(`/agents/${id}/purchase`, { agent_id: id, currency }),
@@ -576,7 +577,16 @@ export const clawMarketApi = {
     cloudClient.get('/market/modules/installed', { params: since ? { since } : {} }),
   // 安装云端已购秘技到本地（body 为单个 ModuleInstallMeta）；
   // official=false 时后端做 VIP1+ 门禁，未达标返回 code=4002（HTTP 403）
-  installModule: (meta) => client.post('/claw-console/modules/install', meta)
+  installModule: (meta) => client.post('/claw-console/modules/install', meta),
+  // --- T5.2 新整包流程（云端模块 tab）---
+  // 富化云端目录：{items: [{...PackageCatalogItem, installed, local_version, has_update, local_status}]}
+  listCloudCatalog: () => client.get('/market/cloud/catalog'),
+  // 下载/更新整包（T4.2 ApplyPackage 落盘 + RescanPackage；官方免费包下载即自动领取派生 SKU）
+  downloadCloudModule: (id) => client.post(`/market/cloud/modules/${id}/download`),
+  // 整包激活全部已购派生 SKU：{activated: n}（T4.3 ActivatePackageSKUs）
+  activatePackage: (id) => client.post(`/claw-console/agents/package/${id}/activate`),
+  // 上传本地模块到云端审核：{module_id}（T8 SubmitForReview）
+  submitReview: (moduleId) => client.post('/claw-console/modules/submit-review', { module_id: moduleId })
 }
 
 // ====== SKU 凭证 API（本地 claw，Cookie / API Key / Token）======
