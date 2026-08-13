@@ -78,7 +78,7 @@ func setupOrchestratorTest(t *testing.T) *orchestratorTestEnv {
 	driverRegistry := NewToolDriverRegistry()
 	driverRegistry.Register(NewModuleDriver(nil, nil))
 	// moduleRegistry=nil：跳过模块在线探测，专注编排链路
-	loader := NewAgentToolLoader(agentRepo, driverRegistry, nil)
+	loader := NewAgentToolLoader(agentRepo, driverRegistry)
 
 	convSvc := NewConversationService(repository.NewChatConversationRepo(db), newTestVIPService(db), t.TempDir())
 	sessionRepo := repository.NewAgentSessionRepo(db)
@@ -109,7 +109,7 @@ func TestAgentToolLoader_LoadActivePromptSkills(t *testing.T) {
 	require.NoError(t, db.AutoMigrate(&model.AgentItem{}, &model.AgentPurchase{}, &model.AgentUserTool{}))
 
 	agentRepo := repository.NewAgentRepo(db)
-	loader := NewAgentToolLoader(agentRepo, NewToolDriverRegistry(), nil)
+	loader := NewAgentToolLoader(agentRepo, NewToolDriverRegistry())
 	now := time.Now()
 
 	mkItem := func(id, name, sysPrompt string, driver model.ToolDriverType) *model.AgentItem {

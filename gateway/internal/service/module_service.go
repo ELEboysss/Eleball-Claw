@@ -25,9 +25,7 @@ type ModuleService struct {
 	registry   *SkillRuntimeRegistry
 	manager    *SkillRuntimeManager
 	repo       *repository.SkillRuntimeRepo
-	agentRepo  *repository.AgentRepo  // 可选：用于「已购模块」接口查询用户已购 SKU
-	moduleRepo *repository.ModuleRepo // 可选：claw InstallFromCloudMeta 保留旧 modules 表 InstallSource 标记
-	driverRepo *repository.DriverRepo // 可选：claw InstallFromCloudMeta 保留旧 drivers 表绑定
+	agentRepo  *repository.AgentRepo // 可选：用于「已购模块」接口查询用户已购 SKU
 	// chatService 可选：skill-maker AI 起草 main.py 草稿（F1 收尾，调对话模型生成 stdio MCP 脚本）。
 	chatService *ChatProxyService
 	// bootstrap 可选：H2 装依赖时确保解释器可用（python/node 托管下载，H1）。
@@ -53,16 +51,6 @@ func NewModuleService(registry *SkillRuntimeRegistry, manager *SkillRuntimeManag
 // SetAgentRepo 注入秘技仓库（claw 用：云端秘技安装后落本地 AgentItem/AgentPurchase）
 func (s *ModuleService) SetAgentRepo(repo *repository.AgentRepo) {
 	s.agentRepo = repo
-}
-
-// SetModuleRepo 注入旧模块仓库（claw 用：InstallFromCloudMeta 保留 InstallSource 来源标记）
-func (s *ModuleService) SetModuleRepo(repo *repository.ModuleRepo) {
-	s.moduleRepo = repo
-}
-
-// SetDriverRepo 注入旧驱动仓库（claw 用：InstallFromCloudMeta 保留驱动别名绑定）
-func (s *ModuleService) SetDriverRepo(repo *repository.DriverRepo) {
-	s.driverRepo = repo
 }
 
 // SetChatProxyService 注入对话代理服务（claw 用：skill-maker AI 起草 main.py，F1 收尾）。
@@ -141,7 +129,7 @@ func (s *ModuleService) ListInstalledModulesForUser(userID string, since *time.T
 			Name:          rt.Name,
 			Description:   rt.Description,
 			Version:       rt.Version,
-			TransportType: legacyTransportType(rt.Transport),
+			TransportType: string(rt.Transport),
 			DriverID:      rt.DriverID,
 			Official:      rt.Official,
 			SourceOrigin:  string(rt.SourceOrigin),
@@ -190,9 +178,8 @@ func parseImageRef(ref, digest string) *ModuleImageMeta {
 	}
 }
 
-// RegisterModule 管理后台注册/更新模块（转换为 SkillRuntime）
-func (s *ModuleService) RegisterModule(record *model.ModuleRecord) error {
-	rt := moduleRecordToRuntime(record)
+// RegisterModule 管理后台注册/更新模块（统一落 skill_runtimes）
+func (s *ModuleService) RegisterModule(rt *model.SkillRuntime) error {
 	return s.registry.Register(rt)
 }
 
@@ -201,31 +188,22 @@ func (s *ModuleService) UnregisterModule(moduleID string) error {
 	return s.registry.Unregister(moduleID)
 }
 
-// ListModules 列出所有已注册模块（返回实时健康状态）
-func (s *ModuleService) ListModules() ([]*model.ModuleRecord, error) {
-	statuses := s.registry.List()
-	activated := s.ActivatedModuleIDs()
-	items := make([]*model.ModuleRecord, 0, len(statuses))
-	for _, st := range statuses {
-		rt := s.registry.Get(st.RuntimeID)
-		rec := runtimeToModuleRecord(rt, st)
-		rec.RequiredEnv = requiredEnvFor(rt)
-		rec.Activated = activated[rt.ID]
-		items = append(items, rec)
+// ListModules 列出所有运行时（管理后台；skill_runtimes 为单一事实源）
+func (s *ModuleService) ListModules() ([]*model.SkillRuntime, error) {
+	runtimes, err := s.repo.List()
+	if err != nil {
+		return nil, err
 	}
-	return items, nil
+	return runtimes, nil
 }
 
-// GetModule 获取单个模块详情
-func (s *ModuleService) GetModule(moduleID string) (*model.ModuleRecord, error) {
-	rt := s.registry.Get(moduleID)
-	if rt == nil {
+// GetModule 获取单个运行时详情
+func (s *ModuleService) GetModule(moduleID string) (*model.SkillRuntime, error) {
+	rt, err := s.repo.GetByID(moduleID)
+	if err != nil {
 		return nil, errors.New("模块不存在")
 	}
-	rec := runtimeToModuleRecord(rt, nil)
-	rec.RequiredEnv = requiredEnvFor(rt)
-	rec.Activated = s.ActivatedModuleIDs()[moduleID]
-	return rec, nil
+	return rt, nil
 }
 
 // requiredEnv 据 SkillRuntime 部署方式 + 启动命令推断所需本地环境，供控制台离线说明展示。
@@ -295,7 +273,7 @@ func (s *ModuleService) resolveModuleIDFromManifest(manifest *model.ToolManifest
 	if err != nil || rec == nil {
 		return ""
 	}
-	return rec.ModuleID
+	return rec.ID
 }
 
 // Start 拉起指定模块（控制台「启动服务」按钮）。按部署方式分流：
@@ -337,22 +315,22 @@ func (s *ModuleService) Start(moduleID string) (*SkillRuntimeStatusSnapshot, err
 }
 
 // RegisterModuleFromPlugin 插件自助注册
-func (s *ModuleService) RegisterModuleFromPlugin(req *model.ModuleRegisterRequest, providedToken string) (string, error) {
+func (s *ModuleService) RegisterModuleFromPlugin(req *model.PluginRegisterRequest, providedToken string) (string, error) {
 	if req.URL == "" {
 		return "", errors.New("url 不能为空")
 	}
 
 	transport := model.SkillRuntimeTransportExecute
 	deployment := model.SkillRuntimeDeploymentDocker
-	switch model.ModuleTransportType(req.TransportType) {
-	case model.ModuleTransportTypeMCP:
+	switch req.TransportType {
+	case "mcp":
 		transport = model.SkillRuntimeTransportMCPHTTP
-	case model.ModuleTransportTypeRemoteURL:
+	case "remote_url":
 		transport = model.SkillRuntimeTransportRawHTTP
 		deployment = model.SkillRuntimeDeploymentNone
 	}
 
-	moduleID := req.ModuleID
+	moduleID := req.ID
 	if moduleID == "" {
 		moduleID = model.GenerateModuleID(req.Name)
 	}
@@ -371,17 +349,18 @@ func (s *ModuleService) RegisterModuleFromPlugin(req *model.ModuleRegisterReques
 	}
 	rt.SetCapabilities(req.Capabilities)
 
-	// 新流程：按 auth_token 绑定到已有驱动别名
+	// 新流程：按 auth_token 绑定到已有驱动别名（driver 已统一为 SkillRuntime，key=DriverID）
 	if providedToken != "" {
 		if existing, err := s.ResolveDriverByAuthToken(providedToken); err == nil && existing != nil {
-			rt.DriverID = existing.ID
-			// 若驱动记录已指定 endpoint/transport，以驱动为准
+			rt.DriverID = existing.DriverID
+			// 若驱动运行时已指定 endpoint/transport，以驱动为准
 			if existing.Endpoint != "" {
 				rt.Endpoint = existing.Endpoint
 			}
-			if existing.TransportType == string(model.ModuleTransportTypeMCP) && existing.MCPServerConfig != nil {
-				rt.Endpoint = existing.MCPServerConfig.URL
-				rt.SetMCPServerConfig(existing.MCPServerConfig)
+			if existing.IsMCP() && existing.GetMCPServerConfig() != nil {
+				cfg := existing.GetMCPServerConfig()
+				rt.Endpoint = cfg.URL
+				rt.SetMCPServerConfig(cfg)
 			}
 		}
 	}
@@ -635,7 +614,7 @@ func (s *ModuleService) WriteUserModule(req UserModuleGenerateRequest, tools []M
 // 手动下载语义（D4：不自动拉取，用户主动触发）：已存在则覆盖 module.json/skus/compose，
 // 不删本地额外文件（如用户改过的 main.py / 凭证）。落盘后 best-effort 拉起（#6 L2）：
 // docker 触发 ACR pull_first 起 container，process 起 stdio；失败不阻断下载。
-func (s *ModuleService) ApplyCloudPackage(pkg model.ModulePackage) (*model.ModuleRecord, error) {
+func (s *ModuleService) ApplyCloudPackage(pkg model.ModulePackage) (*model.SkillRuntime, error) {
 	if pkg.ModuleID == "" || len(pkg.ModuleJSON) == 0 {
 		return nil, errors.New("模块包缺少 module_id 或 module_json")
 	}
@@ -1067,43 +1046,8 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 	return nil
 }
 
-// RegisterDriver 注册/更新驱动映射（转换为 SkillRuntime）
-func (s *ModuleService) RegisterDriver(req *model.DriverRegisterRequest) error {
-	transport := model.SkillRuntimeTransportExecute
-	deployment := model.SkillRuntimeDeploymentExternal
-	endpoint := ""
-	switch model.ModuleTransportType(req.TransportType) {
-	case model.ModuleTransportTypeMCP:
-		transport = model.SkillRuntimeTransportMCPHTTP
-		if req.MCPServerConfig != nil {
-			endpoint = req.MCPServerConfig.URL
-		}
-	case model.ModuleTransportTypeRemoteURL:
-		transport = model.SkillRuntimeTransportRawHTTP
-		deployment = model.SkillRuntimeDeploymentNone
-		endpoint = req.Endpoint
-	case model.ModuleTransportTypeModule:
-		deployment = model.SkillRuntimeDeploymentDocker
-		if req.ModuleID != "" {
-			endpoint = "http://" + req.ModuleID + ":8080"
-		}
-	}
-
-	rt := &model.SkillRuntime{
-		ID:          req.ID,
-		Name:        req.Name,
-		Description: req.Description,
-		Source:      model.SkillRuntimeSourceMarketplace,
-		Transport:   transport,
-		Deployment:  deployment,
-		Endpoint:    endpoint,
-		DriverID:    req.ID,
-		AuthToken:   req.AuthToken,
-		Status:      model.SkillRuntimeStatusOffline,
-	}
-	if req.TransportType == string(model.ModuleTransportTypeMCP) && req.MCPServerConfig != nil {
-		rt.SetMCPServerConfig(req.MCPServerConfig)
-	}
+// RegisterDriver 注册/更新驱动运行时（driver 已统一为 SkillRuntime，key=DriverID）
+func (s *ModuleService) RegisterDriver(rt *model.SkillRuntime) error {
 	return s.registry.Register(rt)
 }
 
@@ -1267,30 +1211,26 @@ func (s *ModuleService) UnregisterDriver(driverID string) error {
 	return s.registry.Unregister(rt.ID)
 }
 
-// ListDrivers 列出所有动态驱动映射
-func (s *ModuleService) ListDrivers() ([]*model.DriverRecord, error) {
+// ListDrivers 列出所有运行时（驱动已并入 SkillRuntime，管理后台直接展示运行时表）
+func (s *ModuleService) ListDrivers() ([]*model.SkillRuntime, error) {
 	runtimes, err := s.repo.List()
 	if err != nil {
 		return nil, err
 	}
-	items := make([]*model.DriverRecord, 0, len(runtimes))
-	for _, rt := range runtimes {
-		items = append(items, runtimeToDriverRecord(rt))
-	}
-	return items, nil
+	return runtimes, nil
 }
 
-// ResolveDriver 根据驱动名解析动态驱动记录
-func (s *ModuleService) ResolveDriver(driverID string) (*model.DriverRecord, error) {
+// ResolveDriver 根据驱动别名解析运行时
+func (s *ModuleService) ResolveDriver(driverID string) (*model.SkillRuntime, error) {
 	rt, err := s.repo.GetByDriverID(driverID)
 	if err != nil {
 		return nil, err
 	}
-	return runtimeToDriverRecord(rt), nil
+	return rt, nil
 }
 
-// ResolveDriverByAuthToken 根据 auth_token 解析动态驱动记录
-func (s *ModuleService) ResolveDriverByAuthToken(token string) (*model.DriverRecord, error) {
+// ResolveDriverByAuthToken 根据 auth_token 解析运行时
+func (s *ModuleService) ResolveDriverByAuthToken(token string) (*model.SkillRuntime, error) {
 	if token == "" {
 		return nil, errors.New("auth_token 不能为空")
 	}
@@ -1300,7 +1240,7 @@ func (s *ModuleService) ResolveDriverByAuthToken(token string) (*model.DriverRec
 	}
 	for _, rt := range runtimes {
 		if rt.AuthToken == token {
-			return runtimeToDriverRecord(rt), nil
+			return rt, nil
 		}
 	}
 	return nil, errors.New("驱动不存在")
@@ -1316,95 +1256,7 @@ func (s *ModuleService) BindDriverModule(driverID, moduleID string) error {
 	return s.registry.Register(rt)
 }
 
-// ===== 转换辅助函数 =====
-
-func moduleRecordToRuntime(rec *model.ModuleRecord) *model.SkillRuntime {
-	transport := model.SkillRuntimeTransportExecute
-	deployment := model.SkillRuntimeDeploymentDocker
-	switch rec.TransportType {
-	case model.ModuleTransportTypeMCP:
-		transport = model.SkillRuntimeTransportMCPHTTP
-	case model.ModuleTransportTypeRemoteURL:
-		transport = model.SkillRuntimeTransportRawHTTP
-		deployment = model.SkillRuntimeDeploymentNone
-	}
-
-	rt := &model.SkillRuntime{
-		ID:          rec.ID,
-		Name:        rec.Name,
-		Description: rec.Description,
-		Source:      model.SkillRuntimeSourceMarketplace,
-		Transport:   transport,
-		Deployment:  deployment,
-		Endpoint:    rec.URL,
-		ImageRef:    rec.ImageRef,
-		ImageDigest: rec.ImageDigest,
-		Signature:   rec.Signature,
-		AuthToken:   rec.AuthToken,
-		Version:     rec.Version,
-		Official:    rec.Official,
-		DriverID:    rec.ID,
-	}
-	rt.SetCapabilities(rec.CapabilitiesList())
-	return rt
-}
-
-func runtimeToModuleRecord(rt *model.SkillRuntime, st *SkillRuntimeStatusSnapshot) *model.ModuleRecord {
-	rec := &model.ModuleRecord{
-		ID:            rt.ID,
-		Name:          rt.Name,
-		Description:   rt.Description,
-		URL:           rt.Endpoint,
-		TransportType: model.ModuleTransportTypeModule,
-		Version:       rt.Version,
-		Official:      rt.Official,
-		SourceOrigin:  string(rt.SourceOrigin),
-		SourceActor:   rt.SourceActor,
-		ImageRef:      rt.ImageRef,
-		ImageDigest:   rt.ImageDigest,
-		Signature:     rt.Signature,
-		AuthToken:     rt.AuthToken,
-	}
-	rec.SetCapabilities(rt.CapabilitiesList())
-
-	switch rt.Transport {
-	case model.SkillRuntimeTransportMCPHTTP:
-		rec.TransportType = model.ModuleTransportTypeMCP
-	case model.SkillRuntimeTransportRawHTTP:
-		rec.TransportType = model.ModuleTransportTypeRemoteURL
-	}
-
-	if st != nil {
-		rec.Status = model.ModuleStatusOffline
-		if st.Online {
-			rec.Status = model.ModuleStatusOnline
-		}
-		rec.HealthError = st.Error
-		now := time.Now()
-		rec.LastHeartbeat = &now
-	}
-	return rec
-}
-
-func runtimeToDriverRecord(rt *model.SkillRuntime) *model.DriverRecord {
-	rec := &model.DriverRecord{
-		ID:        rt.DriverID,
-		Name:      rt.Name,
-		ModuleID:  rt.ID,
-		Endpoint:  rt.Endpoint,
-		AuthToken: rt.AuthToken,
-	}
-	switch rt.Transport {
-	case model.SkillRuntimeTransportMCPHTTP:
-		rec.TransportType = string(model.ModuleTransportTypeMCP)
-		rec.MCPServerConfig = rt.GetMCPServerConfig()
-	case model.SkillRuntimeTransportRawHTTP:
-		rec.TransportType = string(model.ModuleTransportTypeRemoteURL)
-	default:
-		rec.TransportType = string(model.ModuleTransportTypeModule)
-	}
-	return rec
-}
+// ===== transport/deployment 解析辅助 =====
 
 func parseSkillRuntimeTransport(s string) model.SkillRuntimeTransport {
 	switch s {
@@ -1436,43 +1288,6 @@ func parseSkillRuntimeDeployment(s string) model.SkillRuntimeDeployment {
 	}
 }
 
-func legacyTransportType(t model.SkillRuntimeTransport) string {
-	switch t {
-	case model.SkillRuntimeTransportMCPHTTP:
-		return "mcp"
-	case model.SkillRuntimeTransportRawHTTP:
-		return "remote_url"
-	default:
-		return "module"
-	}
-}
-
-// upsertCloudPurchasedModuleRecord 将官方模块标记为云端购买来源并写入旧 modules 表。
-// 用于 InstallFromCloudMeta 的幂等与首次安装路径，保证 IsCloudPurchasedAgent 能判定来源。
-func (s *ModuleService) upsertCloudPurchasedModuleRecord(moduleID string, rt *model.SkillRuntime, version string) error {
-	if s.moduleRepo == nil {
-		return nil
-	}
-	old, _ := s.moduleRepo.GetByID(moduleID)
-	if old == nil {
-		old = &model.ModuleRecord{ID: moduleID, Name: rt.Name}
-	}
-	old.Official = true
-	old.InstallSource = "cloud-purchased"
-	if version != "" {
-		old.Version = version
-	}
-	old.URL = rt.Endpoint
-	old.TransportType = model.ModuleTransportTypeModule
-	if rt.Transport == model.SkillRuntimeTransportMCPHTTP {
-		old.TransportType = model.ModuleTransportTypeMCP
-	} else if rt.Transport == model.SkillRuntimeTransportRawHTTP {
-		old.TransportType = model.ModuleTransportTypeRemoteURL
-	}
-	old.SetCapabilities(rt.CapabilitiesList())
-	return s.moduleRepo.CreateOrUpdate(old)
-}
-
 // InstallFromCloudMeta 把云端拉取的 ModuleInstallMeta 安装到本地。
 //
 // P4 安装流程（见 docs/marketing/claw-implementation-plan.md §F.2）：
@@ -1491,8 +1306,8 @@ func applyCloudSourceOrigin(rt *model.SkillRuntime, meta ModuleInstallMeta) bool
 	return changed
 }
 
-// 返回安装后的 ModuleRecord（含 image/signature 元数据）。已安装同 module_id 视为幂等成功。
-func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.ModuleRecord, error) {
+// 返回安装后的 SkillRuntime（含 image/signature 元数据）。已安装同 module_id 视为幂等成功。
+func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.SkillRuntime, error) {
 	if s.registry == nil {
 		return nil, errors.New("SkillRuntimeRegistry 未初始化")
 	}
@@ -1506,14 +1321,6 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Mod
 				return nil, fmt.Errorf("持久化模块来源属性失败: %w", err)
 			}
 		}
-		// 官方预置模块：幂等路径也补齐旧 modules 表的 official/来源标记（本地扫描建记录时无此信息）。
-		// 注意：经云端 installed 接口安装的官方模块同样标记 cloud-purchased，
-		// 与本地纯扫描预置（InstallSource 为空）区分，激活时统一走 VIP 门控。
-		if meta.Official && s.moduleRepo != nil {
-			if err := s.upsertCloudPurchasedModuleRecord(meta.ModuleID, existing, meta.Version); err != nil {
-				return nil, err
-			}
-		}
 		// 幂等路径也要补齐驱动绑定（首次安装时驱动写库失败重试、云端补发 driver_id 等场景）
 		if err := s.upsertDriverBinding(meta); err != nil {
 			return nil, err
@@ -1522,30 +1329,22 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Mod
 		if err := s.applyCloudManifestSKUAuthority(meta, existing); err != nil {
 			return nil, err
 		}
-		record := runtimeToModuleRecord(existing, s.registry.Check(meta.ModuleID))
-		if meta.Official {
-			record.InstallSource = "cloud-purchased"
-		}
-		return record, nil
+		return existing, nil
 	}
 
-	var record *model.ModuleRecord
+	var record *model.SkillRuntime
 	if meta.Official {
-		// 官方模块：依赖 marketplace 扫描已注册；此处补齐旧 modules 表的 official/来源标记并返回
+		// 官方模块：依赖 marketplace 扫描已注册；此处持久化来源属性并返回
 		rec, err := s.repo.GetByID(meta.ModuleID)
 		if err != nil || rec == nil {
 			return nil, fmt.Errorf("官方模块 %s 未在本地预置，请确认 marketplace/ 已包含", meta.ModuleID)
-		}
-		if err := s.upsertCloudPurchasedModuleRecord(meta.ModuleID, rec, meta.Version); err != nil {
-			return nil, err
 		}
 		if applyCloudSourceOrigin(rec, meta) {
 			if err := s.repo.CreateOrUpdate(rec); err != nil {
 				return nil, fmt.Errorf("持久化模块来源属性失败: %w", err)
 			}
 		}
-		record = runtimeToModuleRecord(rec, s.registry.Check(meta.ModuleID))
-		record.InstallSource = "cloud-purchased"
+		record = rec
 	} else {
 		// 第三方：拉镜像 + 签名 + 启动容器
 		if s.installer == nil || s.installer.Runtime() == "" {
@@ -1553,33 +1352,30 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Mod
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 		defer cancel()
-		rec, err := s.installer.Install(ctx, meta)
+		rt, err := s.installer.Install(ctx, meta)
 		if err != nil {
 			return nil, err
 		}
-		rt := moduleRecordToRuntime(rec)
 		applyCloudSourceOrigin(rt, meta) // Register 持久化（含来源属性）
 		if err := s.registry.Register(rt); err != nil {
 			return nil, fmt.Errorf("注册模块到 registry 失败: %w", err)
 		}
-		record = rec
+		record = rt
 	}
 
-	// 安装成功后按 meta upsert 本地驱动别名并绑定模块（official/第三方通用）。
-	// 本地 drivers 表缺该 DriverRecord 时新建，存在则更新绑定与令牌。
+	// 安装成功后按 meta upsert 本地驱动绑定（official/第三方通用）。
 	if err := s.upsertDriverBinding(meta); err != nil {
 		return nil, err
 	}
 
 	// 触发一次健康探测刷新状态
-	record.Status = model.ModuleStatusOffline
+	record.Status = model.SkillRuntimeStatusOffline
 	if st := s.registry.ForceProbe(meta.ModuleID); st != nil {
 		if st.Online {
-			record.Status = model.ModuleStatusOnline
+			record.Status = model.SkillRuntimeStatusOnline
 		}
 		record.Version = st.Version
 		record.SetCapabilities(st.Capabilities)
-		record.HealthError = st.Error
 	}
 	// S2：云端下发了 manifest -> 云端 manifest 定名接管，关闭 auto_sku 并下架遗留派生 SKU。
 	if rt, err := s.repo.GetByID(meta.ModuleID); err == nil && rt != nil {
@@ -1632,64 +1428,30 @@ func (s *ModuleService) applyCloudManifestSKUAuthority(meta ModuleInstallMeta, r
 	return nil
 }
 
-// upsertDriverBinding 按云端 meta upsert 本地驱动别名并绑定到已安装模块。
-// meta.DriverID 为空时不做任何事。已存在的驱动记录只更新绑定/传输类型/令牌，保留其余字段。
+// upsertDriverBinding 按云端 meta 把驱动别名绑定到已安装模块的 skill_runtimes 记录上。
+// meta.DriverID 为空时不做任何事；模块不存在则报错。skill_runtimes 是驱动别名的唯一落库点。
 func (s *ModuleService) upsertDriverBinding(meta ModuleInstallMeta) error {
 	if meta.DriverID == "" {
 		return nil
 	}
-	if s.driverRepo == nil {
-		return errors.New("DriverRepo 未初始化")
+	rt, err := s.repo.GetByID(meta.ModuleID)
+	if err != nil {
+		return fmt.Errorf("模块 %s 不存在，无法绑定驱动: %w", meta.ModuleID, err)
 	}
-
-	transportType := meta.TransportType
-	if transportType == "" {
-		transportType = string(model.ModuleTransportTypeModule)
+	changed := false
+	if rt.DriverID != meta.DriverID {
+		rt.DriverID = meta.DriverID
+		changed = true
 	}
-
-	if existing, err := s.driverRepo.GetByID(meta.DriverID); err == nil && existing != nil {
-		changed := false
-		if existing.ModuleID != meta.ModuleID {
-			existing.ModuleID = meta.ModuleID
-			changed = true
-		}
-		if meta.TransportType != "" && existing.TransportType != meta.TransportType {
-			existing.TransportType = meta.TransportType
-			changed = true
-		}
-		if meta.AuthToken != "" && existing.AuthToken != meta.AuthToken {
-			existing.AuthToken = meta.AuthToken
-			changed = true
-		}
-		if existing.Name == "" {
-			existing.Name = meta.Name
-			if existing.Name == "" {
-				existing.Name = meta.DriverID
-			}
-			changed = true
-		}
-		if !changed {
-			return nil
-		}
-		if err := s.driverRepo.CreateOrUpdate(existing); err != nil {
-			return fmt.Errorf("更新驱动别名 %s 失败: %w", meta.DriverID, err)
-		}
+	if meta.AuthToken != "" && rt.AuthToken != meta.AuthToken {
+		rt.AuthToken = meta.AuthToken
+		changed = true
+	}
+	if !changed {
 		return nil
 	}
-
-	name := meta.Name
-	if name == "" {
-		name = meta.DriverID
-	}
-	rec := &model.DriverRecord{
-		ID:            meta.DriverID,
-		Name:          name,
-		TransportType: transportType,
-		ModuleID:      meta.ModuleID,
-		AuthToken:     meta.AuthToken,
-	}
-	if err := s.driverRepo.CreateOrUpdate(rec); err != nil {
-		return fmt.Errorf("创建驱动别名 %s 失败: %w", meta.DriverID, err)
+	if err := s.repo.CreateOrUpdate(rt); err != nil {
+		return fmt.Errorf("更新模块 %s 驱动绑定失败: %w", meta.ModuleID, err)
 	}
 	return nil
 }

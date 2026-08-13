@@ -21,7 +21,7 @@ type AgentToolLoader struct {
 }
 
 // NewAgentToolLoader 创建动态工具加载器
-func NewAgentToolLoader(agentRepo *repository.AgentRepo, driverRegistry *ToolDriverRegistry, moduleRegistry *SkillRuntimeRegistry) *AgentToolLoader {
+func NewAgentToolLoader(agentRepo *repository.AgentRepo, driverRegistry *ToolDriverRegistry) *AgentToolLoader {
 	return &AgentToolLoader{
 		agentRepo:      agentRepo,
 		driverRegistry: driverRegistry,
@@ -174,7 +174,7 @@ func (l *AgentToolLoader) buildToolFunc(manifest *model.ToolManifest, agentID st
 		}
 
 		// 对于 remote_url 驱动，需要把 endpoint 注入 input
-		if manifest.Driver == model.ToolDriverRemoteURL || (dynRec != nil && dynRec.TransportType == string(model.ModuleTransportTypeRemoteURL)) {
+		if manifest.Driver == model.ToolDriverRemoteURL || (dynRec != nil && dynRec.Transport == model.SkillRuntimeTransportRawHTTP) {
 			endpoint := manifest.Metadata["endpoint"]
 			if dynRec != nil && dynRec.Endpoint != "" {
 				endpoint = dynRec.Endpoint
@@ -191,11 +191,11 @@ func (l *AgentToolLoader) buildToolFunc(manifest *model.ToolManifest, agentID st
 			}
 		}
 
-		// 对于通用模块驱动，通过动态驱动记录（driver 别名）或 metadata.module 指定目标模块
-		if manifest.Driver == model.ToolDriverModule || (dynRec != nil && dynRec.TransportType == string(model.ModuleTransportTypeModule)) {
+		// 对于通用模块驱动，通过动态驱动运行时（driver 别名）或 metadata.module 指定目标模块
+		if manifest.Driver == model.ToolDriverModule || (dynRec != nil && dynRec.Transport == model.SkillRuntimeTransportExecute) {
 			moduleID := manifest.Metadata["module"]
-			if dynRec != nil && dynRec.ModuleID != "" {
-				moduleID = dynRec.ModuleID
+			if dynRec != nil && dynRec.ID != "" {
+				moduleID = dynRec.ID
 			}
 			if moduleID != "" {
 				input["__module_id__"] = moduleID
@@ -211,9 +211,9 @@ func (l *AgentToolLoader) buildToolFunc(manifest *model.ToolManifest, agentID st
 
 		// 对于 MCP 驱动，将服务端点配置注入 input，供 mcpDriver 读取。
 		// 同时兼容 manifest.metadata.mcp_endpoint 的遗留写法。
-		if manifest.Driver == model.ToolDriverMCP || (dynRec != nil && dynRec.TransportType == string(model.ModuleTransportTypeMCP)) {
-			if dynRec != nil && dynRec.MCPServerConfig != nil {
-				if b, err := json.Marshal(dynRec.MCPServerConfig); err == nil {
+		if manifest.Driver == model.ToolDriverMCP || (dynRec != nil && dynRec.IsMCP()) {
+			if cfg := dynRec.GetMCPServerConfig(); dynRec != nil && cfg != nil {
+				if b, err := json.Marshal(cfg); err == nil {
 					input["__mcp_server__"] = string(b)
 				}
 			}
@@ -315,8 +315,8 @@ func (l *AgentToolLoader) ValidateManifest(manifest *model.ToolManifest) error {
 	return nil
 }
 
-// resolveDriver 解析驱动：优先从内存注册表查找，否则查找动态驱动记录并映射到通用运行时驱动
-func (l *AgentToolLoader) resolveDriver(driverName string) (ToolDriver, *model.DriverRecord, bool) {
+// resolveDriver 解析驱动：优先从内存注册表查找，否则查找动态驱动运行时并映射到通用运行时驱动
+func (l *AgentToolLoader) resolveDriver(driverName string) (ToolDriver, *model.SkillRuntime, bool) {
 	if d, ok := l.driverRegistry.Get(driverName); ok {
 		return d, nil, true
 	}
@@ -327,41 +327,40 @@ func (l *AgentToolLoader) resolveDriver(driverName string) (ToolDriver, *model.D
 	if err != nil || rec == nil {
 		return nil, nil, false
 	}
-	switch rec.TransportType {
-	case string(model.ModuleTransportTypeModule):
-		d, ok := l.driverRegistry.Get(string(model.ToolDriverModule))
-		return d, rec, ok
-	case string(model.ModuleTransportTypeRemoteURL):
-		d, ok := l.driverRegistry.Get(string(model.ToolDriverRemoteURL))
-		return d, rec, ok
-	case string(model.ModuleTransportTypeMCP):
+	switch {
+	case rec.IsMCP():
 		d, ok := l.driverRegistry.Get(string(model.ToolDriverMCP))
 		return d, rec, ok
+	case rec.Transport == model.SkillRuntimeTransportRawHTTP:
+		d, ok := l.driverRegistry.Get(string(model.ToolDriverRemoteURL))
+		return d, rec, ok
+	default: // execute 型（含 docker 模块）
+		d, ok := l.driverRegistry.Get(string(model.ToolDriverModule))
+		return d, rec, ok
 	}
-	return nil, nil, false
 }
 
-// isDynamicModuleDriver 判断 driver 名是否注册为 module 型动态驱动
+// isDynamicModuleDriver 判断 driver 名是否注册为 execute 型动态驱动
 func (l *AgentToolLoader) isDynamicModuleDriver(driverName string) bool {
 	_, rec, ok := l.resolveDriver(driverName)
 	if !ok || rec == nil {
 		return false
 	}
-	return rec.TransportType == string(model.ModuleTransportTypeModule)
+	return rec.Transport == model.SkillRuntimeTransportExecute
 }
 
-// ResolveDriver 公开解析驱动记录，供上层（如 SKU 审批）判断驱动是否已注册。
-func (l *AgentToolLoader) ResolveDriver(driverName string) (*model.DriverRecord, bool) {
+// ResolveDriver 公开解析驱动运行时，供上层（如 SKU 审批）判断驱动是否已注册。
+func (l *AgentToolLoader) ResolveDriver(driverName string) (*model.SkillRuntime, bool) {
 	_, rec, ok := l.resolveDriver(driverName)
 	return rec, ok
 }
 
-// ResolveModuleID 从 manifest 或动态驱动记录中解析模块 ID。
-// 优先读取 metadata.module（兼容旧写法），其次根据 driver 字段查找动态驱动记录的 ModuleID。
+// ResolveModuleID 从 manifest 或动态驱动运行时中解析模块 ID。
+// 优先读取 metadata.module（兼容旧写法），其次根据 driver 字段查找动态驱动运行时的 ID。
 // 注意：driverRegistry 命中 SkillRuntimeDriver 别名时 resolveDriver 返回 rec=nil（别名本身
 // 无 DriverRecord），此时手写 SKU（无 metadata.module，如 agent-reach/github.json）会解析失败
 // -> 卡片误判离线（而按 runtime ID 探活却在线）。故 rec 为空时回退 moduleService 查 DB
-// 拿 DriverRecord.ModuleID，与 ModuleService.resolveModuleIDFromManifest 同语义。
+// 拿 SkillRuntime.ID，与 ModuleService.resolveModuleIDFromManifest 同语义。
 func (l *AgentToolLoader) ResolveModuleID(manifest *model.ToolManifest) string {
 	if manifest == nil {
 		return ""
@@ -376,9 +375,9 @@ func (l *AgentToolLoader) ResolveModuleID(manifest *model.ToolManifest) string {
 		}
 	}
 	if rec != nil {
-		switch rec.TransportType {
-		case string(model.ModuleTransportTypeModule), string(model.ModuleTransportTypeMCP):
-			return rec.ModuleID
+		switch {
+		case rec.Transport == model.SkillRuntimeTransportExecute, rec.IsMCP():
+			return rec.ID
 		}
 	}
 	return ""

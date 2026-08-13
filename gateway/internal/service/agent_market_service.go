@@ -20,7 +20,6 @@ type AgentMarketService struct {
 	vipService     *VIPService
 	skillRuntimeRegistry *SkillRuntimeRegistry
 	moduleService        *ModuleService
-	moduleRepo           *repository.ModuleRepo // claw：IsCloudPurchasedAgent 读取旧 modules 表安装来源
 	db                   *gorm.DB
 	agentToolLoader      *AgentToolLoader
 	agentCredentialService *AgentCredentialService
@@ -45,19 +44,12 @@ func (s *AgentMarketService) SetLocalFreeOnly(b bool) {
 	s.localFreeOnly = b
 }
 
-// SetModuleRepo 注入旧模块仓库（claw：云端来源 provenance 判定）。
-func (s *AgentMarketService) SetModuleRepo(repo *repository.ModuleRepo) {
-	s.moduleRepo = repo
-}
-
 // IsCloudPurchasedAgent 判定某秘技是否为云端安装来源（provenance）。
-// 用于 claw 云端秘技激活门控：InstallSource=="cloud-purchased" 的需 VIP1+；
-// claw 本地扫描/内置秘技（InstallSource 为空或 local，如 SearchWeb）免门控。
-// 注意：经云端 installed 接口安装的官方模块同样标记 cloud-purchased，不再豁免。
+// 用于 claw 云端秘技激活门控：SourceOrigin=="eleball_cloud" 的需 VIP1+；
+// claw 本地扫描/内置秘技（SourceOrigin 为 eleball_builtin 或空，如 SearchWeb）免门控。
+// 从 DB 读 skill_runtimes（非 registry 内存副本）：InstallFromCloudMeta 会把云端下发的
+// 来源属性写入 DB 副本，而 registry 内存副本可能是安装前注册的旧值。
 func (s *AgentMarketService) IsCloudPurchasedAgent(agentID string) bool {
-	if s.moduleRepo == nil {
-		return false
-	}
 	item, err := s.agentRepo.GetByID(agentID)
 	if err != nil || item == nil {
 		return false
@@ -66,11 +58,11 @@ func (s *AgentMarketService) IsCloudPurchasedAgent(agentID string) bool {
 	if moduleID == "" {
 		return false // 内置驱动 / 无模块依赖 -> 本地，免门控
 	}
-	rec, err := s.moduleRepo.GetByID(moduleID)
-	if err != nil || rec == nil {
+	var rt model.SkillRuntime
+	if err := s.db.First(&rt, "id = ?", moduleID).Error; err != nil {
 		return false
 	}
-	return rec.InstallSource == "cloud-purchased"
+	return rt.SourceOrigin == model.SkillRuntimeOriginEleballCloud
 }
 
 // SetAgentToolLoader 设置动态工具加载器，用于购买后激活动态工具
@@ -814,7 +806,7 @@ func (s *AgentMarketService) ReviewAgent(agentID string, req ReviewAgentRequest)
 }
 
 // ensureDriverForManifest 确保 SKU 所需的驱动别名已存在并持有 auth_token。
-// 返回 driver_id 和 auth_token。
+// driver 已统一为 SkillRuntime（key=DriverID），返回 driver_id 和 auth_token。
 func (s *AgentMarketService) ensureDriverForManifest(manifest *model.ToolManifest) (string, string, error) {
 	if s.moduleService == nil {
 		return "", "", errors.New("ModuleService 未初始化")
@@ -828,34 +820,30 @@ func (s *AgentMarketService) ensureDriverForManifest(manifest *model.ToolManifes
 		}
 		rec.AuthToken = model.GenerateDriverAuthToken()
 		rec.UpdatedAt = time.Now()
-		if err := s.moduleService.RegisterDriver(&model.DriverRegisterRequest{
-			ID:            rec.ID,
-			Name:          rec.Name,
-			Description:   rec.Description,
-			TransportType: rec.TransportType,
-			ModuleID:      rec.ModuleID,
-			Endpoint:      rec.Endpoint,
-			AuthToken:     rec.AuthToken,
-			SchemaJSON:    rec.SchemaJSON,
-		}); err != nil {
+		if err := s.moduleService.RegisterDriver(rec); err != nil {
 			return "", "", err
 		}
 		return rec.ID, rec.AuthToken, nil
 	}
 
-	// 不存在：新建驱动别名
+	// 不存在：新建驱动运行时（execute 型占位，后续 RescanPackage 物化真实配置）
 	token := model.GenerateDriverAuthToken()
 	name := manifest.Name
 	if name == "" {
 		name = driverID
 	}
-	if err := s.moduleService.RegisterDriver(&model.DriverRegisterRequest{
-		ID:            driverID,
-		Name:          name,
-		Description:   manifest.Description,
-		TransportType: string(model.ModuleTransportTypeModule),
-		AuthToken:     token,
-	}); err != nil {
+	rt := &model.SkillRuntime{
+		ID:          driverID,
+		Name:        name,
+		Description: manifest.Description,
+		Source:      model.SkillRuntimeSourceMarketplace,
+		Transport:   model.SkillRuntimeTransportExecute,
+		Deployment:  model.SkillRuntimeDeploymentDocker,
+		DriverID:    driverID,
+		AuthToken:   token,
+		Status:      model.SkillRuntimeStatusOffline,
+	}
+	if err := s.moduleService.RegisterDriver(rt); err != nil {
 		return "", "", err
 	}
 	return driverID, token, nil
@@ -896,8 +884,8 @@ func (s *AgentMarketService) GetAgentDependencyStatus(agentID string) (*AgentDep
 	}
 	if rec != nil {
 		status.DriverName = rec.Name
-		if rec.TransportType == string(model.ModuleTransportTypeModule) {
-			moduleID := rec.ModuleID
+		if rec.Transport == model.SkillRuntimeTransportExecute {
+			moduleID := rec.ID
 			if moduleID == "" {
 				moduleID = s.agentToolLoader.ResolveModuleID(manifest)
 			}

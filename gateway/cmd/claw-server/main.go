@@ -174,26 +174,6 @@ func main() {
 		}
 	}
 
-	// 兼容迁移：modules/drivers 旧字段 runtime_type -> transport_type（复用云端 DB时生效）
-	if migrator.HasColumn(&model.ModuleRecord{}, "runtime_type") {
-		if err := migrator.RenameColumn(&model.ModuleRecord{}, "runtime_type", "transport_type"); err != nil {
-			logger.Warn("重命名 modules.runtime_type 失败", zap.Error(err))
-		}
-	}
-	if migrator.HasColumn(&model.DriverRecord{}, "runtime_type") {
-		if err := migrator.RenameColumn(&model.DriverRecord{}, "runtime_type", "transport_type"); err != nil {
-			logger.Warn("重命名 drivers.runtime_type 失败", zap.Error(err))
-		}
-	}
-	if migrator.HasTable(&model.DriverRecord{}) && migrator.HasIndex(&model.DriverRecord{}, "idx_drivers_auth_token") {
-		if err := migrator.DropIndex(&model.DriverRecord{}, "idx_drivers_auth_token"); err != nil {
-			logger.Warn("删除 drivers.auth_token 旧唯一索引失败", zap.Error(err))
-		}
-	}
-	if err := migrator.CreateIndex(&model.DriverRecord{}, "idx_drivers_auth_token"); err != nil {
-		logger.Warn("创建 drivers.auth_token 普通索引失败", zap.Error(err))
-	}
-
 	// 4. 基础设施
 	jwtUtil := util.NewJWTUtil(cfg.JWT.Secret, cfg.JWT.AccessExpireHours, cfg.JWT.RefreshExpireHours)
 
@@ -211,8 +191,6 @@ func main() {
 	eleAgentModelRepo := repository.NewEleAgentModelRepo(db)
 	settingRepo := repository.NewSettingRepo(db)
 	vipRepo := repository.NewVIPRepo(db)
-	moduleRepo := repository.NewModuleRepo(db)
-	driverRepo := repository.NewDriverRepo(db)
 	assistantRepo := repository.NewAssistantRepo(db)
 	teamRepo := repository.NewTeamRepo(db)
 
@@ -304,9 +282,6 @@ func main() {
 	skillRuntimeSKUService := service.NewSkillRuntimeSKUService(agentRepo, logger)
 	skillRuntimeManager.SetSKUService(skillRuntimeSKUService)
 	skillRuntimeRegistry.SetSKUService(skillRuntimeSKUService)
-	// claw 云端秘技安装后落本地 AgentItem/AgentPurchase（激活链路依赖购买记录）
-	moduleService.SetModuleRepo(moduleRepo)
-	moduleService.SetDriverRepo(driverRepo)
 	// F1 收尾：skill-maker AI 起草 main.py 注入对话服务（能力描述 -> 对话模型生成 stdio MCP 脚本）
 	moduleService.SetChatProxyService(chatService)
 	// 控制台「启动服务」按钮拉起 docker 模块：注入 docker compose up 回调（逻辑在本 cmd 内）。
@@ -340,7 +315,6 @@ func main() {
 	agentService := service.NewAgentMarketService(db, agentRepo, userRepo, vipService, skillRuntimeRegistry)
 	// claw 本地购买仅放行免费 SKU；付费秘技引导云端 eleball.cn 购买
 	agentService.SetLocalFreeOnly(true)
-	agentService.SetModuleRepo(moduleRepo)
 
 	// Agent 工作流
 	agentSandbox := service.NewFileSandbox(cfg.Agent.BasePath, cfg.Agent.KnowledgeBase)
@@ -434,14 +408,13 @@ func main() {
 	agentWorkflowService.SetHookService(hookSvc)
 	// C3：装配 plan 文件目录（ExitPlanMode 落盘 {basePath}/plans/{slug}.md）
 	agentWorkflowService.SetPlansDir(filepath.Join(cfg.Agent.BasePath, "plans"))
-	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry(), nil)
+	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry())
 	agentToolLoader.SetModuleService(moduleService)
 	agentWorkflowService.SetAgentToolLoader(agentToolLoader)
 	agentService.SetAgentToolLoader(agentToolLoader)
 	agentService.SetModuleService(moduleService)
 	// claw 云端秘技 provenance 判定（激活云端来源秘技需 VIP1+）
 	agentService.SetAgentCredentialService(agentCredentialService)
-	agentService.SetModuleRepo(moduleRepo)
 	// 助手服务（已激活秘技的命名组合）；Agent 执行按请求/会话绑定的助手过滤动态工具
 	assistantService := service.NewAssistantService(db, assistantRepo, agentRepo)
 	// Agent Team P3：助手 PATCH team_id 时同样校验组归属

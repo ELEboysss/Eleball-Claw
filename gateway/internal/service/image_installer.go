@@ -13,7 +13,7 @@ import (
 // ImageInstaller 第三方模块容器镜像安装器。
 //
 // P4：claw 技能页「安装到本地」对云端已购的第三方模块，按 ModuleInstallMeta.image
-// 拉取容器镜像、校验签名、启动容器、返回可注册到本地 registry 的 ModuleRecord。
+// 拉取容器镜像、校验签名、启动容器、返回可注册到本地 registry 的 SkillRuntime。
 //
 // 运行时依赖：本地容器运行时（docker 或 podman）。官方预置模块免镜像，不经此安装器。
 // 安全：仅拉可信源 + digest 内容寻址 + 签名校验（cosign），校验失败拒绝激活。
@@ -116,11 +116,11 @@ func (i *ImageInstaller) startContainer(ctx context.Context, moduleID, imageRef 
 	return "http://127.0.0.1:" + port, nil
 }
 
-// Install 拉取并校验镜像、启动容器，返回构造好的 ModuleRecord（未注册到 registry）。
-// 调用方（ModuleService）负责把返回的 record 写入 registry 激活。
+// Install 拉取并校验镜像、启动容器，返回构造好的 SkillRuntime（未注册到 registry）。
+// 调用方（ModuleService）负责把返回的运行时写入 registry 激活。
 //
 // official=true 的模块不经此安装器（直接激活预置）；此处仅处理第三方。
-func (i *ImageInstaller) Install(ctx context.Context, meta ModuleInstallMeta) (*model.ModuleRecord, error) {
+func (i *ImageInstaller) Install(ctx context.Context, meta ModuleInstallMeta) (*model.SkillRuntime, error) {
 	if meta.Official {
 		return nil, fmt.Errorf("官方预置模块无需镜像安装，直接激活即可")
 	}
@@ -162,24 +162,25 @@ func (i *ImageInstaller) Install(ctx context.Context, meta ModuleInstallMeta) (*
 		return nil, err
 	}
 
-	// 4. 构造 ModuleRecord（待注册激活）
+	// 4. 构造 SkillRuntime（待注册激活）
 	digest := meta.Image.Digest
 	if digest == "" {
 		digest = meta.Image.Tag // 无 digest 时用 tag 占位（签名已校验）
 	}
-	return &model.ModuleRecord{
-		ID:            meta.ModuleID,
-		Name:          meta.Name,
-		Description:   meta.Description,
-		URL:           url,
-		TransportType: model.ModuleTransportTypeModule,
-		Status:        model.ModuleStatusOffline, // 待 registry 探测后转 online
-		Version:       meta.Version,
-		AuthToken:     meta.AuthToken,
-		Official:      false,
-		ImageRef:      imageRef,
-		ImageDigest:   digest,
-		Signature:     meta.Signature,
-		InstallSource: "cloud-purchased",
+	return &model.SkillRuntime{
+		ID:          meta.ModuleID,
+		Name:        meta.Name,
+		Description: meta.Description,
+		Source:      model.SkillRuntimeSourceMarketplace,
+		Endpoint:    url,
+		Transport:   model.SkillRuntimeTransportExecute,
+		Deployment:  model.SkillRuntimeDeploymentDocker,
+		Status:      model.SkillRuntimeStatusOffline, // 待 registry 探测后转 online
+		Version:     meta.Version,
+		AuthToken:   meta.AuthToken,
+		Official:    false,
+		ImageRef:    imageRef,
+		ImageDigest: digest,
+		Signature:   meta.Signature,
 	}, nil
 }

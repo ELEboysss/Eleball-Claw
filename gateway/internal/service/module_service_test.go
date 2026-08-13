@@ -32,11 +32,7 @@ func TestModuleService_RescanMarketplace_MCP(t *testing.T) {
 	registry := NewSkillRuntimeRegistry(&config.AgentReachConfig{})
 	registry.SetRepo(skillRuntimeRepo)
 	manager := NewSkillRuntimeManager(registry, zap.NewNop())
-	moduleRepo := repository.NewModuleRepo(db)
-	driverRepo := repository.NewDriverRepo(db)
 	svc := NewModuleService(registry, manager, skillRuntimeRepo, nil)
-	svc.SetModuleRepo(moduleRepo)
-	svc.SetDriverRepo(driverRepo)
 
 	root := t.TempDir()
 	mcpDir := filepath.Join(root, "mcp-hello")
@@ -69,9 +65,10 @@ func TestModuleService_RescanMarketplace_MCP(t *testing.T) {
 	drv, err := svc.ResolveDriver("mcp_hello")
 	require.NoError(t, err)
 	require.NotNil(t, drv)
-	assert.Equal(t, string(model.ModuleTransportTypeMCP), drv.TransportType)
-	require.NotNil(t, drv.MCPServerConfig)
-	assert.Equal(t, "http://mcp-hello:8080/mcp", drv.MCPServerConfig.URL)
+	assert.Equal(t, model.SkillRuntimeTransportMCPHTTP, drv.Transport)
+	cfg = drv.GetMCPServerConfig()
+	require.NotNil(t, cfg)
+	assert.Equal(t, "http://mcp-hello:8080/mcp", cfg.URL)
 }
 
 // TestModuleService_RescanMarketplace_AgentReachMCP 验证 G1：agent-reach 从 execute 迁移到
@@ -495,7 +492,7 @@ func TestInstallMCPRuntime_HTTP(t *testing.T) {
 	// 自驱动路由回溯
 	drv, err := svc.ResolveDriver(result.DriverID)
 	require.NoError(t, err)
-	assert.Equal(t, string(model.ModuleTransportTypeMCP), drv.TransportType)
+	assert.Equal(t, model.SkillRuntimeTransportMCPHTTP, drv.Transport)
 
 	// 2 SKU 派生到 agent_items
 	skus, err := agentRepo.ListByModuleSKUs(result.RuntimeID)

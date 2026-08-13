@@ -396,7 +396,7 @@ func (r *SkillRuntimeRegistry) mcpHTTPProtocol(rt *model.SkillRuntime, action st
 	if r.mcpHTTP == nil {
 		return nil, errors.New("MCP HTTP 协议未初始化")
 	}
-	// 从 DriverRecord 的 MCPServerConfig 取 headers（由 AgentToolLoader 注入 params 中）
+	// 从 SkillRuntime 的 MCPServerConfig 取 headers（由 AgentToolLoader 注入 params 中）
 	var headers map[string]string
 	if h, ok := params["__mcp_headers__"].(map[string]string); ok {
 		headers = h

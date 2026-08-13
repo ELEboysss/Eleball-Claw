@@ -247,7 +247,7 @@ func TestAgentService_buildInitialMessages_PromptSkillInjected(t *testing.T) {
 	sqlDB.SetMaxOpenConns(1)
 	require.NoError(t, db.AutoMigrate(&model.AgentItem{}, &model.AgentPurchase{}, &model.AgentUserTool{}))
 	agentRepo := repository.NewAgentRepo(db)
-	agentSvc.SetAgentToolLoader(NewAgentToolLoader(agentRepo, NewToolDriverRegistry(), nil))
+	agentSvc.SetAgentToolLoader(NewAgentToolLoader(agentRepo, NewToolDriverRegistry()))
 
 	mf, _ := json.Marshal(&model.ToolManifest{ID: "skillmd-copy", Name: "文案", Driver: model.ToolDriverNone})
 	require.NoError(t, agentRepo.Create(&model.AgentItem{

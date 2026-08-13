@@ -42,7 +42,7 @@ func setupAssistantTest(t *testing.T) *assistantTestEnv {
 	driverRegistry := NewToolDriverRegistry()
 	driverRegistry.Register(NewModuleDriver(nil, nil))
 	// moduleRegistry=nil：跳过模块在线探测，专注购买/激活/过滤链路
-	loader := NewAgentToolLoader(agentRepo, driverRegistry, nil)
+	loader := NewAgentToolLoader(agentRepo, driverRegistry)
 
 	// claw 本地购买语义：仅放行免费 SKU（userRepo/vipService 为 nil，免费路径不触碰）
 	marketSvc := NewAgentMarketService(db, agentRepo, nil, nil, nil)

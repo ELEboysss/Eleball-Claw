@@ -83,11 +83,7 @@ func main() {
 	skillRuntimeRegistry := service.NewSkillRuntimeRegistry(&cfg.AgentReach)
 	skillRuntimeRegistry.SetRepo(skillRuntimeRepo)
 	skillRuntimeManager := service.NewSkillRuntimeManager(skillRuntimeRegistry, logger)
-	moduleRepo := repository.NewModuleRepo(db)
-	driverRepo := repository.NewDriverRepo(db)
 	moduleSvc := service.NewModuleService(skillRuntimeRegistry, skillRuntimeManager, skillRuntimeRepo, agentRepo)
-	moduleSvc.SetModuleRepo(moduleRepo)
-	moduleSvc.SetDriverRepo(driverRepo)
 
 	if *onlyModules {
 		if err := seed.BuiltinModules(moduleSvc, logger); err != nil {

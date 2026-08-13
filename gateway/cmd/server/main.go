@@ -159,32 +159,6 @@ func main() {
 		logger.Fatal("创建 orders.trade_no 唯一索引失败", zap.Error(err))
 	}
 
-	// 兼容迁移：旧版本的 modules/drivers 表使用 runtime_type 字段，已重命名为 transport_type
-	if migrator.HasColumn(&model.ModuleRecord{}, "runtime_type") {
-		if err := migrator.RenameColumn(&model.ModuleRecord{}, "runtime_type", "transport_type"); err != nil {
-			logger.Warn("重命名 modules.runtime_type 失败", zap.Error(err))
-		}
-	}
-	if migrator.HasColumn(&model.DriverRecord{}, "runtime_type") {
-		if err := migrator.RenameColumn(&model.DriverRecord{}, "runtime_type", "transport_type"); err != nil {
-			logger.Warn("重命名 drivers.runtime_type 失败", zap.Error(err))
-		}
-	}
-
-	// 兼容迁移：drivers.auth_token 旧版为 uniqueIndex，导致多个空 token 的官方内置驱动无法同时创建。
-	// 先删除旧唯一索引，再按当前模型创建普通索引（允许空 token 重复，业务层保证非空 token 唯一）。
-	if migrator.HasTable(&model.DriverRecord{}) && migrator.HasIndex(&model.DriverRecord{}, "idx_drivers_auth_token") {
-		if err := migrator.DropIndex(&model.DriverRecord{}, "idx_drivers_auth_token"); err != nil {
-			logger.Warn("删除 drivers.auth_token 旧唯一索引失败", zap.Error(err))
-		} else {
-			logger.Info("已删除 drivers.auth_token 旧唯一索引")
-		}
-	}
-	// 确保按更新后的模型创建普通索引
-	if err := migrator.CreateIndex(&model.DriverRecord{}, "idx_drivers_auth_token"); err != nil {
-		logger.Warn("创建 drivers.auth_token 普通索引失败", zap.Error(err))
-	}
-
 	// 初始化兑换码数据库（独立 SQLite 文件）
 	cdkDB, err := gorm.Open(sqlite.Open(cfg.CDKDatabase.DSN), &gorm.Config{})
 	if err != nil {
@@ -337,17 +311,8 @@ func main() {
 	skillRuntimeRegistry.SetLogger(logger)
 	skillRuntimeRegistry.SetRepo(skillRuntimeRepo)
 
-	// 一次性迁移旧 modules/drivers 表数据到 skill_runtimes；新部署无旧表则自动跳过。
-	if err := skillRuntimeRepo.MigrateFromLegacy(); err != nil {
-		logger.Warn("旧模块数据迁移到 SkillRuntime 失败", zap.Error(err))
-	}
-
 	skillRuntimeManager := service.NewSkillRuntimeManager(skillRuntimeRegistry, logger)
-	moduleRepo := repository.NewModuleRepo(db)
-	driverRepo := repository.NewDriverRepo(db)
 	moduleService := service.NewModuleService(skillRuntimeRegistry, skillRuntimeManager, skillRuntimeRepo, agentRepo)
-	moduleService.SetModuleRepo(moduleRepo)
-	moduleService.SetDriverRepo(driverRepo)
 
 	// 自动扫描 marketplace/ 目录，根据 module.json 确保官方内置 SkillRuntime 存在。
 	// 新增官方内置模块时，只需在 marketplace/ 下新增目录和 module.json，无需改代码。
@@ -432,12 +397,11 @@ func main() {
 	agentWorkflowService.SetHookService(hookSvc)
 	agentCompactor.SetHookService(hookSvc)
 	// 动态工具加载器：将用户购买的集市 SKU 注入 Agent 工作流
-	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry(), nil)
+	agentToolLoader := service.NewAgentToolLoader(agentRepo, agentRegistry.DriverRegistry())
 	agentToolLoader.SetModuleService(moduleService)
 	agentWorkflowService.SetAgentToolLoader(agentToolLoader)
 	agentService.SetAgentToolLoader(agentToolLoader)
 	agentService.SetModuleService(moduleService)
-	agentService.SetModuleRepo(moduleRepo)
 
 	// 初始化版本发布服务
 	releaseRootPath := cfg.Release.RootPath

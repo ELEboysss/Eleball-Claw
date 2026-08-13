@@ -17,7 +17,7 @@ import (
 )
 
 // setupCloudInstallTest 构造云端秘技安装测试环境：内存 SQLite + 预置 official 模块 + 模拟 /health 服务
-func setupCloudInstallTest(t *testing.T) (*ModuleService, *AgentMarketService, *repository.AgentRepo, *repository.DriverRepo) {
+func setupCloudInstallTest(t *testing.T) (*ModuleService, *AgentMarketService, *repository.AgentRepo) {
 	t.Helper()
 
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -26,10 +26,8 @@ func setupCloudInstallTest(t *testing.T) (*ModuleService, *AgentMarketService, *
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, db.AutoMigrate(&model.SkillRuntime{}, &model.AgentItem{}, &model.AgentPurchase{}, &model.AgentUserTool{}, &model.ModuleRecord{}, &model.DriverRecord{}))
+	require.NoError(t, db.AutoMigrate(&model.SkillRuntime{}, &model.AgentItem{}, &model.AgentPurchase{}, &model.AgentUserTool{}))
 
-	moduleRepo := repository.NewModuleRepo(db)
-	driverRepo := repository.NewDriverRepo(db)
 	agentRepo := repository.NewAgentRepo(db)
 
 	// 模拟模块 /health 服务（official 模块不拉镜像，但安装后会做健康探测）
@@ -67,14 +65,11 @@ func setupCloudInstallTest(t *testing.T) (*ModuleService, *AgentMarketService, *
 	require.NoError(t, registry.Register(rt))
 
 	moduleSvc := NewModuleService(registry, manager, skillRuntimeRepo, agentRepo)
-	moduleSvc.SetModuleRepo(moduleRepo)
-	moduleSvc.SetDriverRepo(driverRepo)
 
 	agentSvc := NewAgentMarketService(db, agentRepo, nil, nil, registry)
 	agentSvc.SetLocalFreeOnly(true)
-	agentSvc.SetModuleRepo(moduleRepo)
 
-	return moduleSvc, agentSvc, agentRepo, driverRepo
+	return moduleSvc, agentSvc, agentRepo
 }
 
 // cloudInstallMeta 构造一份 official 云端秘技安装 meta
@@ -99,41 +94,40 @@ func cloudInstallMeta() ModuleInstallMeta {
 		TransportType: "module",
 		DriverID:      "search-web",
 		Official:      true,
+		SourceOrigin:  "eleball_cloud",
 		Manifest:      raw,
 		AuthToken:     "tok-search-web",
 	}
 }
 
-// TestInstallFromCloudMeta_OfficialUpsertsDriver 官方模块安装成功后 upsert 本地驱动别名并绑定模块
+// TestInstallFromCloudMeta_OfficialUpsertsDriver 官方模块安装成功后绑定驱动别名并持久化来源属性
 func TestInstallFromCloudMeta_OfficialUpsertsDriver(t *testing.T) {
-	moduleSvc, _, _, driverRepo := setupCloudInstallTest(t)
+	moduleSvc, _, _ := setupCloudInstallTest(t)
 	meta := cloudInstallMeta()
 
 	record, err := moduleSvc.InstallFromCloudMeta(meta)
 	require.NoError(t, err)
 	require.NotNil(t, record)
 	assert.True(t, record.Official)
-	assert.Equal(t, "cloud-purchased", record.InstallSource)
+	assert.Equal(t, model.SkillRuntimeOriginEleballCloud, record.SourceOrigin)
 
-	driver, err := driverRepo.GetByID("search-web")
+	rt, err := moduleSvc.repo.GetByID("search-web")
 	require.NoError(t, err)
-	assert.Equal(t, "search-web", driver.ModuleID)
-	assert.Equal(t, "module", driver.TransportType)
-	assert.Equal(t, "tok-search-web", driver.AuthToken)
-	assert.Equal(t, "联网搜索", driver.Name)
+	assert.Equal(t, "search-web", rt.DriverID)
+	assert.Equal(t, "tok-search-web", rt.AuthToken)
 
 	// 幂等：重复安装不报错，驱动绑定仍在
 	_, err = moduleSvc.InstallFromCloudMeta(meta)
 	require.NoError(t, err)
-	driver, err = driverRepo.GetByID("search-web")
+	rt, err = moduleSvc.repo.GetByID("search-web")
 	require.NoError(t, err)
-	assert.Equal(t, "search-web", driver.ModuleID)
+	assert.Equal(t, "search-web", rt.DriverID)
 }
 
 // TestInstallFromCloudMeta_PersistsSourceOrigin 云端下发的来源属性持久化到本地运行时
 // （type3：official 模块扫描默认 eleball_builtin，云端下发 eleball_cloud 时校正）。
 func TestInstallFromCloudMeta_PersistsSourceOrigin(t *testing.T) {
-	moduleSvc, _, _, _ := setupCloudInstallTest(t)
+	moduleSvc, _, _ := setupCloudInstallTest(t)
 
 	// 预置模块经 Register 兜底默认为 eleball_builtin（claw 侧）
 	rt0, err := moduleSvc.repo.GetByID("search-web")
@@ -161,9 +155,9 @@ func TestInstallFromCloudMeta_PersistsSourceOrigin(t *testing.T) {
 	assert.Equal(t, "alice", rt2.SourceActor)
 }
 
-// TestIsCloudPurchasedAgent_LocalPresetExempt 本地扫描预置模块（InstallSource 为空）的秘技免 VIP 门控
+// TestIsCloudPurchasedAgent_LocalPresetExempt 本地扫描预置模块（SourceOrigin=eleball_builtin）的秘技免 VIP 门控
 func TestIsCloudPurchasedAgent_LocalPresetExempt(t *testing.T) {
-	_, agentSvc, agentRepo, _ := setupCloudInstallTest(t)
+	_, agentSvc, agentRepo := setupCloudInstallTest(t)
 
 	// 本地内置秘技：manifest 指向本地预置模块，但未经云端 installed 接口安装
 	meta := cloudInstallMeta()
@@ -182,7 +176,7 @@ func TestIsCloudPurchasedAgent_LocalPresetExempt(t *testing.T) {
 
 // TestEnsureCloudAgentProvision 安装后落库 AgentItem + 幂等 AgentPurchase，且激活链路闭环
 func TestEnsureCloudAgentProvision(t *testing.T) {
-	moduleSvc, agentSvc, agentRepo, _ := setupCloudInstallTest(t)
+	moduleSvc, agentSvc, agentRepo := setupCloudInstallTest(t)
 	meta := cloudInstallMeta()
 
 	_, err := moduleSvc.InstallFromCloudMeta(meta)
@@ -227,7 +221,7 @@ func TestEnsureCloudAgentProvision(t *testing.T) {
 	require.Len(t, tools, 1)
 	assert.Equal(t, "agent-search-web", tools[0].ID)
 
-	// 云端安装的官方模块 InstallSource=cloud-purchased，provenance 判定为云端来源（激活需 VIP1+）
+	// 云端安装的官方模块 SourceOrigin=eleball_cloud，provenance 判定为云端来源（激活需 VIP1+）
 	assert.True(t, agentSvc.IsCloudPurchasedAgent("agent-search-web"))
 
 	// 再次 toggle 为关闭
@@ -241,7 +235,7 @@ func TestEnsureCloudAgentProvision(t *testing.T) {
 
 // TestEnsureCloudAgentProvision_PreserveStats AgentItem 已存在时不清零统计字段
 func TestEnsureCloudAgentProvision_PreserveStats(t *testing.T) {
-	moduleSvc, _, agentRepo, _ := setupCloudInstallTest(t)
+	moduleSvc, _, agentRepo := setupCloudInstallTest(t)
 	meta := cloudInstallMeta()
 
 	existing := &model.AgentItem{
@@ -270,7 +264,7 @@ func TestEnsureCloudAgentProvision_PreserveStats(t *testing.T) {
 
 // TestEnsureCloudAgentProvision_AgentIDFallback agent_id 为空时回退 manifest.id
 func TestEnsureCloudAgentProvision_AgentIDFallback(t *testing.T) {
-	moduleSvc, _, agentRepo, _ := setupCloudInstallTest(t)
+	moduleSvc, _, agentRepo := setupCloudInstallTest(t)
 	meta := cloudInstallMeta()
 	meta.AgentID = ""
 
@@ -283,7 +277,7 @@ func TestEnsureCloudAgentProvision_AgentIDFallback(t *testing.T) {
 
 // TestEnsureCloudAgentProvision_NoManifest 无 manifest 时跳过，不报错
 func TestEnsureCloudAgentProvision_NoManifest(t *testing.T) {
-	moduleSvc, _, agentRepo, _ := setupCloudInstallTest(t)
+	moduleSvc, _, agentRepo := setupCloudInstallTest(t)
 	meta := cloudInstallMeta()
 	meta.Manifest = nil
 
@@ -297,7 +291,7 @@ func TestEnsureCloudAgentProvision_NoManifest(t *testing.T) {
 // auto_sku 关闭（DB + 内存副本）、遗留派生 SKU 下架、手写 SKU 保留。
 // 对应 S2：消除「auto-derive 用 MCP 工具名与云端 manifest 定名共存」的命名错位。
 func TestInstallFromCloudMeta_CloudManifestDisablesAutoSKU(t *testing.T) {
-	moduleSvc, _, agentRepo, _ := setupCloudInstallTest(t)
+	moduleSvc, _, agentRepo := setupCloudInstallTest(t)
 
 	// 模拟 auto_sku 模块：开启自动派生并持久化（DB + 内存副本同步）。
 	rt, err := moduleSvc.repo.GetByID("search-web")

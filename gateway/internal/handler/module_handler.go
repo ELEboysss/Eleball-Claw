@@ -68,30 +68,42 @@ func (h *ModuleHandler) GetModule(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": item})
 }
 
-// RegisterModule 管理后台注册/更新模块
+// RegisterModule 管理后台注册/更新模块（统一落 skill_runtimes）
 // 若请求未提供 module_id，后端会根据 name 自动生成并返回。
 func (h *ModuleHandler) RegisterModule(c *gin.Context) {
-	var req model.ModuleRegisterRequest
+	var req model.PluginRegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "参数错误: " + err.Error()})
 		return
 	}
 
-	record := &model.ModuleRecord{
-		ID:            req.ModuleID,
-		Name:          req.Name,
-		Description:   req.Description,
-		URL:           req.URL,
-		TransportType: model.ModuleTransportType(req.TransportType),
-		Version:       req.Version,
+	rt := &model.SkillRuntime{
+		ID:          req.ID,
+		Name:        req.Name,
+		Description: req.Description,
+		Source:      model.SkillRuntimeSourceMarketplace,
+		Endpoint:    req.URL,
+		Version:     req.Version,
+		Status:      model.SkillRuntimeStatusOffline,
 	}
-	record.SetCapabilities(req.Capabilities)
+	switch req.TransportType {
+	case "mcp":
+		rt.Transport = model.SkillRuntimeTransportMCPHTTP
+		rt.Deployment = model.SkillRuntimeDeploymentDocker
+	case "remote_url":
+		rt.Transport = model.SkillRuntimeTransportRawHTTP
+		rt.Deployment = model.SkillRuntimeDeploymentNone
+	default:
+		rt.Transport = model.SkillRuntimeTransportExecute
+		rt.Deployment = model.SkillRuntimeDeploymentDocker
+	}
+	rt.SetCapabilities(req.Capabilities)
 
-	if err := h.moduleService.RegisterModule(record); err != nil {
+	if err := h.moduleService.RegisterModule(rt); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 3001, "message": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": gin.H{"module_id": record.ID}})
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": gin.H{"module_id": rt.ID}})
 }
 
 // UnregisterModule 注销模块
@@ -131,7 +143,7 @@ func (h *ModuleHandler) StartModule(c *gin.Context) {
 // RegisterModuleFromPlugin 插件自助注册
 // 插件调用此接口上报自身信息，无需登录，但需要提供正确的 auth_token。
 func (h *ModuleHandler) RegisterModuleFromPlugin(c *gin.Context) {
-	var req model.ModuleRegisterRequest
+	var req model.PluginRegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "参数错误: " + err.Error()})
 		return
@@ -162,15 +174,63 @@ func (h *ModuleHandler) ListDrivers(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": gin.H{"total": len(items), "items": items}})
 }
 
-// RegisterDriver 管理后台注册/更新驱动映射
+// registerDriverRequest 管理后台驱动注册请求（driver 已并入 SkillRuntime，本结构为兼容旧 admin-web 表单）。
+// T5.3 admin-web 对齐 package 模型后移除。
+type registerDriverRequest struct {
+	ID              string                 `json:"id"`
+	Name            string                 `json:"name"`
+	Description     string                 `json:"description"`
+	TransportType   string                 `json:"transport_type"`
+	ModuleID        string                 `json:"module_id"`
+	Endpoint        string                 `json:"endpoint"`
+	AuthToken       string                 `json:"auth_token"`
+	MCPServerConfig *model.MCPServerConfig `json:"mcp_server_config"`
+}
+
+// RegisterDriver 管理后台注册/更新驱动运行时
 func (h *ModuleHandler) RegisterDriver(c *gin.Context) {
-	var req model.DriverRegisterRequest
+	var req registerDriverRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "参数错误: " + err.Error()})
 		return
 	}
 
-	if err := h.moduleService.RegisterDriver(&req); err != nil {
+	transport := model.SkillRuntimeTransportExecute
+	deployment := model.SkillRuntimeDeploymentExternal
+	endpoint := req.Endpoint
+	switch req.TransportType {
+	case "mcp":
+		transport = model.SkillRuntimeTransportMCPHTTP
+		if req.MCPServerConfig != nil {
+			endpoint = req.MCPServerConfig.URL
+		}
+	case "remote_url":
+		transport = model.SkillRuntimeTransportRawHTTP
+		deployment = model.SkillRuntimeDeploymentNone
+	case "module":
+		deployment = model.SkillRuntimeDeploymentDocker
+		if req.ModuleID != "" {
+			endpoint = "http://" + req.ModuleID + ":8080"
+		}
+	}
+
+	rt := &model.SkillRuntime{
+		ID:          req.ID,
+		Name:        req.Name,
+		Description: req.Description,
+		Source:      model.SkillRuntimeSourceMarketplace,
+		Transport:   transport,
+		Deployment:  deployment,
+		Endpoint:    endpoint,
+		DriverID:    req.ID,
+		AuthToken:   req.AuthToken,
+		Status:      model.SkillRuntimeStatusOffline,
+	}
+	if req.TransportType == "mcp" && req.MCPServerConfig != nil {
+		rt.SetMCPServerConfig(req.MCPServerConfig)
+	}
+
+	if err := h.moduleService.RegisterDriver(rt); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 3001, "message": err.Error()})
 		return
 	}
@@ -271,7 +331,7 @@ func (h *ModuleHandler) SubmitForReview(c *gin.Context) {
 		ModuleID:     rec.ID,
 		Name:         rec.Name,
 		Description:  rec.Description,
-		SourceOrigin: rec.SourceOrigin,
+		SourceOrigin: string(rec.SourceOrigin),
 		SourceActor:  rec.SourceActor,
 		Version:      rec.Version,
 		Capabilities: rec.CapabilitiesList(),
