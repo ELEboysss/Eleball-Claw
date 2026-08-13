@@ -1009,6 +1009,16 @@ func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecut
 			s.logger.Warn("加载已批准计划文件失败", zap.String("plan_path", planFilePath), zap.Error(err))
 		}
 	}
+	// T2.4：注入用户已激活的 prompt-only 秘技（增量披露：名称/描述进系统提示，body 按需加载）。
+	// 复用 agentToolLoader.LoadActivePromptSkills（已购买+已激活+approved+driver=none 过滤）；
+	// 停用（Active=false）或未购买的不注入。toolsEnabled=false 时仍注入（纯 prompt 技能无工具）。
+	if s.agentToolLoader != nil && userID != "" {
+		if skills, err := s.agentToolLoader.LoadActivePromptSkills(userID); err == nil && len(skills) > 0 {
+			if block := formatSkillsForPrompt(skills); block != "" {
+				systemContent += "\n\n" + block
+			}
+		}
+	}
 	messages = append(messages, llm.Message{
 		Role:    "system",
 		Content: systemContent,
@@ -1039,6 +1049,39 @@ func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecut
 	})
 	msgIDs = append(msgIDs, "")
 	return messages, msgIDs
+}
+
+// formatSkillsForPrompt T2.4：把用户已激活的 prompt-only 秘技（driver=none）格式化为
+// system 提示中的技能区块（增量披露：名称/描述引导模型感知技能，body 即 SystemPrompt
+// 随请求加载供模型使用）。停用/未购买的不在此列（由 LoadActivePromptSkills 保证）。
+// 输出形如：
+// 【已激活技能】
+// 技能提示（文案）：你是文案撰写专家，输出有感染力的营销文案。
+func formatSkillsForPrompt(skills []*model.AgentItem) string {
+	if len(skills) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("【已激活技能】")
+	for _, sk := range skills {
+		name := strings.TrimSpace(sk.Name)
+		if name == "" {
+			name = sk.ID
+		}
+		line := "技能提示（" + name + "）"
+		if desc := strings.TrimSpace(sk.Description); desc != "" {
+			line += "：" + desc
+		}
+		if body := strings.TrimSpace(sk.SystemPrompt); body != "" {
+			if strings.Contains(line, "：") {
+				line += "\n" + body
+			} else {
+				line += "：" + body
+			}
+		}
+		b.WriteString("\n" + line)
+	}
+	return b.String()
 }
 
 // historyToLLMMessages 将前端传入的带 ID 历史消息转换为 llm.Message，返回消息列表与平行的 ID 列表。
