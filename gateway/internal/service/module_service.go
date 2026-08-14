@@ -537,7 +537,7 @@ type marketplaceModuleManifest struct {
 	ModuleID          string                         `json:"module_id"` // 兼容旧格式
 	Name              string                         `json:"name"`
 	Description       string                         `json:"description"`
-	Category          string                         `json:"category,omitempty"` // 包分类（空回退 rt.Name，供包卡聚合展示）
+	Category          string                         `json:"category,omitempty"`            // 包分类（空回退 rt.Name，供包卡聚合展示）
 	URL               string                         `json:"url"`                           // 兼容旧格式
 	Endpoint          string                         `json:"endpoint"`                      // 新格式
 	Transport         string                         `json:"transport"`                     // 新格式
@@ -622,10 +622,22 @@ func (s *ModuleService) RescanMarketplace(logger *zap.Logger) error {
 	return s.backfillPackageIdentity(logger)
 }
 
+// 内置模块分类兜底：存量安装的 marketplace/module.json 不被 SeedOfficial 覆盖（只补缺失文件），
+// 老文件无 category 字段时按此表回填，与当前 marketplace 源文件保持同值（新增模块需同步维护）。
+var builtinModuleCategoryFallback = map[string]string{
+	"agent-reach":    "互联网",
+	"firecrawl":      "互联网",
+	"search-web":     "搜索",
+	"stt":            "多媒体",
+	"mcp-hello":      "示例",
+	"mcp-stdio-echo": "示例",
+}
+
 // backfillPackageIdentity 存量数据补齐包身份（升级兼容，幂等）：
 // 老库运行时无 PackageName、手写 SKU manifest 无 package_module 时，按物化后的运行时回填：
 //  1. 运行时 PackageName/PackageTitle/PackageDescription 为空 -> 用 ID/Name/Description 回填
-//     （单运行时包 slug = 运行时 ID；多运行时包共享 slug 由各写入点保证）。
+//     （单运行时包 slug = 运行时 ID；多运行时包共享 slug 由各写入点保证）；官方内置模块
+//     无 Category 时按 builtinModuleCategoryFallback 兜底（老 module.json 无 category 字段）。
 //  2. approved SKU 的 manifest 缺 package_module 但 metadata.module / auto_sku_module 命中本包运行时
 //     -> 注入 package_module/package_title/package_description（保留其余字段与购买记录）。
 //
@@ -661,6 +673,13 @@ func (s *ModuleService) backfillPackageIdentity(logger *zap.Logger) error {
 		if rt.PackageDescription == "" && rt.Description != "" {
 			rt.PackageDescription = rt.Description
 			changed = true
+		}
+		// 官方内置模块分类兜底（老 module.json 无 category 字段时；分类影响派生 SKU 的集市过滤）
+		if rt.Category == "" && rt.Official {
+			if c, ok := builtinModuleCategoryFallback[rt.ID]; ok && c != "" {
+				rt.Category = c
+				changed = true
+			}
 		}
 		slugByID[rt.ID] = slug
 		if changed {

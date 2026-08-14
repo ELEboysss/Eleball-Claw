@@ -221,7 +221,7 @@ func TestBackfillPackageIdentity_UpgradeCompat(t *testing.T) {
 		Transport:   model.SkillRuntimeTransportExecute,
 		Deployment:  model.SkillRuntimeDeploymentDocker,
 		Status:      model.SkillRuntimeStatusOffline,
-		Official:    true,
+		Official:    true, // 官方内置：无 category 时按兜底表回填「搜索」
 	}
 	require.NoError(t, modSvc.registry.Register(rt))
 	// 老库：手写 SKU，manifest 只有 metadata.module，无 package_module
@@ -250,6 +250,7 @@ func TestBackfillPackageIdentity_UpgradeCompat(t *testing.T) {
 	assert.Equal(t, "search-web", rt2.PackageName)
 	assert.Equal(t, "联网搜索（本地）", rt2.PackageTitle)
 	assert.Equal(t, "本地运行的网页搜索工具。", rt2.PackageDescription)
+	assert.Equal(t, "搜索", rt2.Category, "官方内置模块无 category 时按兜底表回填")
 
 	// SKU manifest 注入包元数据
 	item, err := agentRepo.GetByID("search-web-baidu")
