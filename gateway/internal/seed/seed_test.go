@@ -161,7 +161,7 @@ func TestSyncPromptSkillSKU(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMD), 0o644))
 
 	// 首次：创建 1 个 prompt-only SKU
-	c, sy, sk := syncPromptSkillSKU(repo, tmp, "copywriting", adminID, now, logger)
+	c, sy, sk := syncPromptSkillSKU(repo, tmp, "copywriting", adminID, "官方", now, logger)
 	assert.Equal(t, 1, c)
 	assert.Equal(t, 0, sy)
 	assert.Equal(t, 0, sk)
@@ -181,7 +181,7 @@ func TestSyncPromptSkillSKU(t *testing.T) {
 	assert.Equal(t, "skillmd-copywriting", m.ID)
 
 	// 幂等：内容不变 -> skipped=1，不重复创建
-	c, sy, sk = syncPromptSkillSKU(repo, tmp, "copywriting", adminID, now, logger)
+	c, sy, sk = syncPromptSkillSKU(repo, tmp, "copywriting", adminID, "官方", now, logger)
 	assert.Equal(t, 0, c)
 	assert.Equal(t, 0, sy)
 	assert.Equal(t, 1, sk)
@@ -192,7 +192,7 @@ func TestSyncPromptSkillSKU(t *testing.T) {
 	// body 变更 -> synced=1，SystemPrompt 更新（SKILL.md 是源格式，body 变化即同步）
 	skillMD2 := "---\nname: copywriting\ndescription: 文案撰写专家\nmetadata:\n  category: 写作\n---\n\n你是高级文案专家，输出更有感染力的文案。\n"
 	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMD2), 0o644))
-	c, sy, sk = syncPromptSkillSKU(repo, tmp, "copywriting", adminID, now, logger)
+	c, sy, sk = syncPromptSkillSKU(repo, tmp, "copywriting", adminID, "官方", now, logger)
 	assert.Equal(t, 0, c)
 	assert.Equal(t, 1, sy)
 	assert.Equal(t, 0, sk)
@@ -204,10 +204,41 @@ func TestSyncPromptSkillSKU(t *testing.T) {
 	badDir := filepath.Join(tmp, "bad-skill")
 	require.NoError(t, os.Mkdir(badDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(badDir, "SKILL.md"), []byte("# 纯文档无 frontmatter\n"), 0o644))
-	c, sy, sk = syncPromptSkillSKU(repo, tmp, "bad-skill", adminID, now, logger)
+	c, sy, sk = syncPromptSkillSKU(repo, tmp, "bad-skill", adminID, "官方", now, logger)
 	assert.Equal(t, 0, c)
 	assert.Equal(t, 0, sy)
 	assert.Equal(t, 0, sk)
+}
+
+// TestSyncPromptSkillSKU_DisplayTitle 验证 E5：frontmatter metadata.title 覆盖 SKU 展示名
+// （slug name 不适合中文展示）；无 title 时回退 name。同时覆盖 SyncPromptSkillDir 的
+// 创建者透传（E4：用户生成不标「官方」）。
+func TestSyncPromptSkillSKU_DisplayTitle(t *testing.T) {
+	repo := setupSeedTestRepo(t)
+	logger := zap.NewNop()
+
+	tmp := t.TempDir()
+	skillDir := filepath.Join(tmp, "my-skill")
+	require.NoError(t, os.Mkdir(skillDir, 0o755))
+	skillMD := "---\nname: my-skill\ndescription: 演示\nmetadata:\n  title: 我的秘技\n---\n你是演示人格。\n"
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMD), 0o644))
+
+	c, _, _ := SyncPromptSkillDir(repo, tmp, "my-skill", "u-local", "我", logger)
+	assert.Equal(t, 1, c)
+	item, err := repo.GetByID("skillmd-my-skill")
+	require.NoError(t, err)
+	assert.Equal(t, "我的秘技", item.Name) // metadata.title 覆盖 slug 展示名
+	assert.Equal(t, "u-local", item.CreatorID)
+	assert.Equal(t, "我", item.CreatorName)
+
+	// title 变更 -> 同步展示名
+	skillMD2 := "---\nname: my-skill\ndescription: 演示\nmetadata:\n  title: 我的秘技 v2\n---\n你是演示人格。\n"
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMD2), 0o644))
+	_, sy, _ := SyncPromptSkillDir(repo, tmp, "my-skill", "u-local", "我", logger)
+	assert.Equal(t, 1, sy)
+	item, err = repo.GetByID("skillmd-my-skill")
+	require.NoError(t, err)
+	assert.Equal(t, "我的秘技 v2", item.Name)
 }
 
 // TestSyncOfficialSKUs_DelistsStaleHandwritten 验证 prune：手写官方 SKU 的源 skus/*.json

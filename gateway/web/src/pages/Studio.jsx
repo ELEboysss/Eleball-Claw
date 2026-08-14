@@ -1,23 +1,27 @@
 import { Link, useSearchParams } from 'react-router-dom'
-import { Wand2, DownloadCloud, Wrench } from 'lucide-react'
+import { Wand2, DownloadCloud, Wrench, Sparkles } from 'lucide-react'
 import useSEO from '../hooks/useSEO'
 import ModuleGenerator from './ModuleGenerator'
 import MCPInstall from './MCPInstall'
+import SkillGenerator from './SkillGenerator'
 
-// DIY 工作室：造秘技的统一入口。左侧侧边栏在两种模式间切换——
+// DIY 工作室：造秘技的统一入口。左侧侧边栏在三种模式间切换——
 // 「写脚本造秘技」从零编写 stdio MCP 脚本生成 user_local 模块（原 /module-generator）；
-// 「安装远端 MCP」一键安装现成 stdio/http MCP server（原 /mcp-install）。
-// 两种模式共享 Studio 的页头与外壳，子组件只负责各自的表单卡片。
+// 「写提示词造秘技」生成 Anthropic 标准 SKILL.md 的 prompt-only 秘技（E4，无需代码）；
+// 「安装远端 MCP」一键安装现成 stdio/http MCP server，支持搜索官方社区注册表（E1）。
+// 三种模式共享 Studio 的页头与外壳，子组件只负责各自的表单卡片。
 
 const TABS = [
   { key: 'write', label: '写脚本造秘技', desc: '从零编写 stdio MCP 脚本，探测工具并生成模块', icon: Wand2, href: '/studio' },
-  { key: 'install', label: '安装远端 MCP', desc: '一键安装现成的 stdio/http MCP server', icon: DownloadCloud, href: '/studio?tab=install' },
+  { key: 'skill', label: '写提示词造秘技', desc: '纯提示词/人格秘技（Anthropic 标准 SKILL.md），无需代码', icon: Sparkles, href: '/studio?tab=skill' },
+  { key: 'install', label: '安装远端 MCP', desc: '搜索社区市场或粘贴配置，一键安装现成 MCP server', icon: DownloadCloud, href: '/studio?tab=install' },
 ]
 
 export default function Studio() {
-  useSEO('DIY工作室', '自己动手造秘技：从零编写脚本生成模块，或一键安装现成的远端 MCP server。')
+  useSEO('DIY工作室', '自己动手造秘技：从零编写脚本生成模块、写提示词生成人格秘技，或一键安装现成的远端 MCP server。')
   const [searchParams] = useSearchParams()
-  const tab = searchParams.get('tab') === 'install' ? 'install' : 'write'
+  const tabParam = searchParams.get('tab')
+  const tab = tabParam === 'install' || tabParam === 'skill' ? tabParam : 'write'
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8">
@@ -26,7 +30,7 @@ export default function Studio() {
           <Wrench className="w-6 h-6 text-eleball-primary" /> DIY工作室
         </h1>
         <p className="text-sm text-eleball-text-secondary mt-1">
-          自己动手造秘技：从零编写脚本生成模块，或一键安装现成的远端 MCP server。
+          自己动手造秘技：写脚本生成模块、写提示词生成人格秘技，或搜索/导入安装现成的 MCP server。
         </p>
       </div>
 
@@ -60,7 +64,7 @@ export default function Studio() {
 
         {/* 内容区 */}
         <div className="flex-1 min-w-0">
-          {tab === 'install' ? <MCPInstall /> : <ModuleGenerator />}
+          {tab === 'install' ? <MCPInstall /> : tab === 'skill' ? <SkillGenerator /> : <ModuleGenerator />}
         </div>
       </div>
     </div>

@@ -235,6 +235,29 @@ func TestModuleService_WriteUserModule(t *testing.T) {
 	assert.Contains(t, string(mj), "\"auto_sku\": true")
 	assert.Contains(t, string(mj), "\"transport\": \"mcp_stdio\"")
 
+	// E3：双写标准秘技包 package.json（kimi 式，符合 specs/package-manifest-schema.json）
+	pj, err := os.ReadFile(filepath.Join(moduleDir, "package.json"))
+	require.NoError(t, err, "E3：应双写 package.json")
+	var pm struct {
+		Name       string `json:"name"`
+		Version    string `json:"version"`
+		Title      string `json:"title"`
+		AutoSKU    bool   `json:"auto_sku"`
+		MCPServers map[string]struct {
+			Transport string   `json:"transport"`
+			Command   []string `json:"command"`
+		} `json:"mcpServers"`
+	}
+	require.NoError(t, json.Unmarshal(pj, &pm))
+	assert.Equal(t, moduleID, pm.Name)
+	assert.Equal(t, "1.0.0", pm.Version)
+	assert.Equal(t, "My Echo Tool", pm.Title)
+	assert.True(t, pm.AutoSKU)
+	srv, ok := pm.MCPServers[moduleID]
+	require.True(t, ok, "mcpServers 应以 moduleID 为 key")
+	assert.Equal(t, "stdio", srv.Transport)
+	assert.Equal(t, []string{"python", "main.py"}, srv.Command, "command 为合并后的完整 argv")
+
 	// rescan 注册了 SkillRuntime（AutoSKU + DriverID）
 	rt, err := skillRuntimeRepo.GetByID(moduleID)
 	require.NoError(t, err)
@@ -503,15 +526,18 @@ func TestInstallMCPRuntime_HTTP(t *testing.T) {
 	assert.Len(t, skus, 2)
 }
 
-// TestParseMCPConfig 验证标准 MCP 配置解析（M4）：Claude Desktop / Cursor / .mcp.json 通用格式，
-// 有 url -> mcp_http，有 command -> mcp_stdio，两者皆无跳过；Name 取 key；不认识字段忽略不报错。
+// TestParseMCPConfig 验证标准 MCP 配置解析（M4 + E2）：Claude Desktop / Cursor / .mcp.json 通用格式，
+// 有 url（或 serverUrl 别名）-> mcp_http，有 command -> mcp_stdio；sse 条目与缺 command/url 条目
+// 进 skipped 带进因返回；env/headers 的 ${VAR} 从进程环境展开（未设置保留原文）；Name 取 key；
+// 不认识字段忽略不报错。
 func TestParseMCPConfig(t *testing.T) {
+	t.Setenv("MCP_TEST_TOKEN", "expanded-secret")
 	raw := []byte(`{
   "mcpServers": {
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-      "env": {"FOO": "bar"}
+      "env": {"FOO": "bar", "TOKEN": "${MCP_TEST_TOKEN}", "MISSING": "${MCP_TEST_UNSET_VAR}"}
     },
     "git": {
       "command": "uvx",
@@ -519,20 +545,32 @@ func TestParseMCPConfig(t *testing.T) {
     },
     "remote-api": {
       "url": "https://mcp.example.com/mcp",
-      "headers": {"Authorization": "Bearer xxx"}
+      "headers": {"Authorization": "Bearer ${MCP_TEST_TOKEN}"}
+    },
+    "remote-alias": {
+      "serverUrl": "https://alias.example.com/mcp"
+    },
+    "legacy-sse": {
+      "type": "sse",
+      "url": "https://sse.example.com/sse"
     },
     "empty-entry": {},
     "type-only": {"type": "stdio", "alwaysAllow": ["fs"]}
   }
 }`)
-	reqs, err := ParseMCPConfig(raw)
+	reqs, skipped, err := ParseMCPConfig(raw)
 	require.NoError(t, err)
-	require.Len(t, reqs, 3, "empty-entry 与 type-only（无 command/url）应跳过，剩 2 stdio + 1 http")
+	require.Len(t, reqs, 4, "2 stdio + url + serverUrl 别名共 4 个可导入")
+	require.Len(t, skipped, 3, "sse + empty-entry + type-only 共 3 个跳过")
 
 	// map 迭代顺序不确定，按 Name 归类校验
 	byName := map[string]*MCPInstallRequest{}
 	for _, r := range reqs {
 		byName[r.Name] = r
+	}
+	skByName := map[string]SkippedMCPServer{}
+	for _, s := range skipped {
+		skByName[s.Name] = s
 	}
 
 	fs := byName["filesystem"]
@@ -540,7 +578,8 @@ func TestParseMCPConfig(t *testing.T) {
 	assert.Equal(t, "mcp_stdio", fs.Transport)
 	assert.Equal(t, "npx", fs.Command)
 	assert.Equal(t, []string{"-y", "@modelcontextprotocol/server-filesystem", "/tmp"}, fs.Args)
-	assert.Equal(t, map[string]string{"FOO": "bar"}, fs.Env)
+	assert.Equal(t, map[string]string{"FOO": "bar", "TOKEN": "expanded-secret", "MISSING": "${MCP_TEST_UNSET_VAR}"}, fs.Env,
+		"${VAR} 已设置则展开，未设置保留占位符原文")
 
 	git := byName["git"]
 	require.NotNil(t, git)
@@ -552,20 +591,103 @@ func TestParseMCPConfig(t *testing.T) {
 	require.NotNil(t, remote)
 	assert.Equal(t, "mcp_http", remote.Transport)
 	assert.Equal(t, "https://mcp.example.com/mcp", remote.Endpoint)
-	assert.Equal(t, map[string]string{"Authorization": "Bearer xxx"}, remote.Headers)
+	assert.Equal(t, map[string]string{"Authorization": "Bearer expanded-secret"}, remote.Headers)
 
-	// type-only 条目有 type 但无 command/url，应被跳过（不出现在结果中）
-	_, hasTypeOnly := byName["type-only"]
-	assert.False(t, hasTypeOnly, "无 command/url 的条目应跳过")
-	_, hasEmpty := byName["empty-entry"]
-	assert.False(t, hasEmpty, "空条目应跳过")
+	// E2：serverUrl 别名 -> mcp_http
+	alias := byName["remote-alias"]
+	require.NotNil(t, alias)
+	assert.Equal(t, "mcp_http", alias.Transport)
+	assert.Equal(t, "https://alias.example.com/mcp", alias.Endpoint)
+
+	// E2：sse 条目显式跳过（不误当 http 探测）
+	sse := skByName["legacy-sse"]
+	require.NotNil(t, &sse)
+	assert.Equal(t, "unsupported_transport", sse.Code)
+	assert.Contains(t, sse.Reason, "SSE")
+
+	// 无 command/url 的条目进 skipped（invalid_entry）
+	assert.Equal(t, "invalid_entry", skByName["type-only"].Code)
+	assert.Equal(t, "invalid_entry", skByName["empty-entry"].Code)
 
 	// 无效 JSON 报错
-	_, err = ParseMCPConfig([]byte(`{not json`))
+	_, _, err = ParseMCPConfig([]byte(`{not json`))
 	assert.Error(t, err)
 
 	// 空 mcpServers 返回空切片（不报错）
-	reqs, err = ParseMCPConfig([]byte(`{"mcpServers": {}}`))
+	reqs, skipped, err = ParseMCPConfig([]byte(`{"mcpServers": {}}`))
 	require.NoError(t, err)
 	assert.Empty(t, reqs)
+	assert.Empty(t, skipped)
+}
+
+// TestModuleService_WritePromptSkill 验证 E4：prompt-only 秘技生成（Anthropic 标准 SKILL.md）。
+// 覆盖：正常生成（slug 推导 + frontmatter 可解析 + title）、覆盖更新用户 skill、
+// 拒绝覆盖官方目录、拒绝覆盖模块目录、缺字段/无法推导 slug 报错。
+func TestModuleService_WritePromptSkill(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CLAW_MARKETPLACE_DIR", root)
+	svc := &ModuleService{}
+
+	// 正常生成：skill_id 缺省据 Name 折叠推导
+	res, err := svc.WritePromptSkill(PromptSkillGenerateRequest{
+		Name:        "My Helper",
+		Description: "演示：生成 prompt-only 秘技",
+		Category:    "写作",
+		Body:        "你是演示人格。\n\n## 规则\n\n- 简洁",
+		Username:    "tester",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "my-helper", res.SkillID)
+
+	// SKILL.md 落盘且 frontmatter 可被标准解析器解析（metadata.title/category 保留）
+	parsed, err := ParseSkillMD(filepath.Join(res.Dir, "SKILL.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "my-helper", parsed.Name)
+	assert.Equal(t, "My Helper", parsed.DisplayName())
+	assert.Equal(t, "演示：生成 prompt-only 秘技", parsed.Description)
+	assert.Equal(t, "写作", parsed.Metadata["category"])
+	assert.Contains(t, parsed.Body, "你是演示人格")
+
+	// 覆盖更新同 slug 纯 skill 目录（SKILL.md 是源格式）
+	res2, err := svc.WritePromptSkill(PromptSkillGenerateRequest{
+		SkillID: "my-helper", Name: "My Helper v2", Description: "更新", Body: "新人格。",
+	})
+	require.NoError(t, err)
+	parsed2, err := ParseSkillMD(filepath.Join(res2.Dir, "SKILL.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "My Helper v2", parsed2.DisplayName())
+
+	// 拒绝覆盖官方目录（内嵌 skill-maker）
+	_, err = svc.WritePromptSkill(PromptSkillGenerateRequest{
+		SkillID: "skill-maker", Name: "x", Description: "x", Body: "x",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "官方")
+
+	// 拒绝覆盖模块目录（含 module.json）
+	modDir := filepath.Join(root, "some-mod")
+	require.NoError(t, os.MkdirAll(modDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(modDir, "module.json"), []byte("{}"), 0o644))
+	_, err = svc.WritePromptSkill(PromptSkillGenerateRequest{
+		SkillID: "some-mod", Name: "x", Description: "x", Body: "x",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "module.json")
+
+	// 缺必填字段
+	_, err = svc.WritePromptSkill(PromptSkillGenerateRequest{Name: "x"})
+	require.Error(t, err)
+
+	// 中文名无法折叠出 slug 且未显式给 skill_id -> 报错
+	_, err = svc.WritePromptSkill(PromptSkillGenerateRequest{
+		Name: "我的秘技", Description: "x", Body: "x",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "skill_id")
+
+	// 非法 slug 字符
+	_, err = svc.WritePromptSkill(PromptSkillGenerateRequest{
+		SkillID: "Bad_Slug!", Name: "x", Description: "x", Body: "x",
+	})
+	require.Error(t, err)
 }

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -605,6 +607,10 @@ func (s *ModuleService) WriteUserModule(req UserModuleGenerateRequest, tools []M
 	if err := writeUserModuleJSON(moduleDir, moduleID, req, tools); err != nil {
 		return nil, err
 	}
+	// E3：双写 kimi 式标准秘技包清单 package.json，使 DIY 产出对云端与标准生态可读。
+	if err := writeUserPackageJSON(moduleDir, moduleID, req); err != nil {
+		return nil, err
+	}
 
 	// rescan 注册 SkillRuntime（含 AutoSKU/Credentials/DriverID）
 	if err := s.RescanMarketplace(nil); err != nil {
@@ -685,12 +691,178 @@ func writeUserModuleJSON(moduleDir, moduleID string, req UserModuleGenerateReque
 	return os.WriteFile(filepath.Join(moduleDir, "module.json"), data, 0o644)
 }
 
-// sanitizeUserModuleID 据展示名推导合法 module ID：小写 + [a-z0-9-]，其余折叠为单 -，
-// 再追加 uuid8 后缀（复用 cloud generateUniqueModuleID 的 uuid 模式）使重名模块不撞
-// （为 T11 分享到云端铺路：不同用户同名模块得到不同 ID，云端无需改名、本地↔云端 ID 链稳定）。
-// 仅用于新生成模块（module_id 缺省路径，WriteUserModule:596）；显式传 module_id 的重新生成/定点
-// 走 :594 旁路，不经过本函数，故「仅影响新生成模块，不破坏存量查找，官方模块 ID 不变」。
-func sanitizeUserModuleID(name string) string {
+// userPackageManifest kimi 式标准秘技包清单（specs/package-manifest-schema.json 的
+// stdio MCP 子集——造秘技页当前只产 stdio 模块）。schema 对 credentials 条目
+// additionalProperties=false 且不含 scope，故凭证定义单列 slim 类型（丢弃 Scope）。
+type userPackageManifest struct {
+	Name        string                          `json:"name"`
+	Version     string                          `json:"version"`
+	Title       string                          `json:"title,omitempty"`
+	Description string                          `json:"description"`
+	Author      string                          `json:"author,omitempty"`
+	AutoSKU     bool                            `json:"auto_sku"`
+	MCPServers  map[string]userPackageMCPServer `json:"mcpServers"`
+}
+
+// userPackageMCPServer 标准包内单个 MCP server：command 为完整 argv（命令+参数合并）。
+type userPackageMCPServer struct {
+	Transport   string                     `json:"transport"`
+	Command     []string                   `json:"command"`
+	Env         map[string]string          `json:"env,omitempty"`
+	Credentials map[string]userPackageCred `json:"credentials,omitempty"`
+}
+
+// userPackageCred 标准包凭证声明（与 schema 对齐，不含 module.json 的 scope 字段）。
+type userPackageCred struct {
+	Type        string `json:"type"`
+	Label       string `json:"label,omitempty"`
+	Description string `json:"description,omitempty"`
+	Placeholder string `json:"placeholder,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+// writeUserPackageJSON 双写 kimi 式标准秘技包清单 package.json（E3）。
+// module.json 仍是 claw 运行时事实源（rescan/autostart 不读 package.json）；
+// package.json 使 DIY 产出可被云端 package 体系（catalog/package 下载、submissions
+// 审批）与标准生态工具直接识别，为「本地造 -> 云端分享」铺路。
+func writeUserPackageJSON(moduleDir, moduleID string, req UserModuleGenerateRequest) error {
+	command := req.Command
+	if command == "" {
+		command = "python"
+	}
+	args := req.Args
+	if len(args) == 0 {
+		args = []string{"main.py"}
+	}
+	argv := append([]string{command}, args...)
+	var creds map[string]userPackageCred
+	if len(req.CredentialsMeta) > 0 {
+		creds = make(map[string]userPackageCred, len(req.CredentialsMeta))
+		for k, c := range req.CredentialsMeta {
+			creds[k] = userPackageCred{
+				Type:        string(c.Type),
+				Label:       c.Label,
+				Description: c.Description,
+				Placeholder: c.Placeholder,
+				Required:    c.Required,
+			}
+		}
+	}
+	m := userPackageManifest{
+		Name:        moduleID,
+		Version:     "1.0.0",
+		Title:       req.Name,
+		Description: req.Description,
+		Author:      req.Username,
+		AutoSKU:     true,
+		MCPServers: map[string]userPackageMCPServer{
+			moduleID: {
+				Transport:   "stdio",
+				Command:     argv,
+				Env:         req.Env,
+				Credentials: creds,
+			},
+		},
+	}
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化 package.json 失败: %w", err)
+	}
+	return os.WriteFile(filepath.Join(moduleDir, "package.json"), data, 0o644)
+}
+
+// PromptSkillGenerateRequest /v1/claw-console/skills/generate 请求体（E4：prompt-only 秘技生成）。
+type PromptSkillGenerateRequest struct {
+	SkillID     string `json:"skill_id"`    // slug（^[a-z0-9][a-z0-9-]*$）；缺省据 Name 折叠推导
+	Name        string `json:"name"`        // 展示名（写 frontmatter metadata.title）
+	Description string `json:"description"` // 触发条件描述（frontmatter.description）
+	Category    string `json:"category"`    // 分类（metadata.category），缺省由同步层落「提示」
+	Body        string `json:"body"`        // SKILL.md 正文（即注入对话的 SystemPrompt）
+	Username    string `json:"username"`    // 创建者名（handler 透传进 SKU CreatorName）
+}
+
+// PromptSkillGenerateResult 生成结果。
+type PromptSkillGenerateResult struct {
+	SkillID string `json:"skill_id"`
+	Dir     string `json:"dir"` // 落盘目录（marketplace/{skill_id}）
+}
+
+// WritePromptSkill 生成 prompt-only 秘技：在 marketplace/{slug}/ 写 Anthropic 标准 SKILL.md
+// （E4）。SKU 同步不在此处做（service 层不依赖 seed 包），由调用方（handler）随后调
+// seed.SyncPromptSkillDir 定向同步出 driver=none 的 SKU。
+// 防覆盖：目录已存在且含 module.json/package.json（是模块而非纯 skill）或属于内嵌官方
+// 目录（marketplace.FS）时拒绝；已存在的用户纯 skill 目录允许覆盖更新（SKILL.md 是源格式）。
+func (s *ModuleService) WritePromptSkill(req PromptSkillGenerateRequest) (*PromptSkillGenerateResult, error) {
+	if strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Description) == "" || strings.TrimSpace(req.Body) == "" {
+		return nil, errors.New("name / description / body 不能为空")
+	}
+	slug := strings.TrimSpace(req.SkillID)
+	if slug == "" {
+		slug = foldSlugBase(req.Name)
+	}
+	if slug == "" {
+		return nil, errors.New("无法推导合法 skill_id，请显式传入（小写字母/数字/中划线）")
+	}
+	if !slugPattern.MatchString(slug) {
+		return nil, fmt.Errorf("skill_id %q 不合法：须匹配 ^[a-z0-9][a-z0-9-]*$", slug)
+	}
+
+	// 内嵌官方目录（skill-maker/copywriting/各官方模块）禁止覆盖
+	if _, err := fs.Stat(marketplace.FS, slug); err == nil {
+		return nil, fmt.Errorf("skill_id %s 与官方秘技冲突，请换一个", slug)
+	}
+
+	root, err := EnsureMarketplaceRoot()
+	if err != nil {
+		return nil, fmt.Errorf("初始化 marketplace 目录失败: %w", err)
+	}
+	if root == "" {
+		return nil, errors.New("无法定位 marketplace 目录（设 CLAW_MARKETPLACE_DIR 或在仓库内运行）")
+	}
+	dir := filepath.Join(root, slug)
+	if _, err := os.Stat(filepath.Join(dir, "module.json")); err == nil {
+		return nil, fmt.Errorf("目录 %s 已是模块（含 module.json），请换一个 skill_id", slug)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
+		return nil, fmt.Errorf("目录 %s 已是秘技包（含 package.json），请换一个 skill_id", slug)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("创建秘技目录失败: %w", err)
+	}
+
+	var fm strings.Builder
+	fm.WriteString("---\n")
+	fm.WriteString("name: " + slug + "\n")
+	fm.WriteString("description: " + yamlOneLine(req.Description) + "\n")
+	fm.WriteString("metadata:\n")
+	fm.WriteString("  title: " + yamlOneLine(req.Name) + "\n")
+	if c := strings.TrimSpace(req.Category); c != "" {
+		fm.WriteString("  category: " + yamlOneLine(c) + "\n")
+	}
+	fm.WriteString("---\n\n")
+	fm.WriteString(strings.TrimSpace(req.Body) + "\n")
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(fm.String()), 0o644); err != nil {
+		return nil, fmt.Errorf("写入 SKILL.md 失败: %w", err)
+	}
+	return &PromptSkillGenerateResult{SkillID: slug, Dir: dir}, nil
+}
+
+// slugPattern 合法 slug（package-manifest-schema 的 name 同款约束）。
+var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
+// yamlOneLine 把用户输入压成单行 YAML 标量（换行折叠为空格，防 frontmatter 注断行）。
+// 含冒号/引号等特殊字符时加双引号包裹并转义，保证 frontmatter 可解析。
+func yamlOneLine(s string) string {
+	s = strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+	if strings.ContainsAny(s, `:"'#{}[],&*?|-<>=!%@`+"`") || strings.HasPrefix(s, " ") {
+		return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
+	}
+	return s
+}
+
+// foldSlugBase 把展示名折叠为 slug 基（小写 + [a-z0-9-]，其余折叠为单 -，去首尾 -）。
+// 无法折叠出任何字符时返回空串（调用方决定报错或加消歧后缀）。
+func foldSlugBase(name string) string {
 	var sb strings.Builder
 	prevDash := false
 	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
@@ -702,7 +874,16 @@ func sanitizeUserModuleID(name string) string {
 			prevDash = true
 		}
 	}
-	base := strings.Trim(sb.String(), "-")
+	return strings.Trim(sb.String(), "-")
+}
+
+// sanitizeUserModuleID 据展示名推导合法 module ID：小写 + [a-z0-9-]，其余折叠为单 -，
+// 再追加 uuid8 后缀（复用 cloud generateUniqueModuleID 的 uuid 模式）使重名模块不撞
+// （为 T11 分享到云端铺路：不同用户同名模块得到不同 ID，云端无需改名、本地↔云端 ID 链稳定）。
+// 仅用于新生成模块（module_id 缺省路径，WriteUserModule:596）；显式传 module_id 的重新生成/定点
+// 走 :594 旁路，不经过本函数，故「仅影响新生成模块，不破坏存量查找，官方模块 ID 不变」。
+func sanitizeUserModuleID(name string) string {
+	base := foldSlugBase(name)
 	if base == "" {
 		base = "mod" // 名称无可折叠字符时回退，镜像 cloud generateUniqueModuleID 的 mod-<uuid8>
 	}
@@ -1158,13 +1339,18 @@ func (s *ModuleService) InstallMCPRuntime(req *MCPInstallRequest, tools []MCPToo
 }
 
 // mcpDesktopServer Claude Desktop（claude_desktop_config.json）/ Cursor / .mcp.json 单个 MCP server 配置。
-// stdio（command/args/env）或 http（url/headers）二选一；不认识的字段（type/alwaysAllow 等）忽略不报错。
+// stdio（command/args/env）或 http（url/serverUrl + headers）二选一；type/transport 仅用于
+// 识别 sse 条目显式跳过（mcp_sse 未实现，误当 http 探测只会得到误导性失败）；
+// 不认识的字段（alwaysAllow 等）忽略不报错。
 type mcpDesktopServer struct {
-	Command string            `json:"command"` // stdio 启动命令（如 npx）
-	Args    []string          `json:"args"`    // stdio 参数
-	Env     map[string]string `json:"env"`     // stdio 环境变量
-	URL     string            `json:"url"`     // http MCP 地址（Cursor/.mcp.json 用 url 而非 command）
-	Headers map[string]string `json:"headers"` // http MCP 请求头
+	Command   string            `json:"command"`   // stdio 启动命令（如 npx）
+	Args      []string          `json:"args"`      // stdio 参数
+	Env       map[string]string `json:"env"`       // stdio 环境变量
+	URL       string            `json:"url"`       // http MCP 地址（Cursor/.mcp.json 用 url 而非 command）
+	ServerURL string            `json:"serverUrl"` // url 别名（部分生态配置用 serverUrl）
+	Headers   map[string]string `json:"headers"`   // http MCP 请求头
+	Type      string            `json:"type"`      // Claude Desktop 的 transport 声明（stdio/sse）
+	Transport string            `json:"transport"` // 部分生态配置的 transport 字段
 }
 
 // mcpDesktopConfig Claude Desktop / Cursor / .mcp.json 通用 MCP 配置根结构。
@@ -1172,34 +1358,82 @@ type mcpDesktopConfig struct {
 	McpServers map[string]mcpDesktopServer `json:"mcpServers"`
 }
 
+// SkippedMCPServer 导入时被跳过的 server 及原因（E2：带进因返回而非静默丢弃）。
+type SkippedMCPServer struct {
+	Name   string `json:"name"`
+	Code   string `json:"code"`   // unsupported_transport | invalid_entry
+	Reason string `json:"reason"` // 人类可读原因
+}
+
+// configPlaceholderRe 匹配 ${VAR} 占位符（社区 MCP 配置常用其引用本机环境变量）。
+var configPlaceholderRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandConfigPlaceholders 展开值中的 ${VAR}：从 claw 进程环境取值；未设置则保留占位符原文
+// （此时值多半需要用户在凭证/环境变量中补填，保留原文比替换成空串更可诊断）。
+func expandConfigPlaceholders(v string) string {
+	return configPlaceholderRe.ReplaceAllStringFunc(v, func(m string) string {
+		name := configPlaceholderRe.FindStringSubmatch(m)[1]
+		if val, ok := os.LookupEnv(name); ok {
+			return val
+		}
+		return m
+	})
+}
+
+// expandConfigMap 对 env/headers 的每个值做 ${VAR} 展开。
+func expandConfigMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return in
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = expandConfigPlaceholders(v)
+	}
+	return out
+}
+
 // ParseMCPConfig 解析标准 MCP client 配置（Claude Desktop / Cursor / .mcp.json 通用格式，M4），
 // 把每个 mcpServers 条目映射为 MCPInstallRequest 供调用方逐个 InstallMCPRuntime。
-// 有 url -> mcp_http（endpoint=url, headers）；有 command -> mcp_stdio（command/args/env）；
-// 两者皆无则跳过（不报错，便于兼容含纯声明条目的配置）。Name 取 mcpServers 的 key。
+// url 取值顺序 url -> serverUrl（别名）；有 url -> mcp_http（endpoint=url, headers）；
+// 有 command -> mcp_stdio（command/args/env）；type/transport=sse 的条目进 skipped
+// （unsupported_transport，mcp_sse 未实现）；两者皆无也进 skipped（invalid_entry）。
+// env/headers 值中的 ${VAR} 从 claw 进程环境展开（未设置保留占位符原文）。
 // 纯结构化解析，不执行任何命令；命令执行仍由 InstallMCPRuntime 经 G3 受控 spawn。
-func ParseMCPConfig(raw []byte) ([]*MCPInstallRequest, error) {
+func ParseMCPConfig(raw []byte) ([]*MCPInstallRequest, []SkippedMCPServer, error) {
 	var cfg mcpDesktopConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return nil, fmt.Errorf("解析 MCP 配置失败: %w", err)
+		return nil, nil, fmt.Errorf("解析 MCP 配置失败: %w", err)
 	}
 	reqs := make([]*MCPInstallRequest, 0, len(cfg.McpServers))
+	skipped := make([]SkippedMCPServer, 0)
 	for name, srv := range cfg.McpServers {
+		if strings.EqualFold(srv.Type, "sse") || strings.EqualFold(srv.Transport, "sse") {
+			skipped = append(skipped, SkippedMCPServer{Name: name, Code: "unsupported_transport",
+				Reason: "暂不支持 SSE transport（mcp_sse 未实现），请改用该 server 的 streamable-http 端点"})
+			continue
+		}
+		endpoint := srv.URL
+		if endpoint == "" {
+			endpoint = srv.ServerURL
+		}
 		req := &MCPInstallRequest{Name: name}
-		if srv.URL != "" {
+		if endpoint != "" {
 			req.Transport = "mcp_http"
-			req.Endpoint = srv.URL
-			req.Headers = srv.Headers
+			req.Endpoint = endpoint
+			req.Headers = expandConfigMap(srv.Headers)
 		} else if srv.Command != "" {
 			req.Transport = "mcp_stdio"
 			req.Command = srv.Command
 			req.Args = srv.Args
-			req.Env = srv.Env
+			req.Env = expandConfigMap(srv.Env)
 		} else {
-			continue // 无 command 也无 url，跳过（不报错）
+			skipped = append(skipped, SkippedMCPServer{Name: name, Code: "invalid_entry",
+				Reason: "条目缺少 command（stdio）或 url（http），无法导入"})
+			continue
 		}
 		reqs = append(reqs, req)
 	}
-	return reqs, nil
+	return reqs, skipped, nil
 }
 
 // UnregisterDriver 注销驱动映射

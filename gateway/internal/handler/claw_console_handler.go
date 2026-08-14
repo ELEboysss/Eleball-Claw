@@ -3,12 +3,16 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/eleball/gateway/internal/repository"
+	"github.com/eleball/gateway/internal/seed"
 	"github.com/eleball/gateway/internal/service"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -342,12 +346,12 @@ func (h *ClawConsoleHandler) ImportMCPConfig(c *gin.Context) {
 		return
 	}
 
-	reqs, err := service.ParseMCPConfig(raw)
+	reqs, skipped, err := service.ParseMCPConfig(raw)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": err.Error()})
 		return
 	}
-	if len(reqs) == 0 {
+	if len(reqs) == 0 && len(skipped) == 0 {
 		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": "配置中无可导入的 MCP server（需 command 或 url）"})
 		return
 	}
@@ -356,7 +360,11 @@ func (h *ClawConsoleHandler) ImportMCPConfig(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(len(reqs))*30*time.Second)
 	defer cancel()
 
-	outcomes := make([]mcpInstallOutcome, 0, len(reqs))
+	outcomes := make([]mcpInstallOutcome, 0, len(reqs)+len(skipped))
+	// E2：被跳过的条目（sse / 缺 command/url）带进因并入结果，不再静默丢弃。
+	for _, sk := range skipped {
+		outcomes = append(outcomes, mcpInstallOutcome{Name: sk.Name, ErrorCode: sk.Code, Message: sk.Reason})
+	}
 	for _, rq := range reqs {
 		one := mcpInstallRequest{
 			mcpProbeRequest: mcpProbeRequest{
@@ -387,6 +395,79 @@ func (h *ClawConsoleHandler) ImportMCPConfig(c *gin.Context) {
 		"code":    0,
 		"message": "success",
 		"data":    gin.H{"results": outcomes},
+	})
+}
+
+// SearchMCPRegistry 搜索 MCP 官方社区注册表（E1）。
+// GET /v1/claw-console/mcp/registry/search?q=&limit=：只读代理 registry.modelcontextprotocol.io，
+// 每个结果映射为安装表单建议（streamable-http remote -> mcp_http；npm/pypi -> npx/uvx stdio），
+// 前端「填入安装表单」后走既有探测->安装链路。上游不可达返回 code 2002。
+func (h *ClawConsoleHandler) SearchMCPRegistry(c *gin.Context) {
+	q := strings.TrimSpace(c.Query("q"))
+	if q == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "q 不能为空"})
+		return
+	}
+	limit := 0
+	if v := c.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+	defer cancel()
+	results, err := service.NewMCPRegistryClient().Search(ctx, q, limit)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "success",
+		"data":    gin.H{"results": results},
+	})
+}
+
+// GeneratePromptSkill 生成 prompt-only 秘技（E4）。
+// POST /v1/claw-console/skills/generate：写 marketplace/{slug}/SKILL.md（Anthropic 标准，
+// frontmatter 含 name/description/metadata.title/metadata.category）->
+// seed.SyncPromptSkillDir 定向同步出 driver=none SKU（skillmd-{slug}，创建者=当前用户）。
+func (h *ClawConsoleHandler) GeneratePromptSkill(c *gin.Context) {
+	var req service.PromptSkillGenerateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "请求参数错误: " + err.Error()})
+		return
+	}
+	if h.moduleService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 2002, "message": "模块服务未初始化"})
+		return
+	}
+	result, err := h.moduleService.WritePromptSkill(req)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": err.Error()})
+		return
+	}
+	// 定向同步 SKU（只处理这一个目录，不做全量扫描防误下架）：
+	// 创建者取登录用户 + 前端透传 username（缺省「我」），用户生成不标「官方」。
+	creatorName := strings.TrimSpace(req.Username)
+	if creatorName == "" {
+		creatorName = "我"
+	}
+	created, synced, skipped := seed.SyncPromptSkillDir(
+		repository.NewAgentRepo(h.db), filepath.Dir(result.Dir), result.SkillID,
+		c.GetString("user_id"), creatorName, nil)
+	if created+synced == 0 {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": fmt.Sprintf("SKILL.md 已写入但 SKU 同步失败（skipped=%d），请检查 frontmatter", skipped)})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "success",
+		"data": gin.H{
+			"skill_id": result.SkillID,
+			"sku_id":   "skillmd-" + result.SkillID,
+			"dir":      result.Dir,
+		},
 	})
 }
 

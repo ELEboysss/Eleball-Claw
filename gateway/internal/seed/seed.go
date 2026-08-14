@@ -88,7 +88,7 @@ func SyncOfficialSKUs(repo *repository.AgentRepo, side string, logger *zap.Logge
 		if !ok {
 			// 无 module.json：尝试 SKILL.md prompt-only skill（Anthropic 标准，
 			// 1 SKILL.md = 1 SKU，body 即 SystemPrompt，不建 SkillRuntime）。
-			c, sy, sk := syncPromptSkillSKU(repo, root, modName, adminID, now, logger)
+			c, sy, sk := syncPromptSkillSKU(repo, root, modName, adminID, "官方", now, logger)
 			created += c
 			synced += sy
 			skipped += sk
@@ -299,7 +299,7 @@ func shouldSyncManifest(existing, fromFile string) bool {
 // frontmatter metadata.category 可覆盖默认分类「提示」。
 //
 // 返回 (created, synced, skipped) 计数，由调用方累加。无 SKILL.md 或解析失败时全 0（跳过）。
-func syncPromptSkillSKU(repo *repository.AgentRepo, root, modName, adminID string, now time.Time, logger *zap.Logger) (int, int, int) {
+func syncPromptSkillSKU(repo *repository.AgentRepo, root, modName, creatorID, creatorName string, now time.Time, logger *zap.Logger) (int, int, int) {
 	skillmd, err := service.ParseSkillMD(filepath.Join(root, modName, "SKILL.md"))
 	if err != nil {
 		// 无 SKILL.md 或 frontmatter 不合法：非 prompt-only skill 目录，静默跳过。
@@ -335,11 +335,11 @@ func syncPromptSkillSKU(repo *repository.AgentRepo, root, modName, adminID strin
 	existing, err := repo.GetByID(agentID)
 	if err == nil && existing != nil {
 		// SKILL.md 是源格式：body/name/desc 任一变化即同步（不同于 shouldSyncManifest 比 manifest_json）。
-		if existing.SystemPrompt == body && existing.Name == skillmd.Name && existing.Description == skillmd.Description {
+		if existing.SystemPrompt == body && existing.Name == skillmd.DisplayName() && existing.Description == skillmd.Description {
 			return 0, 0, 1
 		}
 		existing.ManifestJSON = manifestStr
-		existing.Name = skillmd.Name
+		existing.Name = skillmd.DisplayName()
 		existing.Description = skillmd.Description
 		existing.Category = category
 		existing.SystemPrompt = body
@@ -353,14 +353,14 @@ func syncPromptSkillSKU(repo *repository.AgentRepo, root, modName, adminID strin
 	}
 	item := &model.AgentItem{
 		ID:           agentID,
-		Name:         skillmd.Name,
+		Name:         skillmd.DisplayName(),
 		Description:  skillmd.Description,
 		Category:     category,
 		SystemPrompt: body,
 		ManifestJSON: manifestStr,
 		Status:       model.AgentStatusApproved,
-		CreatorID:    adminID,
-		CreatorName:  "官方",
+		CreatorID:    creatorID,
+		CreatorName:  creatorName,
 		CreatedAt:    now,
 	}
 	if err := repo.Create(item); err != nil {
@@ -370,4 +370,12 @@ func syncPromptSkillSKU(repo *repository.AgentRepo, root, modName, adminID strin
 		return 0, 0, 0
 	}
 	return 1, 0, 0
+}
+
+// SyncPromptSkillDir 运行时定向同步单个 prompt-only skill 目录（claw-console
+// /skills/generate 用，E4）。与 SyncOfficialSKUs 的全量扫描不同，只处理一个目录，
+// 创建者可指定（用户生成的秘技不标「官方」）。root 为 marketplace 根，modName 为目录名。
+// 返回 (created, synced, skipped)；目录无合法 SKILL.md 时全 0（调用方据此报错）。
+func SyncPromptSkillDir(repo *repository.AgentRepo, root, modName, creatorID, creatorName string, logger *zap.Logger) (int, int, int) {
+	return syncPromptSkillSKU(repo, root, modName, creatorID, creatorName, time.Now(), logger)
 }

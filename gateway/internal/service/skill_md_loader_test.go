@@ -108,3 +108,65 @@ func TestParseSkillMDContent_Inline(t *testing.T) {
 		})
 	}
 }
+
+// TestParseSkillMD_StandardOptionalFields 验证 E5 全字段透传：Anthropic 规范
+// （license/allowed-tools/compatibility）与 DSH/Claude Code 扩展
+// （disable-model-invocation/user-invocable/when-to-use/whenToUse）均解析保留不报错。
+func TestParseSkillMD_StandardOptionalFields(t *testing.T) {
+	content := `---
+name: full-fields
+description: 全字段样本
+license: MIT
+allowed-tools: Bash Read Grep
+compatibility: Requires git
+disable-model-invocation: true
+user-invocable: false
+when-to-use: 用户要求写文案时
+metadata:
+  title: 文案专家
+---
+# Body
+`
+	m, err := ParseSkillMDContent([]byte(content))
+	if err != nil {
+		t.Fatalf("全字段 SKILL.md 不应报错: %v", err)
+	}
+	if m.License != "MIT" {
+		t.Errorf("License = %q, want MIT", m.License)
+	}
+	if m.AllowedTools != "Bash Read Grep" {
+		t.Errorf("AllowedTools = %q", m.AllowedTools)
+	}
+	if m.Compatibility != "Requires git" {
+		t.Errorf("Compatibility = %q", m.Compatibility)
+	}
+	if m.DisableModelInvocation == nil || !*m.DisableModelInvocation {
+		t.Errorf("DisableModelInvocation = %v, want true", m.DisableModelInvocation)
+	}
+	if m.UserInvocable == nil || *m.UserInvocable {
+		t.Errorf("UserInvocable = %v, want false", m.UserInvocable)
+	}
+	if m.WhenToUse != "用户要求写文案时" {
+		t.Errorf("WhenToUse = %q", m.WhenToUse)
+	}
+	// metadata.title 覆盖展示名（slug name 不可读中文场景）
+	if got := m.DisplayName(); got != "文案专家" {
+		t.Errorf("DisplayName = %q, want 文案专家", got)
+	}
+}
+
+// TestParseSkillMD_WhenToUseCamelCase 验证 DSH 风格 camelCase whenToUse 并入 WhenToUse。
+func TestParseSkillMD_WhenToUseCamelCase(t *testing.T) {
+	content := "---\nname: camel\ndescription: d\nwhenToUse: camel 写法\n---\nbody\n"
+	m, err := ParseSkillMDContent([]byte(content))
+	if err != nil {
+		t.Fatalf("camelCase whenToUse 不应报错: %v", err)
+	}
+	if m.WhenToUse != "camel 写法" {
+		t.Errorf("WhenToUse = %q, want camel 写法", m.WhenToUse)
+	}
+	// 未声明 title 时 DisplayName 回退 slug name
+	if got := m.DisplayName(); got != "camel" {
+		t.Errorf("DisplayName = %q, want camel", got)
+	}
+}

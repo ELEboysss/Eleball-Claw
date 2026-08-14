@@ -265,6 +265,12 @@ func NewClawRouter(
 				// M4：批量导入标准 MCP 配置（Claude Desktop/Cursor/.mcp.json，逐 server 走 G3 probe+install+DeriveSKUs）
 				console.POST("/mcp/import-config", clawConsoleHandler.ImportMCPConfig)
 
+				// E1：搜索 MCP 官方社区注册表（只读代理 registry.modelcontextprotocol.io，结果映射安装表单建议）
+				console.GET("/mcp/registry/search", clawConsoleHandler.SearchMCPRegistry)
+
+				// E4：生成 prompt-only 秘技（写 Anthropic 标准 SKILL.md -> 定向同步 driver=none SKU）
+				console.POST("/skills/generate", clawConsoleHandler.GeneratePromptSkill)
+
 				// F1 收尾：skill-maker AI 起草 main.py 草稿（能力描述 + 凭证声明 -> 对话模型生成 stdio MCP 脚本）
 				console.POST("/mcp/draft-main", clawConsoleHandler.DraftMainPy)
 
