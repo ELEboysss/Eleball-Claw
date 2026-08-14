@@ -87,6 +87,7 @@ export const moduleApi = {
   listModules: () => client.get('/claw-console/modules'),
   registerModule: (data) => client.post('/claw-console/modules', data),
   deleteModule: (id) => client.delete(`/claw-console/modules/${id}`),
+  uninstallModule: (id) => client.delete(`/claw-console/modules/${id}/uninstall`),
   refreshModule: (id) => client.post(`/claw-console/modules/${id}/refresh`),
   startModule: (id) => client.post(`/claw-console/modules/${id}/start`),
   rescanMarketplace: () => client.post('/claw-console/modules/rescan'),

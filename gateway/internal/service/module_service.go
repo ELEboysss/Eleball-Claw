@@ -196,6 +196,64 @@ func (s *ModuleService) UnregisterModule(moduleID string) error {
 	return s.registry.Unregister(moduleID)
 }
 
+// UninstallModule 真·卸载非官方模块（claw-only）：
+// 官方守卫 → 停进程/容器 → 下架本包全部 SKU（保留购买记录）→ 删 marketplace/<slug>/ 目录 → 注销本包全部运行时。
+// 官方模块（builtin / cloud+OfficialModuleIDs）拒绝卸载：由 SeedOfficial 重播种，更新走云端模块页（T4.4）。
+// moduleID = 运行时 ID（admin-web 模块列表行传入）；slug = 包名（rt.PackageName，空回退 rt.ID）。
+func (s *ModuleService) UninstallModule(moduleID string) error {
+	if s.repo == nil || s.registry == nil {
+		return errors.New("ModuleService 依赖未初始化")
+	}
+	rt, err := s.repo.GetByID(moduleID)
+	if err != nil {
+		return fmt.Errorf("模块 %s 不存在: %w", moduleID, err)
+	}
+	slug := rt.PackageName
+	if slug == "" {
+		slug = rt.ID
+	}
+	// 官方守卫：builtin 恒官方，cloud 仅 OfficialModuleIDs 内官方；user 一律非官方。
+	if rt.Origin.IsOfficial(slug) {
+		return fmt.Errorf("官方模块 %s 不可卸载，请在云端模块页更新", slug)
+	}
+
+	// 1. 停运行时（process：kill 子进程；docker：compose down）。失败不阻断后续清理。
+	if s.manager != nil {
+		_ = s.manager.Stop(rt.ID)
+	}
+
+	// 2. 下架本包全部 SKU（id LIKE "slug-%" 覆盖 {slug}-mcp-main / {slug}-{tool} / {slug}-skill-{name}；
+	//    沿用「消失工具→下架」模式，delisted 保留购买记录，不硬删）。
+	if s.agentRepo != nil {
+		if items, lerr := s.agentRepo.ListByModuleSKUs(slug); lerr == nil {
+			for _, it := range items {
+				if it.Status == model.AgentStatusApproved {
+					_ = s.agentRepo.UpdateStatus(it.ID, model.AgentStatusDelisted)
+				}
+			}
+		}
+	}
+
+	// 3. 删磁盘目录（仅 user 起源有 marketplace/<slug>/；cloud 第三方是 docker 无目录，安全跳过）。
+	if root := ResolveMarketplaceRoot(); root != "" {
+		if _, statErr := os.Stat(filepath.Join(root, slug)); statErr == nil {
+			_ = os.RemoveAll(filepath.Join(root, slug))
+		}
+	}
+
+	// 4. 注销本包全部运行时（PackageName==slug 或 ID 前缀 slug- 的多运行时一并注销）。
+	runtimes, lerr := s.repo.List()
+	if lerr != nil {
+		return fmt.Errorf("列出运行时失败: %w", lerr)
+	}
+	for _, r := range runtimes {
+		if r.PackageName == slug || r.ID == slug || strings.HasPrefix(r.ID, slug+"-") {
+			_ = s.registry.Unregister(r.ID)
+		}
+	}
+	return nil
+}
+
 // ListModules 列出所有运行时（管理后台；skill_runtimes 为单一事实源）
 func (s *ModuleService) ListModules() ([]*model.SkillRuntime, error) {
 	runtimes, err := s.repo.List()

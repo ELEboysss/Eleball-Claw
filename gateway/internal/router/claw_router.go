@@ -234,6 +234,7 @@ func NewClawRouter(
 				console.GET("/modules", moduleHandler.ListModules)
 				console.POST("/modules", moduleHandler.RegisterModule)
 				console.DELETE("/modules/:id", moduleHandler.UnregisterModule)
+				console.DELETE("/modules/:id/uninstall", moduleHandler.UninstallModule)
 				console.POST("/modules/:id/refresh", moduleHandler.RefreshModule)
 				// 拉起模块（process 同步 / docker 异步），「本地模块」页「启动服务」按钮调用
 				console.POST("/modules/:id/start", moduleHandler.StartModule)

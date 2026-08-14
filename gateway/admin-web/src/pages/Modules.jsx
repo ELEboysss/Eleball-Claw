@@ -2,13 +2,27 @@ import { useEffect, useState } from 'react'
 import { moduleApi, clawMarketApi } from '../api/client'
 import DockerMissingBanner from '../components/DockerMissingBanner'
 
-// 模块来源标签：eleball_cloud->eleball云端 / eleball_builtin->eleball内置 / user·mcp->主体名；
-// source_origin 缺失回退 official 合成。
+// 模块来源标签：origin 为 builtin/cloud/user（T1.3 字段改名，去掉 eleball_ 前缀）。
 function sourceLabel(origin, actor, official) {
-  if (origin === 'eleball_cloud') return 'eleball云端'
-  if (origin === 'eleball_builtin') return 'eleball内置'
-  if (origin === 'user' || origin === 'mcp') return actor || (origin === 'mcp' ? 'MCP' : '用户')
+  if (origin === 'cloud') return 'eleball云端'
+  if (origin === 'builtin') return 'eleball内置'
+  if (origin === 'user') return actor || '用户'
   return official ? '官方' : '第三方'
+}
+
+// 模块状态标签（T1.4 统一状态机）。
+const STATUS_LABEL = {
+  active: '在线', activating: '启动中', installed: '未运行',
+  degraded: '异常', needs_update: '待更新', disabled: '已禁用',
+}
+
+// 官方模块判定（与后端 SkillRuntimeOrigin.IsOfficial 对齐）：builtin 恒官方；
+// cloud 仅官方维护列表内官方；user 一律非官方。
+const OFFICIAL_CLOUD_MODULES = ['agent-reach', 'firecrawl', 'mcp-hello']
+function isOfficialModule(m) {
+  if (m.origin === 'builtin') return true
+  if (m.origin === 'cloud') return OFFICIAL_CLOUD_MODULES.includes(m.package_name || m.id || '')
+  return false
 }
 
 export default function Modules() {
@@ -66,11 +80,11 @@ export default function Modules() {
 
   // T8：本地秘技分享到云端审核（先提交、审核后下发；免 auth_token 鸡生蛋）
   const handleSubmitReview = async (m) => {
-    if (!window.confirm(`确定分享模块 ${m.module_id} 到云端？\n提交后由管理员审核，通过后上架为云端秘技。`)) return
+    if (!window.confirm(`确定分享模块 ${m.package_name || m.id} 到云端？\n提交后由管理员审核，通过后上架为云端秘技。`)) return
     setError('')
     try {
-      await moduleApi.submitForReview(m.module_id)
-      setError(`模块 ${m.module_id} 已分享到云端，等待审核`)
+      await moduleApi.submitForReview(m.package_name || m.id)
+      setError(`模块 ${m.package_name || m.id} 已分享到云端，等待审核`)
     } catch (err) {
       setError(err?.message || err || '分享失败')
     }
@@ -107,13 +121,13 @@ export default function Modules() {
     }
   }
 
-  const handleDeleteModule = async (id) => {
-    if (!window.confirm(`确定注销模块 ${id}？`)) return
+  const handleUninstall = async (id) => {
+    if (!window.confirm(`确定卸载模块 ${id}？\n将停止运行并删除本地文件，不可恢复。`)) return
     try {
-      await moduleApi.deleteModule(id)
+      await moduleApi.uninstallModule(id)
       fetchData()
     } catch (err) {
-      setError(err?.message || err || '删除失败')
+      setError(err?.message || err || '卸载失败')
     }
   }
 
@@ -235,53 +249,41 @@ export default function Modules() {
                 </tr>
               </thead>
               <tbody>
-                {modules.map((m) => (
-                  <tr key={m.module_id} className="border-t border-eleball-outline">
-                    <td className="px-4 py-3 font-mono">{m.module_id}</td>
-                    <td className="px-4 py-3">{m.name}</td>
-                    <td className="px-4 py-3 text-xs text-eleball-text-secondary">{sourceLabel(m.source_origin, m.source_actor, m.official) || '-'}</td>
-                    <td className="px-4 py-3">{m.transport_type}</td>
-                    <td className="px-4 py-3">
-                      <span className={`px-2 py-1 rounded-lg text-xs font-medium ${m.status === 'online' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
-                        {m.status === 'online' ? '在线' : '离线'}
-                      </span>
-                      {m.status !== 'online' && (
-                        <div className="mt-1 text-[11px] leading-snug max-w-[180px]">
-                          <div>
-                            {!m.activated ? (
-                              <span className="text-amber-600">未激活</span>
-                            ) : m.error ? (
-                              <span className="text-red-500 cursor-help" title={m.error}>探活失败</span>
-                            ) : (
-                              <span className="text-eleball-text-tertiary">未运行</span>
-                            )}
-                          </div>
-                          {m.required_env && (
-                            <div className="text-eleball-text-tertiary">
-                              需{m.required_env === 'docker' ? 'Docker' : m.required_env === 'node' ? 'Node' : 'Python'}环境
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-4 py-3">{m.version || '-'}</td>
-                    <td className="px-4 py-3">{formatTime(m.last_heartbeat)}</td>
-                    <td className="px-4 py-3 space-x-2">
-                      {m.status !== 'online' && m.required_env && (
-                        <button
-                          onClick={() => handleStartModule(m.module_id)}
-                          disabled={starting === m.module_id}
-                          className="text-emerald-600 hover:underline disabled:opacity-50"
-                        >
-                          {starting === m.module_id ? '启动中…' : '启动服务'}
-                        </button>
-                      )}
-                      <button onClick={() => handleRefreshModule(m.module_id)} className="text-eleball-primary hover:underline">刷新</button>
-                      <button onClick={() => handleSubmitReview(m)} className="text-blue-600 hover:underline">分享到云端</button>
-                      <button onClick={() => handleDeleteModule(m.module_id)} className="text-red-600 hover:underline">注销</button>
-                    </td>
-                  </tr>
-                ))}
+                {modules.map((m) => {
+                  const online = m.status === 'active'
+                  const canStart = !online && (m.deployment === 'process' || m.deployment === 'docker')
+                  return (
+                    <tr key={m.id} className="border-t border-eleball-outline">
+                      <td className="px-4 py-3 font-mono">{m.id}</td>
+                      <td className="px-4 py-3">{m.name}</td>
+                      <td className="px-4 py-3 text-xs text-eleball-text-secondary">{sourceLabel(m.origin, m.actor, m.official) || '-'}</td>
+                      <td className="px-4 py-3">{m.transport}</td>
+                      <td className="px-4 py-3">
+                        <span className={`px-2 py-1 rounded-lg text-xs font-medium ${online ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
+                          {online ? '在线' : (STATUS_LABEL[m.status] || m.status || '离线')}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">{m.version || '-'}</td>
+                      <td className="px-4 py-3">{formatTime(m.last_heartbeat)}</td>
+                      <td className="px-4 py-3 space-x-2">
+                        {canStart && (
+                          <button
+                            onClick={() => handleStartModule(m.id)}
+                            disabled={starting === m.id}
+                            className="text-emerald-600 hover:underline disabled:opacity-50"
+                          >
+                            {starting === m.id ? '启动中…' : '启动服务'}
+                          </button>
+                        )}
+                        <button onClick={() => handleRefreshModule(m.id)} className="text-eleball-primary hover:underline">刷新</button>
+                        <button onClick={() => handleSubmitReview(m)} className="text-blue-600 hover:underline">分享到云端</button>
+                        {!isOfficialModule(m) && (
+                          <button onClick={() => handleUninstall(m.id)} className="text-red-600 hover:underline">卸载</button>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
                 {modules.length === 0 && !loading && (
                   <tr><td colSpan={8} className="px-4 py-8 text-center text-eleball-text-secondary">暂无模块</td></tr>
                 )}
@@ -319,8 +321,8 @@ export default function Modules() {
                   <td className="px-4 py-3">{m.version || '-'}</td>
                   <td className="px-4 py-3">
                     {(() => {
-                      const label = sourceLabel(m.source_origin, m.source_actor, m.official)
-                      const isEleball = m.source_origin === 'eleball_cloud' || m.source_origin === 'eleball_builtin' || (!m.source_origin && m.official)
+                      const label = sourceLabel(m.origin, m.actor, m.official)
+                      const isEleball = m.origin === 'cloud' || m.origin === 'builtin' || (!m.origin && m.official)
                       return (
                         <span className={`px-2 py-0.5 rounded text-xs ${isEleball ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
                           {label}
