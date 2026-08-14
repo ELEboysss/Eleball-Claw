@@ -93,6 +93,8 @@ pkg/
 
 **存量覆盖**：手写 SKU manifest（`marketplace/<mod>/skus/*.json`）与 module.json 均携带 `package_module/category` 等包级字段；`RescanMarketplace` 额外执行 `backfillPackageIdentity`（幂等）——老库运行时无包身份、SKU manifest 缺 package_module 的存量行在启动扫描/「重新扫描」时自动补齐，确保既有模块（agent-reach/firecrawl/search-web/mcp-hello/mcp-stdio-echo/stt + prompt-only skill）全部进入秘技包体系。
 
+**孤儿 SKU 对账**：旧版本注销模块只删运行时、不级联下架 SKU，历史遗留的 approved SKU 卡片仍展示。`RescanMarketplace` 每次执行 `reconcileOrphanedSKUs`（幂等）：引用已不存在运行时（按 auto_sku_module/module/package_module 归属，driver≠none 的可执行 SKU）一律下架（delisted 保留购买记录）；prompt-only 秘技（driver=none）与无归属元数据的 SKU 保守保留。
+
 ## 6. 目标演进
 
 当前 claw 的工具层仍带云端安全沙箱的约束（白名单 shell）。目标是构建本地专有工具层（见 [tool-layer.md](tool-layer.md)）：真 bash、git、构建工具链、流式/后台进程、权限确认模型--让 claw 真正胜任编程与重本地操作。

@@ -208,6 +208,96 @@ func TestUnregisterModule_NonOwnedPrefixNotDelisted(t *testing.T) {
 	assert.Equal(t, model.AgentStatusApproved, item.Status, "前缀命中但 manifest 归属他包的 SKU 不应被误下架")
 }
 
+// TestReconcileOrphanedSKUs_DelistsOrphan 旧版本残留：模块被注销（旧版只删运行时、不级联下架 SKU），
+// 对账后其 approved SKU 卡片应下架（delisted 保留购买记录）。
+func TestReconcileOrphanedSKUs_DelistsOrphan(t *testing.T) {
+	modSvc, _, agentRepo := newUninstallTestSvc(t)
+	slug := "old-module"
+	// 派生 SKU（driver=非 none，manifest 归属旧模块）
+	createDerivedSKU(t, agentRepo, slug+"-tool1", slug)
+	// 模拟旧版本注销：只删运行时，无级联（registry.Unregister 直接调，绕过新级联逻辑）
+	rt := &model.SkillRuntime{
+		ID:          slug,
+		Name:        "Old Module",
+		Transport:   model.SkillRuntimeTransportExecute,
+		Deployment:  model.SkillRuntimeDeploymentDocker,
+		Status:      model.SkillRuntimeStatusOffline,
+		PackageName: slug,
+	}
+	require.NoError(t, modSvc.registry.Register(rt))
+	require.NoError(t, modSvc.registry.Unregister(slug)) // 旧版语义：无 SKU 级联
+
+	require.NoError(t, modSvc.reconcileOrphanedSKUs(nil))
+
+	item, err := agentRepo.GetByID(slug + "-tool1")
+	require.NoError(t, err)
+	assert.Equal(t, model.AgentStatusDelisted, item.Status, "引用已不存在运行时的 approved SKU 应下架")
+}
+
+// TestReconcileOrphanedSKUs_KeepsValid 引用现存运行时 / prompt-only（driver=none）/ 无归属元数据的 SKU 保留。
+func TestReconcileOrphanedSKUs_KeepsValid(t *testing.T) {
+	modSvc, _, agentRepo := newUninstallTestSvc(t)
+	// 1) 现存运行时 + 其 SKU
+	registerRuntime(t, modSvc, "search-web", "search-web", model.SkillRuntimeOriginEleballBuiltin, true)
+	createDerivedSKU(t, agentRepo, "search-web-baidu", "search-web")
+	// 2) prompt-only 秘技（driver=none，metadata.module 指向无运行时的 skill 目录）
+	promptSKU := &model.AgentItem{
+		ID:       "skillmd-copywriting",
+		Name:     "Copywriting",
+		Category: "文案",
+		Status:   model.AgentStatusApproved,
+	}
+	mf := model.ToolManifest{
+		ID:       "skillmd-copywriting",
+		Name:     "Copywriting",
+		Driver:   model.ToolDriverNone,
+		Category: "文案",
+		Metadata: map[string]string{"module": "copywriting", "package_module": "copywriting"},
+	}
+	b, err := json.Marshal(mf)
+	require.NoError(t, err)
+	promptSKU.ManifestJSON = string(b)
+	require.NoError(t, agentRepo.Create(promptSKU))
+	// 3) 无归属元数据的 SKU（legacy 行，保守保留）
+	legacySKU := &model.AgentItem{ID: "legacy-no-meta", Name: "Legacy", Status: model.AgentStatusApproved}
+	lb, _ := json.Marshal(model.ToolManifest{ID: "legacy-no-meta", Name: "Legacy", Driver: model.ToolDriverType("x")})
+	legacySKU.ManifestJSON = string(lb)
+	require.NoError(t, agentRepo.Create(legacySKU))
+
+	require.NoError(t, modSvc.reconcileOrphanedSKUs(nil))
+
+	for _, id := range []string{"search-web-baidu", "skillmd-copywriting", "legacy-no-meta"} {
+		item, err := agentRepo.GetByID(id)
+		require.NoError(t, err)
+		assert.Equal(t, model.AgentStatusApproved, item.Status, "%s 不应被下架", id)
+	}
+
+	// 幂等：再次对账无副作用
+	require.NoError(t, modSvc.reconcileOrphanedSKUs(nil))
+	for _, id := range []string{"search-web-baidu", "skillmd-copywriting"} {
+		item, err := agentRepo.GetByID(id)
+		require.NoError(t, err)
+		assert.Equal(t, model.AgentStatusApproved, item.Status)
+	}
+}
+
+// TestReconcileOrphanedSKUs_PackageSlugMatch 引用包 slug（非运行时 ID）的 SKU 命中现存包则保留。
+func TestReconcileOrphanedSKUs_PackageSlugMatch(t *testing.T) {
+	modSvc, _, agentRepo := newUninstallTestSvc(t)
+	slug := "agent-reach"
+	// 多运行时包：运行时 ID 带后缀，SKU manifest 用 package_module=slug 归属
+	registerRuntime(t, modSvc, slug+"-mcp-main", slug, model.SkillRuntimeOriginEleballCloud, false)
+	createDerivedSKU(t, agentRepo, slug+"-mcp-main-tool1", slug)
+
+	require.NoError(t, modSvc.reconcileOrphanedSKUs(nil))
+
+	item, err := agentRepo.GetByID(slug + "-mcp-main-tool1")
+	require.NoError(t, err)
+	assert.Equal(t, model.AgentStatusApproved, item.Status, "包 slug 命中现存运行时应保留")
+}
+
+// 手写 SKU manifest 无 package_module 时，rescan 回填后补齐
+// （运行时回填 PackageName/Title/Description + SKU manifest 注入包级元数据），使存量模块进入秘技包体系。
 // TestBackfillPackageIdentity_UpgradeCompat 存量数据升级兼容：老库运行时无包身份、
 // 手写 SKU manifest 无 package_module 时，rescan 回填后补齐
 // （运行时回填 PackageName/Title/Description + SKU manifest 注入包级元数据），使存量模块进入秘技包体系。

@@ -619,7 +619,94 @@ func (s *ModuleService) RescanMarketplace(logger *zap.Logger) error {
 	}
 	// 升级兼容：存量数据补齐包身份（运行时 + SKU manifest），使既有模块全部进入「秘技包」体系
 	// （包卡聚合 / 生命周期联动），幂等，对已补全的行无副作用。
-	return s.backfillPackageIdentity(logger)
+	if err := s.backfillPackageIdentity(logger); err != nil {
+		return err
+	}
+	// 孤儿 SKU 对账：旧版本注销模块时不级联下架 SKU（UnregisterModule 级联是后续修复），
+	// 历史遗留的 approved SKU 引用的运行时已不存在，卡片仍在集市展示。
+	// 幂等对账：引用已不存在运行时的 approved 可执行 SKU（driver≠none）下架，卡片即消失
+	// （delisted 保留购买记录）；prompt-only 秘技（driver=none）不受影响。
+	return s.reconcileOrphanedSKUs(logger)
+}
+
+// reconcileOrphanedSKUs 清理孤儿能力项（升级兼容，幂等）：
+// 遍历 approved SKU，其 manifest 声明的 module / auto_sku_module / package_module 引用的运行时
+// 已不存在（旧版本注销模块只删运行时、未级联下架 SKU）时，下架该 SKU 卡片。
+// 判定规则：
+//   - driver=none（prompt-only 秘技，无运行时按设计存在）与 driver=builtin 恒跳过；
+//   - 无任何 module 归属元数据的 SKU 跳过（无法判定归属，保守保留）；
+//   - 引用命中任一现存运行时 ID 或包 slug（PackageName）则视为有效，跳过。
+//
+// delisted 保留购买记录与激活态，仅从集市列表（approved 过滤）消失——与 UnregisterModule
+// 级联下架、DeriveSKUs 消失工具下架同一语义。
+func (s *ModuleService) reconcileOrphanedSKUs(logger *zap.Logger) error {
+	if s.repo == nil || s.agentRepo == nil {
+		return nil
+	}
+	warn := func(msg string, fields ...zap.Field) {
+		if logger != nil {
+			logger.Warn(msg, fields...)
+		}
+	}
+
+	// 现存运行时 ID + 包 slug 集合（disabled 也算存在：用户主动禁用不视为孤儿）
+	runtimes, err := s.repo.List()
+	if err != nil {
+		return err
+	}
+	existing := make(map[string]bool, len(runtimes)*2)
+	for _, rt := range runtimes {
+		existing[rt.ID] = true
+		if rt.PackageName != "" {
+			existing[rt.PackageName] = true
+		}
+	}
+
+	items, _, err := s.agentRepo.ListByStatus(model.AgentStatusApproved, 1, 10000)
+	if err != nil {
+		return err
+	}
+	delisted := 0
+	for _, it := range items {
+		mf, err := it.Manifest()
+		if err != nil || mf == nil {
+			continue
+		}
+		// prompt-only / builtin 无运行时依赖，跳过
+		driver := string(mf.Driver)
+		if driver == "" || driver == string(model.ToolDriverNone) || driver == string(model.ToolDriverBuiltin) {
+			continue
+		}
+		// 归属键：auto_sku_module 优先（派生 SKU 精确键），其次 module，最后 package_module
+		ref := mf.Metadata["auto_sku_module"]
+		if ref == "" {
+			ref = mf.Metadata["module"]
+		}
+		if ref == "" {
+			ref = mf.Metadata["package_module"]
+		}
+		if ref == "" {
+			continue // 无归属元数据，保守保留
+		}
+		if existing[ref] {
+			continue // 运行时仍存在
+		}
+		if err := s.agentRepo.UpdateStatus(it.ID, model.AgentStatusDelisted); err != nil {
+			warn("下架孤儿 SKU 失败", zap.String("sku_id", it.ID), zap.Error(err))
+			continue
+		}
+		delisted++
+		if logger != nil {
+			logger.Info("下架孤儿 SKU（模块已注销/移除）",
+				zap.String("sku_id", it.ID),
+				zap.String("module_ref", ref),
+				zap.String("driver", driver))
+		}
+	}
+	if delisted > 0 && logger != nil {
+		logger.Info("孤儿 SKU 对账完成", zap.Int("delisted", delisted))
+	}
+	return nil
 }
 
 // 内置模块分类兜底：存量安装的 marketplace/module.json 不被 SeedOfficial 覆盖（只补缺失文件），
