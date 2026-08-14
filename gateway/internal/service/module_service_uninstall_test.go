@@ -207,3 +207,63 @@ func TestUnregisterModule_NonOwnedPrefixNotDelisted(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, model.AgentStatusApproved, item.Status, "前缀命中但 manifest 归属他包的 SKU 不应被误下架")
 }
+
+// TestBackfillPackageIdentity_UpgradeCompat 存量数据升级兼容：老库运行时无包身份、
+// 手写 SKU manifest 无 package_module 时，rescan 回填后补齐
+// （运行时回填 PackageName/Title/Description + SKU manifest 注入包级元数据），使存量模块进入秘技包体系。
+func TestBackfillPackageIdentity_UpgradeCompat(t *testing.T) {
+	modSvc, _, agentRepo := newUninstallTestSvc(t)
+	// 老库：运行时无 PackageName（模拟历史版本物化的行）
+	rt := &model.SkillRuntime{
+		ID:          "search-web",
+		Name:        "联网搜索（本地）",
+		Description: "本地运行的网页搜索工具。",
+		Transport:   model.SkillRuntimeTransportExecute,
+		Deployment:  model.SkillRuntimeDeploymentDocker,
+		Status:      model.SkillRuntimeStatusOffline,
+		Official:    true,
+	}
+	require.NoError(t, modSvc.registry.Register(rt))
+	// 老库：手写 SKU，manifest 只有 metadata.module，无 package_module
+	sku := &model.AgentItem{
+		ID:       "search-web-baidu",
+		Name:     "百度千帆搜索",
+		Category: "搜索",
+		Status:   model.AgentStatusApproved,
+	}
+	mf := model.ToolManifest{
+		ID:       "search-web-baidu",
+		Name:     "百度千帆搜索",
+		Driver:   model.ToolDriverType("search_web"),
+		Metadata: map[string]string{"module": "search-web"},
+	}
+	b, err := json.Marshal(mf)
+	require.NoError(t, err)
+	sku.ManifestJSON = string(b)
+	require.NoError(t, agentRepo.Create(sku))
+
+	require.NoError(t, modSvc.backfillPackageIdentity(nil))
+
+	// 运行时回填
+	rt2, err := modSvc.repo.GetByID("search-web")
+	require.NoError(t, err)
+	assert.Equal(t, "search-web", rt2.PackageName)
+	assert.Equal(t, "联网搜索（本地）", rt2.PackageTitle)
+	assert.Equal(t, "本地运行的网页搜索工具。", rt2.PackageDescription)
+
+	// SKU manifest 注入包元数据
+	item, err := agentRepo.GetByID("search-web-baidu")
+	require.NoError(t, err)
+	itemMF, err := item.Manifest()
+	require.NoError(t, err)
+	assert.Equal(t, "search-web", itemMF.Metadata["package_module"])
+	assert.Equal(t, "联网搜索（本地）", itemMF.Metadata["package_title"])
+	assert.Equal(t, "本地运行的网页搜索工具。", itemMF.Metadata["package_description"])
+
+	// 幂等：再次回填无副作用（package_module 已存在则跳过）
+	before := item.ManifestJSON
+	require.NoError(t, modSvc.backfillPackageIdentity(nil))
+	item2, err := agentRepo.GetByID("search-web-baidu")
+	require.NoError(t, err)
+	assert.Equal(t, before, item2.ManifestJSON)
+}

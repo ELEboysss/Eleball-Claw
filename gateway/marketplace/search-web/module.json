@@ -2,6 +2,7 @@
   "id": "search-web",
   "name": "联网搜索（本地）",
   "description": "本地运行的网页搜索工具。",
+  "category": "搜索",
   "source": "marketplace",
   "transport": "execute",
   "deployment": "docker",

@@ -22,7 +22,13 @@
   "actions": [
     { "name": "web_read", "description": "读取网页正文为 markdown（keyless，无需配置）" }
   ],
-  "metadata": { "module": "search-web", "provider": "exa" },
+  "metadata": {
+    "module": "search-web",
+    "package_module": "search-web",
+    "package_title": "联网搜索（本地）",
+    "package_description": "本地运行的网页搜索工具。",
+    "provider": "exa"
+  },
   "timeout_seconds": 35,
   "error_codes": [
     "credential_missing",

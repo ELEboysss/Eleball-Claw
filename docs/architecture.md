@@ -91,6 +91,8 @@ pkg/
 - **真·卸载**：`DELETE /v1/claw-console/modules/:id/uninstall`（`UninstallModule`）：官方守卫 → 停进程/容器 → 下架本包 SKU → 删 marketplace/<slug>/ 目录（user/mcp 起源）→ 注销本包全部运行时。
 - **前端聚合**：技能页 `AgentMarket` 按 `package_module` 聚合包卡 + 包详情逐 SKU 勾选 + 包级一键激活；助手组装（`AssistantManager`）按包分组；控制台 `admin-web`「本地秘技包」页按包归组展示运行时子表 + SKU 清单 + 显著「卸载」按钮。
 
+**存量覆盖**：手写 SKU manifest（`marketplace/<mod>/skus/*.json`）与 module.json 均携带 `package_module/category` 等包级字段；`RescanMarketplace` 额外执行 `backfillPackageIdentity`（幂等）——老库运行时无包身份、SKU manifest 缺 package_module 的存量行在启动扫描/「重新扫描」时自动补齐，确保既有模块（agent-reach/firecrawl/search-web/mcp-hello/mcp-stdio-echo/stt + prompt-only skill）全部进入秘技包体系。
+
 ## 6. 目标演进
 
 当前 claw 的工具层仍带云端安全沙箱的约束（白名单 shell）。目标是构建本地专有工具层（见 [tool-layer.md](tool-layer.md)）：真 bash、git、构建工具链、流式/后台进程、权限确认模型--让 claw 真正胜任编程与重本地操作。

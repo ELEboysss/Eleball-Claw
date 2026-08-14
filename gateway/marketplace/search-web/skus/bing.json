@@ -22,7 +22,13 @@
   "actions": [
     { "name": "search", "description": "按关键词搜索互联网内容（必应）" }
   ],
-  "metadata": { "module": "search-web", "provider": "bing" },
+  "metadata": {
+    "module": "search-web",
+    "package_module": "search-web",
+    "package_title": "联网搜索（本地）",
+    "package_description": "本地运行的网页搜索工具。",
+    "provider": "bing"
+  },
   "credentials": {
     "bing_search_api_key": {
       "type": "api_key",

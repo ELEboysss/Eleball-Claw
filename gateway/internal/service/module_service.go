@@ -614,7 +614,114 @@ func (s *ModuleService) RescanMarketplace(logger *zap.Logger) error {
 		}
 		return nil
 	}
-	return s.ensureMarketplaceModules(root, logger)
+	if err := s.ensureMarketplaceModules(root, logger); err != nil {
+		return err
+	}
+	// 升级兼容：存量数据补齐包身份（运行时 + SKU manifest），使既有模块全部进入「秘技包」体系
+	// （包卡聚合 / 生命周期联动），幂等，对已补全的行无副作用。
+	return s.backfillPackageIdentity(logger)
+}
+
+// backfillPackageIdentity 存量数据补齐包身份（升级兼容，幂等）：
+// 老库运行时无 PackageName、手写 SKU manifest 无 package_module 时，按物化后的运行时回填：
+//  1. 运行时 PackageName/PackageTitle/PackageDescription 为空 -> 用 ID/Name/Description 回填
+//     （单运行时包 slug = 运行时 ID；多运行时包共享 slug 由各写入点保证）。
+//  2. approved SKU 的 manifest 缺 package_module 但 metadata.module / auto_sku_module 命中本包运行时
+//     -> 注入 package_module/package_title/package_description（保留其余字段与购买记录）。
+//
+// 由 RescanMarketplace（启动扫描 + 控制台「重新扫描」）调用，确保存量与新增模块都在秘技包体系内。
+func (s *ModuleService) backfillPackageIdentity(logger *zap.Logger) error {
+	if s.repo == nil || s.agentRepo == nil {
+		return nil
+	}
+	runtimes, err := s.repo.List()
+	if err != nil {
+		return err
+	}
+	warn := func(msg string, fields ...zap.Field) {
+		if logger != nil {
+			logger.Warn(msg, fields...)
+		}
+	}
+
+	// 1) 运行时包身份回填（PackageName 为空才写）
+	slugByID := make(map[string]string, len(runtimes))
+	for _, rt := range runtimes {
+		changed := false
+		slug := rt.PackageName
+		if slug == "" {
+			slug = rt.ID
+			rt.PackageName = slug
+			changed = true
+		}
+		if rt.PackageTitle == "" && rt.Name != "" {
+			rt.PackageTitle = rt.Name
+			changed = true
+		}
+		if rt.PackageDescription == "" && rt.Description != "" {
+			rt.PackageDescription = rt.Description
+			changed = true
+		}
+		slugByID[rt.ID] = slug
+		if changed {
+			if err := s.repo.CreateOrUpdate(rt); err != nil {
+				warn("回填运行时包身份失败", zap.String("runtime_id", rt.ID), zap.Error(err))
+			}
+		}
+	}
+
+	// 2) SKU manifest 包元数据注入（仅 approved；delisted 保留原样）
+	for _, rt := range runtimes {
+		slug := slugByID[rt.ID]
+		if slug == "" {
+			continue
+		}
+		for _, prefix := range []string{rt.ID, slug} {
+			if prefix == "" {
+				continue
+			}
+			items, err := s.agentRepo.ListByModuleSKUs(prefix)
+			if err != nil {
+				continue
+			}
+			for _, it := range items {
+				if it.Status != model.AgentStatusApproved {
+					continue
+				}
+				mf, err := it.Manifest()
+				if err != nil || mf == nil {
+					continue
+				}
+				// 归属判定：module/auto_sku_module/package_module 命中本包任一键（防前缀误伤）
+				owned := false
+				for _, k := range []string{mf.Metadata["auto_sku_module"], mf.Metadata["module"], mf.Metadata["package_module"]} {
+					if k == rt.ID || (slug != "" && k == slug) {
+						owned = true
+						break
+					}
+				}
+				if !owned || mf.Metadata["package_module"] != "" {
+					continue // 非本包 SKU 或已补齐
+				}
+				mf.Metadata["package_module"] = slug
+				if rt.PackageTitle != "" {
+					mf.Metadata["package_title"] = rt.PackageTitle
+				}
+				if rt.PackageDescription != "" {
+					mf.Metadata["package_description"] = rt.PackageDescription
+				}
+				b, err := json.Marshal(mf)
+				if err != nil {
+					continue
+				}
+				it.ManifestJSON = string(b)
+				if err := s.agentRepo.Update(it); err != nil {
+					warn("回填 SKU 包元数据失败", zap.String("sku_id", it.ID), zap.Error(err))
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // ResolveMarketplaceRoot 解析 marketplace 根目录：

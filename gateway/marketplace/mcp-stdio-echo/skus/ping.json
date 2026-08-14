@@ -16,5 +16,11 @@
   "actions": [
     { "name": "ping", "description": "返回 pong" }
   ],
+  "metadata": {
+    "module": "mcp-stdio-echo",
+    "package_module": "mcp-stdio-echo",
+    "package_title": "MCP stdio Echo 示例",
+    "package_description": "本地 stdio MCP 驱动示例，暴露 echo/ping 工具，用于验证子进程 JSON-RPC 全链路。"
+  },
   "timeout_seconds": 30
 }

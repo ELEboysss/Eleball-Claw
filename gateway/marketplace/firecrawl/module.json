@@ -2,6 +2,7 @@
   "id": "firecrawl",
   "name": "Firecrawl 网页抓取",
   "description": "网页抓取、批量爬取、结构化数据提取。Docker MCP HTTP 模块，调用 Firecrawl API（须配 API Key）。",
+  "category": "互联网",
   "source": "marketplace",
   "source_origin": "eleball_cloud",
   "transport": "mcp_http",
