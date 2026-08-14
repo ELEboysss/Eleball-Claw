@@ -82,6 +82,14 @@ type ModuleRecord struct {
 	SourceOrigin string `json:"source_origin,omitempty"`
 	// SourceActor 来源主体（user=用户名 / mcp=MCP 名）；eleball_* 为空。
 	SourceActor string `json:"source_actor,omitempty"`
+	// 包身份视图字段（由 runtimeToModuleRecord 从 SkillRuntime 填充）：
+	// 管理后台按 package_name 归组为「秘技包」，包卡展示 title/description。
+	PackageName        string `json:"package_name,omitempty"`
+	PackageTitle       string `json:"package_title,omitempty"`
+	PackageDescription string `json:"package_description,omitempty"`
+	Category           string `json:"category,omitempty"`
+	// Deployment 部署方式视图字段（process/docker/none/external），控制台据此显示「启动服务」按钮。
+	Deployment string `json:"deployment,omitempty"`
 	// 以下字段不在数据库中，由实时健康探测填充
 	HealthError string `gorm:"-" json:"error,omitempty"`
 	// RequiredEnv 该模块启动所需本地环境：docker / python / node / process（none/external 为空）。

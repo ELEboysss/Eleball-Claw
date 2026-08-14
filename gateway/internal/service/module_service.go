@@ -198,9 +198,112 @@ func (s *ModuleService) RegisterModule(record *model.ModuleRecord) error {
 	return s.registry.Register(rt)
 }
 
-// UnregisterModule 注销模块
+// UnregisterModule 注销模块（级联下架本模块/本包的 SKU 卡片）。
+// 秘技集市卡片与模块强关联：模块注销后其派生 SKU 一并下架（delisted，保留购买记录不硬删），
+// 集市列表（status=approved 过滤）即不再出现对应卡片。官方内置模块注销后由 rescan 重新物化。
 func (s *ModuleService) UnregisterModule(moduleID string) error {
+	// 先级联下架本模块（及其所属包）的 SKU，再注销运行时。
+	// 注销前仍可读到运行时包身份，故先取再删。
+	if rt := s.registry.Get(moduleID); rt != nil {
+		s.delistPackageSKUs(rt)
+	}
 	return s.registry.Unregister(moduleID)
+}
+
+// UninstallModule 真·卸载非官方模块（claw-only，秘技包级）：
+// 官方守卫 → 停进程/容器 → 下架本包全部 SKU（保留购买记录）→ 删 marketplace/<slug>/ 目录 → 注销本包全部运行时。
+// 官方模块（内置 / official=true）拒绝卸载：由 rescan 重播种，更新走「重新扫描」重派生 SKU。
+// moduleID = 运行时 ID（控制台包卡传入首运行时）；slug = 包名（rt.PackageName，空回退 rt.ID）。
+func (s *ModuleService) UninstallModule(moduleID string) error {
+	if s.repo == nil || s.registry == nil {
+		return errors.New("ModuleService 依赖未初始化")
+	}
+	rt, err := s.repo.GetByID(moduleID)
+	if err != nil {
+		return fmt.Errorf("模块 %s 不存在: %w", moduleID, err)
+	}
+	slug := rt.PackageName
+	if slug == "" {
+		slug = rt.ID
+	}
+	// 官方守卫：official=true（内置/云端官方）一律拒绝；user/mcp/第三方 cloud 可卸载。
+	if rt.Official {
+		return fmt.Errorf("官方模块 %s 不可卸载，请在「云端模块」页更新或重新扫描", slug)
+	}
+
+	// 1. 停运行时（process：kill 子进程；docker：compose down）。失败不阻断后续清理。
+	if s.manager != nil {
+		_ = s.manager.Stop(rt.ID)
+	}
+
+	// 2. 下架本包全部 SKU（沿「消失工具→下架」模式，delisted 保留购买记录，不硬删）。
+	s.delistPackageSKUs(rt)
+
+	// 3. 删磁盘目录（仅 user/mcp 起源有 marketplace/<slug>/ 本地文件；cloud 第三方是容器无目录，安全跳过）。
+	if rt.SourceOrigin == model.SkillRuntimeOriginUser || rt.SourceOrigin == model.SkillRuntimeOriginMCP {
+		if root := ResolveMarketplaceRoot(); root != "" {
+			target := filepath.Join(root, filepath.Base(slug))
+			// 防路径逃逸：仅删除 marketplace 根下的直接子目录
+			if strings.HasPrefix(target, root+string(filepath.Separator)) {
+				_ = os.RemoveAll(target)
+			}
+		}
+	}
+
+	// 4. 注销本包全部运行时（PackageName==slug 或 ID==slug 或 ID 前缀 slug- 的多运行时一并注销）。
+	runtimes, lerr := s.repo.List()
+	if lerr != nil {
+		return fmt.Errorf("列出运行时失败: %w", lerr)
+	}
+	for _, r := range runtimes {
+		if r.PackageName == slug || r.ID == slug || strings.HasPrefix(r.ID, slug+"-") {
+			_ = s.registry.Unregister(r.ID)
+		}
+	}
+	return nil
+}
+
+// delistPackageSKUs 下架某运行时所属秘技包的全部 SKU 卡片：
+// 先按运行时 ID 前缀粗筛（ListByModuleSKUs），再据 manifest 的 auto_sku_module / package_module
+// 精确判定归属（防前缀误伤同名前缀的其他包 SKU）；delisted 保留购买记录不硬删。
+func (s *ModuleService) delistPackageSKUs(rt *model.SkillRuntime) {
+	if s.agentRepo == nil || rt == nil {
+		return
+	}
+	// 归属键集合：运行时自身 ID + 包 slug（多运行时包共享 slug）
+	keys := map[string]bool{rt.ID: true}
+	if rt.PackageName != "" {
+		keys[rt.PackageName] = true
+	}
+	for _, id := range []string{rt.ID, rt.PackageName} {
+		if id == "" {
+			continue
+		}
+		items, err := s.agentRepo.ListByModuleSKUs(id)
+		if err != nil {
+			continue
+		}
+		for _, it := range items {
+			if it.Status != model.AgentStatusApproved {
+				continue
+			}
+			mf, err := it.Manifest()
+			if err != nil || mf == nil {
+				continue
+			}
+			// 精确归属：auto_sku_module（派生 SKU）或 module / package_module（手写/包派生 SKU）命中任一键
+			owned := false
+			for _, k := range []string{mf.Metadata["auto_sku_module"], mf.Metadata["module"], mf.Metadata["package_module"]} {
+				if k != "" && keys[k] {
+					owned = true
+					break
+				}
+			}
+			if owned {
+				_ = s.agentRepo.UpdateStatus(it.ID, model.AgentStatusDelisted)
+			}
+		}
+	}
 }
 
 // ListModules 列出所有已注册模块（返回实时健康状态）
@@ -434,6 +537,7 @@ type marketplaceModuleManifest struct {
 	ModuleID          string                         `json:"module_id"` // 兼容旧格式
 	Name              string                         `json:"name"`
 	Description       string                         `json:"description"`
+	Category          string                         `json:"category,omitempty"` // 包分类（空回退 rt.Name，供包卡聚合展示）
 	URL               string                         `json:"url"`                           // 兼容旧格式
 	Endpoint          string                         `json:"endpoint"`                      // 新格式
 	Transport         string                         `json:"transport"`                     // 新格式
@@ -787,6 +891,84 @@ type PromptSkillGenerateResult struct {
 	Dir     string `json:"dir"` // 落盘目录（marketplace/{skill_id}）
 }
 
+// checkPromptSkillDir 校验 slug 并返回可写入的秘技目录（WritePromptSkill/Raw 共用守卫）：
+// slug 合法、不覆盖内嵌官方目录、不覆盖已是模块/秘技包的目录；用户纯 skill 目录允许覆盖更新。
+func (s *ModuleService) checkPromptSkillDir(slug string) (string, error) {
+	if !slugPattern.MatchString(slug) {
+		return "", fmt.Errorf("skill_id %q 不合法：须匹配 ^[a-z0-9][a-z0-9-]*$", slug)
+	}
+	// 内嵌官方目录（skill-maker/copywriting/各官方模块）禁止覆盖
+	if _, err := fs.Stat(marketplace.FS, slug); err == nil {
+		return "", fmt.Errorf("skill_id %s 与官方秘技冲突，请换一个", slug)
+	}
+	root, err := EnsureMarketplaceRoot()
+	if err != nil {
+		return "", fmt.Errorf("初始化 marketplace 目录失败: %w", err)
+	}
+	if root == "" {
+		return "", errors.New("无法定位 marketplace 目录（设 CLAW_MARKETPLACE_DIR 或在仓库内运行）")
+	}
+	dir := filepath.Join(root, slug)
+	if _, err := os.Stat(filepath.Join(dir, "module.json")); err == nil {
+		return "", fmt.Errorf("目录 %s 已是模块（含 module.json），请换一个 skill_id", slug)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
+		return "", fmt.Errorf("目录 %s 已是秘技包（含 package.json），请换一个 skill_id", slug)
+	}
+	return dir, nil
+}
+
+// WritePromptSkillRaw 以原始内容导入 prompt-only 秘技（F4：DSH 插件/社区 SKILL.md 导入）。
+// 与 WritePromptSkill 的差异：不重写 frontmatter，原样保留导入文件的全部字段
+// （license/allowed-tools/when-to-use 等），仅校验其可解析且 name/description 齐备；
+// frontmatter.name 与 slug 不一致时以 slug 重写 name 行，保证目录与标识一致。
+func (s *ModuleService) WritePromptSkillRaw(slug string, content []byte) (*PromptSkillGenerateResult, error) {
+	m, err := ParseSkillMDContent(content)
+	if err != nil {
+		return nil, err
+	}
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		slug = foldSlugBase(m.Name)
+	}
+	if slug == "" {
+		return nil, errors.New("无法推导合法 skill_id，请显式传入（小写字母/数字/中划线）")
+	}
+	dir, err := s.checkPromptSkillDir(slug)
+	if err != nil {
+		return nil, err
+	}
+	// name 与目录 slug 对齐（frontmatter.name 是秘技标识，必须等于目录名）
+	if m.Name != slug {
+		content = rewriteSkillMDName(content, slug)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("创建秘技目录失败: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), content, 0o644); err != nil {
+		return nil, fmt.Errorf("写入 SKILL.md 失败: %w", err)
+	}
+	return &PromptSkillGenerateResult{SkillID: slug, Dir: dir}, nil
+}
+
+// rewriteSkillMDName 重写 SKILL.md frontmatter 的 name 行（保持其余字节不变）。
+// frontmatter 必含 name（ParseSkillMDContent 已校验），按行替换首个 "name:" 项。
+func rewriteSkillMDName(content []byte, slug string) []byte {
+	text := string(content)
+	parts := strings.SplitN(text, "---", 3)
+	if len(parts) < 3 {
+		return content
+	}
+	lines := strings.Split(parts[1], "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "name:") {
+			lines[i] = "name: " + slug
+			break
+		}
+	}
+	return []byte(parts[0] + "---" + strings.Join(lines, "\n") + "---" + parts[2])
+}
+
 // WritePromptSkill 生成 prompt-only 秘技：在 marketplace/{slug}/ 写 Anthropic 标准 SKILL.md
 // （E4）。SKU 同步不在此处做（service 层不依赖 seed 包），由调用方（handler）随后调
 // seed.SyncPromptSkillDir 定向同步出 driver=none 的 SKU。
@@ -803,28 +985,9 @@ func (s *ModuleService) WritePromptSkill(req PromptSkillGenerateRequest) (*Promp
 	if slug == "" {
 		return nil, errors.New("无法推导合法 skill_id，请显式传入（小写字母/数字/中划线）")
 	}
-	if !slugPattern.MatchString(slug) {
-		return nil, fmt.Errorf("skill_id %q 不合法：须匹配 ^[a-z0-9][a-z0-9-]*$", slug)
-	}
-
-	// 内嵌官方目录（skill-maker/copywriting/各官方模块）禁止覆盖
-	if _, err := fs.Stat(marketplace.FS, slug); err == nil {
-		return nil, fmt.Errorf("skill_id %s 与官方秘技冲突，请换一个", slug)
-	}
-
-	root, err := EnsureMarketplaceRoot()
+	dir, err := s.checkPromptSkillDir(slug)
 	if err != nil {
-		return nil, fmt.Errorf("初始化 marketplace 目录失败: %w", err)
-	}
-	if root == "" {
-		return nil, errors.New("无法定位 marketplace 目录（设 CLAW_MARKETPLACE_DIR 或在仓库内运行）")
-	}
-	dir := filepath.Join(root, slug)
-	if _, err := os.Stat(filepath.Join(dir, "module.json")); err == nil {
-		return nil, fmt.Errorf("目录 %s 已是模块（含 module.json），请换一个 skill_id", slug)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
-		return nil, fmt.Errorf("目录 %s 已是秘技包（含 package.json），请换一个 skill_id", slug)
+		return nil, err
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建秘技目录失败: %w", err)
@@ -1141,6 +1304,12 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 			Official:          true,
 			DriverID:          m.Driver.ID,
 			AutoSKU:           m.AutoSKU,
+			// 包身份：module.json 即包事实源，id 作为包 slug（多运行时包共享同一 package_name），
+			// name/description 作为包级展示名/描述，供 DeriveSKUs 派生 SKU 与前端包卡继承。
+			Category:           m.Category,
+			PackageName:        moduleID,
+			PackageTitle:       m.Name,
+			PackageDescription: m.Description,
 		}
 		rt.SetArgs(m.Args)
 		rt.SetEnv(m.Env)
@@ -1290,6 +1459,10 @@ func (s *ModuleService) InstallMCPRuntime(req *MCPInstallRequest, tools []MCPToo
 		AutoSKU:     true,
 		DriverID:    runtimeID, // 自驱动
 		Status:      model.SkillRuntimeStatusOffline,
+		// 包身份：MCP 安装即单包，slug 取运行时 ID（展示名/描述供包卡聚合）。
+		PackageName:        runtimeID,
+		PackageTitle:       req.Name,
+		PackageDescription: req.Description,
 	}
 	rt.SourceOrigin = model.SkillRuntimeOriginMCP // type4b：MCP 安装，actor=MCP 名
 	rt.SourceActor = req.Name
@@ -1522,6 +1695,10 @@ func moduleRecordToRuntime(rec *model.ModuleRecord) *model.SkillRuntime {
 		Version:     rec.Version,
 		Official:    rec.Official,
 		DriverID:    rec.ID,
+		// 控制台注册/更新路径的包身份：单模块即单包，slug 取模块 ID。
+		PackageName:        rec.ID,
+		PackageTitle:       rec.Name,
+		PackageDescription: rec.Description,
 	}
 	rt.SetCapabilities(rec.CapabilitiesList())
 	return rt
@@ -1542,6 +1719,12 @@ func runtimeToModuleRecord(rt *model.SkillRuntime, st *SkillRuntimeStatusSnapsho
 		ImageDigest:   rt.ImageDigest,
 		Signature:     rt.Signature,
 		AuthToken:     rt.AuthToken,
+		// 包身份视图字段（控制台按 package_name 归组秘技包）
+		PackageName:        rt.PackageName,
+		PackageTitle:       rt.PackageTitle,
+		PackageDescription: rt.PackageDescription,
+		Category:           rt.Category,
+		Deployment:         string(rt.Deployment),
 	}
 	rec.SetCapabilities(rt.CapabilitiesList())
 

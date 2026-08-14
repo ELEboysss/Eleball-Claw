@@ -104,6 +104,18 @@ func (h *ModuleHandler) UnregisterModule(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success"})
 }
 
+// UninstallModule 真·卸载非官方模块（claw-only，秘技包级）：
+// 停进程/容器 + 删本地文件 + 下架本包 SKU + 注销本包运行时。
+// DELETE /v1/claw-console/modules/:id/uninstall（官方模块拒绝，更新走「重新扫描」/「云端模块」）。
+func (h *ModuleHandler) UninstallModule(c *gin.Context) {
+	id := c.Param("id")
+	if err := h.moduleService.UninstallModule(id); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 3001, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success"})
+}
+
 // RefreshModule 强制探测模块健康状态
 func (h *ModuleHandler) RefreshModule(c *gin.Context) {
 	id := c.Param("id")
