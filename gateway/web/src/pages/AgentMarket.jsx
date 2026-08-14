@@ -1110,7 +1110,9 @@ export default function AgentMarket() {
                         </span>
                       )}
                     </span>
-                    {def.required && <span className="text-xs text-red-500">必填</span>}
+                    {def.required
+                      ? <span className="text-xs text-red-500">必填</span>
+                      : <span className="text-xs text-eleball-text-tertiary">选填</span>}
                   </div>
                   {def.description && (
                     <p className="text-xs text-eleball-text-secondary">{def.description}</p>
@@ -1543,16 +1545,6 @@ export default function AgentMarket() {
                       )}
                       {purchased && m.credential_complete === false && (
                         <span className="text-xs px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 shrink-0">凭证不全</span>
-                      )}
-                      {Object.keys(parseManifestCredentials(m)).length > 0 && (
-                        <button
-                          type="button"
-                          onClick={(e) => { e.preventDefault(); e.stopPropagation(); openCredentialModal(m) }}
-                          className="text-eleball-text-tertiary hover:text-eleball-primary transition-colors shrink-0"
-                          title="配置凭证"
-                        >
-                          <Settings className="w-4 h-4" />
-                        </button>
                       )}
                     </label>
                   )
