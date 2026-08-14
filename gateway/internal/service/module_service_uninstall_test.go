@@ -45,7 +45,7 @@ func writeUserPackageDir(t *testing.T, slug string) string {
 	return modDir
 }
 
-// registerRuntime 注册一个带包身份的运行时（SourceOrigin/Official 由调用方指定）。
+// registerRuntime 注册一个带包身份的运行时（SourceOrigin/Official 由调用方指定；DriverID=rtID）。
 func registerRuntime(t *testing.T, svc *ModuleService, rtID, slug string, origin model.SkillRuntimeSourceOrigin, official bool) {
 	t.Helper()
 	rt := &model.SkillRuntime{
@@ -56,6 +56,7 @@ func registerRuntime(t *testing.T, svc *ModuleService, rtID, slug string, origin
 		PackageName:        slug,
 		PackageTitle:       slug,
 		PackageDescription: "pkg desc",
+		DriverID:           rtID,
 		Transport:          model.SkillRuntimeTransportMCPStdio,
 		Deployment:         model.SkillRuntimeDeploymentProcess,
 		Status:             model.SkillRuntimeStatusOnline,
@@ -64,8 +65,8 @@ func registerRuntime(t *testing.T, svc *ModuleService, rtID, slug string, origin
 	require.NoError(t, svc.registry.Register(rt))
 }
 
-// createDerivedSKU 造一个派生 SKU（ID 前缀 slug-，manifest 带 auto_sku_module + package_module，status=approved）。
-func createDerivedSKU(t *testing.T, agentRepo *repository.AgentRepo, id, slug string) *model.AgentItem {
+// createDerivedSKU 造一个派生 SKU（ID 前缀 slug-，manifest 带 auto_sku_module + package_module + 指定 driver，status=approved）。
+func createDerivedSKU(t *testing.T, agentRepo *repository.AgentRepo, id, slug, driver string) *model.AgentItem {
 	t.Helper()
 	sku := &model.AgentItem{
 		ID:       id,
@@ -76,7 +77,7 @@ func createDerivedSKU(t *testing.T, agentRepo *repository.AgentRepo, id, slug st
 	mf := model.ToolManifest{
 		ID:     id,
 		Name:   "tool1",
-		Driver: model.ToolDriverType("driver-x"),
+		Driver: model.ToolDriverType(driver),
 		Metadata: map[string]string{
 			"auto_sku_module": slug,
 			"module":          slug,
@@ -97,7 +98,7 @@ func TestUninstallModule_UserModule(t *testing.T) {
 	rtID := slug
 	modDir := writeUserPackageDir(t, slug)
 	registerRuntime(t, modSvc, rtID, slug, model.SkillRuntimeOriginUser, false)
-	createDerivedSKU(t, agentRepo, slug+"-tool1", slug)
+	createDerivedSKU(t, agentRepo, slug+"-tool1", slug, slug)
 
 	require.NoError(t, modSvc.UninstallModule(rtID))
 
@@ -150,8 +151,8 @@ func TestUninstallModule_MultiRuntimePackage(t *testing.T) {
 	writeUserPackageDir(t, slug)
 	registerRuntime(t, modSvc, slug+"-mcp-main", slug, model.SkillRuntimeOriginUser, false)
 	registerRuntime(t, modSvc, slug+"-mcp-aux", slug, model.SkillRuntimeOriginUser, false)
-	createDerivedSKU(t, agentRepo, slug+"-mcp-main-tool1", slug)
-	createDerivedSKU(t, agentRepo, slug+"-mcp-aux-tool1", slug)
+	createDerivedSKU(t, agentRepo, slug+"-mcp-main-tool1", slug, "driver-x")
+	createDerivedSKU(t, agentRepo, slug+"-mcp-aux-tool1", slug, "driver-x")
 
 	require.NoError(t, modSvc.UninstallModule(slug+"-mcp-main"))
 
@@ -174,8 +175,8 @@ func TestUnregisterModule_CascadeDelistSKU(t *testing.T) {
 	modSvc, _, agentRepo := newUninstallTestSvc(t)
 	slug := "search-web"
 	registerRuntime(t, modSvc, slug, slug, model.SkillRuntimeOriginEleballBuiltin, true)
-	createDerivedSKU(t, agentRepo, slug+"-search", slug)
-	createDerivedSKU(t, agentRepo, slug+"-fetch", slug)
+	createDerivedSKU(t, agentRepo, slug+"-search", slug, "driver-x")
+	createDerivedSKU(t, agentRepo, slug+"-fetch", slug, "driver-x")
 
 	require.NoError(t, modSvc.UnregisterModule(slug))
 
@@ -187,7 +188,7 @@ func TestUnregisterModule_CascadeDelistSKU(t *testing.T) {
 	assert.Equal(t, model.AgentStatusDelisted, item.Status)
 
 	// 无关模块的 SKU 不受影响
-	createDerivedSKU(t, agentRepo, "other-tool", "other")
+	createDerivedSKU(t, agentRepo, "other-tool", "other", "driver-x")
 	other, err := agentRepo.GetByID("other-tool")
 	require.NoError(t, err)
 	assert.Equal(t, model.AgentStatusApproved, other.Status)
@@ -199,7 +200,7 @@ func TestUnregisterModule_NonOwnedPrefixNotDelisted(t *testing.T) {
 	slug := "agent"
 	registerRuntime(t, modSvc, slug, slug, model.SkillRuntimeOriginEleballBuiltin, true)
 	// ID 前缀 agent- 但 manifest 归属 agent-reach 包
-	createDerivedSKU(t, agentRepo, "agent-reach-tool", "agent-reach")
+	createDerivedSKU(t, agentRepo, "agent-reach-tool", "agent-reach", "driver-x")
 
 	require.NoError(t, modSvc.UnregisterModule(slug))
 
@@ -214,7 +215,7 @@ func TestReconcileOrphanedSKUs_DelistsOrphan(t *testing.T) {
 	modSvc, _, agentRepo := newUninstallTestSvc(t)
 	slug := "old-module"
 	// 派生 SKU（driver=非 none，manifest 归属旧模块）
-	createDerivedSKU(t, agentRepo, slug+"-tool1", slug)
+	createDerivedSKU(t, agentRepo, slug+"-tool1", slug, slug)
 	// 模拟旧版本注销：只删运行时，无级联（registry.Unregister 直接调，绕过新级联逻辑）
 	rt := &model.SkillRuntime{
 		ID:          slug,
@@ -239,7 +240,7 @@ func TestReconcileOrphanedSKUs_KeepsValid(t *testing.T) {
 	modSvc, _, agentRepo := newUninstallTestSvc(t)
 	// 1) 现存运行时 + 其 SKU
 	registerRuntime(t, modSvc, "search-web", "search-web", model.SkillRuntimeOriginEleballBuiltin, true)
-	createDerivedSKU(t, agentRepo, "search-web-baidu", "search-web")
+	createDerivedSKU(t, agentRepo, "search-web-baidu", "search-web", "search-web")
 	// 2) prompt-only 秘技（driver=none，metadata.module 指向无运行时的 skill 目录）
 	promptSKU := &model.AgentItem{
 		ID:       "skillmd-copywriting",
@@ -258,7 +259,7 @@ func TestReconcileOrphanedSKUs_KeepsValid(t *testing.T) {
 	require.NoError(t, err)
 	promptSKU.ManifestJSON = string(b)
 	require.NoError(t, agentRepo.Create(promptSKU))
-	// 3) 无归属元数据的 SKU（legacy 行，保守保留）
+	// 3) driver 无对应运行时的 legacy SKU（无归属元数据）——新判定下 driver 不可解析 -> 下架
 	legacySKU := &model.AgentItem{ID: "legacy-no-meta", Name: "Legacy", Status: model.AgentStatusApproved}
 	lb, _ := json.Marshal(model.ToolManifest{ID: "legacy-no-meta", Name: "Legacy", Driver: model.ToolDriverType("x")})
 	legacySKU.ManifestJSON = string(lb)
@@ -266,11 +267,16 @@ func TestReconcileOrphanedSKUs_KeepsValid(t *testing.T) {
 
 	require.NoError(t, modSvc.reconcileOrphanedSKUs(nil))
 
-	for _, id := range []string{"search-web-baidu", "skillmd-copywriting", "legacy-no-meta"} {
+	// 有效 SKU 保留
+	for _, id := range []string{"search-web-baidu", "skillmd-copywriting"} {
 		item, err := agentRepo.GetByID(id)
 		require.NoError(t, err)
 		assert.Equal(t, model.AgentStatusApproved, item.Status, "%s 不应被下架", id)
 	}
+	// dead driver 下架
+	legacy, err := agentRepo.GetByID("legacy-no-meta")
+	require.NoError(t, err)
+	assert.Equal(t, model.AgentStatusDelisted, legacy.Status, "driver 无对应运行时的 SKU 应下架")
 
 	// 幂等：再次对账无副作用
 	require.NoError(t, modSvc.reconcileOrphanedSKUs(nil))
@@ -281,19 +287,57 @@ func TestReconcileOrphanedSKUs_KeepsValid(t *testing.T) {
 	}
 }
 
-// TestReconcileOrphanedSKUs_PackageSlugMatch 引用包 slug（非运行时 ID）的 SKU 命中现存包则保留。
+// TestReconcileOrphanedSKUs_PackageSlugMatch 多运行时包：SKU driver 指向运行时 DriverID（带后缀），
+// package_module 归组到包 slug，命中现存运行时则保留。
 func TestReconcileOrphanedSKUs_PackageSlugMatch(t *testing.T) {
 	modSvc, _, agentRepo := newUninstallTestSvc(t)
 	slug := "agent-reach"
-	// 多运行时包：运行时 ID 带后缀，SKU manifest 用 package_module=slug 归属
+	// 多运行时包：运行时 ID 带后缀（DriverID=ID），SKU driver 指向该运行时
 	registerRuntime(t, modSvc, slug+"-mcp-main", slug, model.SkillRuntimeOriginEleballCloud, false)
-	createDerivedSKU(t, agentRepo, slug+"-mcp-main-tool1", slug)
+	createDerivedSKU(t, agentRepo, slug+"-mcp-main-tool1", slug, slug+"-mcp-main")
 
 	require.NoError(t, modSvc.reconcileOrphanedSKUs(nil))
 
 	item, err := agentRepo.GetByID(slug + "-mcp-main-tool1")
 	require.NoError(t, err)
-	assert.Equal(t, model.AgentStatusApproved, item.Status, "包 slug 命中现存运行时应保留")
+	assert.Equal(t, model.AgentStatusApproved, item.Status, "driver 命中现存运行时应保留")
+}
+
+// TestReconcileOrphanedSKUs_DeadDriverKeptByPackageDelisted 迁移遗留：旧 SKU 的 driver 指向已删除的
+// 旧运行时，但 package_module 与现存活包同名（如 firecrawl 旧运行时被 firecrawl-mcp-main 取代）——
+// 按包归属会误判为有效；对账应据 driver 可解析性下架旧 SKU，新派生 SKU 保留。
+func TestReconcileOrphanedSKUs_DeadDriverKeptByPackageDelisted(t *testing.T) {
+	modSvc, _, agentRepo := newUninstallTestSvc(t)
+	slug := "firecrawl"
+	// 新运行时（迁移后物化）：ID/DriverID=firecrawl-mcp-main，PackageName=firecrawl
+	registerRuntime(t, modSvc, slug+"-mcp-main", slug, model.SkillRuntimeOriginEleballCloud, true)
+	// 新派生 SKU：driver 指向新运行时 -> 保留
+	createDerivedSKU(t, agentRepo, slug+"-scrape", slug, slug+"-mcp-main")
+	// 旧版遗留 SKU：driver=firecrawl（旧运行时已删除），package_module=firecrawl 命中现存活包名 -> 应下架
+	legacy := &model.AgentItem{ID: slug + "-old-tool", Name: "old", Category: "互联网", Status: model.AgentStatusApproved}
+	mf := model.ToolManifest{
+		ID:     slug + "-old-tool",
+		Name:   "old",
+		Driver: model.ToolDriverType(slug), // 旧运行时 driver 别名
+		Metadata: map[string]string{
+			"auto_sku_module": slug,
+			"module":          slug,
+			"package_module":  slug,
+		},
+	}
+	b, err := json.Marshal(mf)
+	require.NoError(t, err)
+	legacy.ManifestJSON = string(b)
+	require.NoError(t, agentRepo.Create(legacy))
+
+	require.NoError(t, modSvc.reconcileOrphanedSKUs(nil))
+
+	newItem, err := agentRepo.GetByID(slug + "-scrape")
+	require.NoError(t, err)
+	assert.Equal(t, model.AgentStatusApproved, newItem.Status, "新派生 SKU（driver 命中现存运行时）应保留")
+	oldItem, err := agentRepo.GetByID(slug + "-old-tool")
+	require.NoError(t, err)
+	assert.Equal(t, model.AgentStatusDelisted, oldItem.Status, "旧版遗留 SKU（driver 无对应运行时）应下架")
 }
 
 // 手写 SKU manifest 无 package_module 时，rescan 回填后补齐

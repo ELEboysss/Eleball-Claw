@@ -629,13 +629,21 @@ func (s *ModuleService) RescanMarketplace(logger *zap.Logger) error {
 	return s.reconcileOrphanedSKUs(logger)
 }
 
+// genericDriverAliases 通用运行时驱动别名（module/mcp/remote_url）：经 driverRegistry 注册为
+// 统一 SkillRuntimeDriver（启动时注册），执行时按 manifest.metadata.module 定位运行时。
+// 此类 SKU 的有效性取决于其 module 引用的运行时是否存在，而非 driver 本身。
+var genericDriverAliases = map[string]bool{
+	"module":     true,
+	"mcp":        true,
+	"remote_url": true,
+}
+
 // reconcileOrphanedSKUs 清理孤儿能力项（升级兼容，幂等）：
-// 遍历 approved SKU，其 manifest 声明的 module / auto_sku_module / package_module 引用的运行时
-// 已不存在（旧版本注销模块只删运行时、未级联下架 SKU）时，下架该 SKU 卡片。
-// 判定规则：
-//   - driver=none（prompt-only 秘技，无运行时按设计存在）与 driver=builtin 恒跳过；
-//   - 无任何 module 归属元数据的 SKU 跳过（无法判定归属，保守保留）；
-//   - 引用命中任一现存运行时 ID 或包 slug（PackageName）则视为有效，跳过。
+// 遍历 approved 的可执行 SKU（driver≠none/builtin），其 driver 无对应运行时（按 DriverID 精确匹配）
+// 且非通用别名（module/mcp/remote_url）时，判定为死项下架——即使其 metadata.package_module 命中
+// 现存包的包名（迁移场景：旧模块运行时被新 {pkg}-mcp-{key} 运行时取代，旧 SKU 的 driver 指向
+// 已删除的旧运行时，但 package_module 与现存活包同名，按包归属会误判为有效）。
+// 通用别名 SKU 的有效性取决于 metadata.module 引用的运行时（保留原包归属判定）。
 //
 // delisted 保留购买记录与激活态，仅从集市列表（approved 过滤）消失——与 UnregisterModule
 // 级联下架、DeriveSKUs 消失工具下架同一语义。
@@ -643,12 +651,6 @@ func (s *ModuleService) reconcileOrphanedSKUs(logger *zap.Logger) error {
 	if s.repo == nil || s.agentRepo == nil {
 		return nil
 	}
-	warn := func(msg string, fields ...zap.Field) {
-		if logger != nil {
-			logger.Warn(msg, fields...)
-		}
-	}
-
 	// 现存运行时 ID + 包 slug 集合（disabled 也算存在：用户主动禁用不视为孤儿）
 	runtimes, err := s.repo.List()
 	if err != nil {
@@ -677,30 +679,39 @@ func (s *ModuleService) reconcileOrphanedSKUs(logger *zap.Logger) error {
 		if driver == "" || driver == string(model.ToolDriverNone) || driver == string(model.ToolDriverBuiltin) {
 			continue
 		}
-		// 归属键：auto_sku_module 优先（派生 SKU 精确键），其次 module，最后 package_module
-		ref := mf.Metadata["auto_sku_module"]
-		if ref == "" {
-			ref = mf.Metadata["module"]
+		// driver 直接命中现存运行时的 DriverID -> 有效
+		if _, err := s.repo.GetByDriverID(driver); err == nil {
+			continue
 		}
-		if ref == "" {
-			ref = mf.Metadata["package_module"]
-		}
-		if ref == "" {
-			continue // 无归属元数据，保守保留
-		}
-		if existing[ref] {
-			continue // 运行时仍存在
+		// 通用别名：有效性取决于 metadata.module 引用的运行时
+		if genericDriverAliases[driver] {
+			ref := mf.Metadata["auto_sku_module"]
+			if ref == "" {
+				ref = mf.Metadata["module"]
+			}
+			if ref == "" {
+				ref = mf.Metadata["package_module"]
+			}
+			if ref != "" && existing[ref] {
+				continue
+			}
+			// 引用失效 -> 落入下架
 		}
 		if err := s.agentRepo.UpdateStatus(it.ID, model.AgentStatusDelisted); err != nil {
+			warn := func(msg string, fields ...zap.Field) {
+				if logger != nil {
+					logger.Warn(msg, fields...)
+				}
+			}
 			warn("下架孤儿 SKU 失败", zap.String("sku_id", it.ID), zap.Error(err))
 			continue
 		}
 		delisted++
 		if logger != nil {
-			logger.Info("下架孤儿 SKU（模块已注销/移除）",
+			logger.Info("下架孤儿 SKU（driver 无对应运行时/模块已注销）",
 				zap.String("sku_id", it.ID),
-				zap.String("module_ref", ref),
-				zap.String("driver", driver))
+				zap.String("driver", driver),
+				zap.String("module_ref", mf.Metadata["module"]))
 		}
 	}
 	if delisted > 0 && logger != nil {

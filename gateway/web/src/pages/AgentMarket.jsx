@@ -514,8 +514,13 @@ export default function AgentMarket() {
     setPackageBusy(true)
     setMessage('')
     let ok = 0
+    let skipped = 0
     for (const m of members) {
       if (m.is_active) continue
+      if (m.driver_registered === false) {
+        skipped++ // 驱动未注册的死项（后端对账下架前的前端防御），跳过
+        continue
+      }
       try {
         const res = await agentMarketApi.toggleActive(m.id)
         const active = res?.active ?? true
@@ -525,7 +530,7 @@ export default function AgentMarket() {
         continue
       }
     }
-    setMessage(`已激活 ${ok} 项能力`)
+    setMessage(`已激活 ${ok} 项能力${skipped > 0 ? `，跳过 ${skipped} 项失效能力` : ''}`)
     setPackageBusy(false)
   }
 
