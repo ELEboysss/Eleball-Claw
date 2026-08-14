@@ -336,6 +336,11 @@ export default function AgentMarket() {
     }
   }
 
+  // 包级凭证代表成员：包内第一个声明了凭证的 SKU。凭证为模块级（scope=module，
+  // 存 module:<driver> 桶共享），用任一成员打开配置弹窗即可完成整个包的凭证。
+  const packageCredsRep = (pkg) =>
+    (pkg?.members || []).find((m) => Object.keys(parseManifestCredentials(m)).length > 0)
+
   const openCredentialModal = async (agent) => {
     setCredentialError('')
     setCredentialValues({})
@@ -575,6 +580,22 @@ export default function AgentMarket() {
           <span className="mx-1">·</span>
           <span>{agg.activeCount} 已激活</span>
         </div>
+
+        {/* 模块级配置凭证：配置一次，包内全部能力共享生效（scope=module 桶） */}
+        {(() => {
+          const rep = packageCredsRep(pkg)
+          if (!rep) return null
+          return (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); openCredentialModal(rep) }}
+              className="mb-3 w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-dashed border-amber-300 text-amber-600 hover:bg-amber-50 transition-colors"
+              title="模块级凭证：配置一次，包内全部能力共享生效"
+            >
+              <Settings className="w-3.5 h-3.5" /> 配置凭证（模块级）
+            </button>
+          )
+        })()}
 
         <div className="mt-auto flex items-center justify-between gap-3">
           <div className="text-sm">
@@ -1007,7 +1028,7 @@ export default function AgentMarket() {
 
       {/* 购买确认弹窗 */}
       {confirmAgent && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[70] p-4">
           <div className="dialog-panel w-full max-w-sm">
             <div className="p-4 border-b border-eleball-outline flex items-center justify-between">
               <h3 className="font-bold text-eleball-text">确认购买</h3>
@@ -1061,7 +1082,7 @@ export default function AgentMarket() {
 
       {/* SKU 凭证配置弹窗 */}
       {credentialModal && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[70] p-4">
           <div className="dialog-panel w-full max-w-md max-h-[80vh] overflow-auto">
             <div className="p-4 border-b border-eleball-outline flex items-center justify-between">
               <h3 className="font-bold text-eleball-text">{credentialModal.name} 凭证配置</h3>
@@ -1116,7 +1137,7 @@ export default function AgentMarket() {
 
       {/* H2：依赖管理弹窗（模块级，展示包列表 + 风险提示 + 安装按钮） */}
       {depsModal && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[70] p-4">
           <div className="dialog-panel w-full max-w-md max-h-[80vh] overflow-auto">
             <div className="p-4 border-b border-eleball-outline flex items-center justify-between">
               <h3 className="font-bold text-eleball-text flex items-center gap-1.5">
