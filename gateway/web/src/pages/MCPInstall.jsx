@@ -1,8 +1,9 @@
 import { useState, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import useSEO from '../hooks/useSEO'
-import { Loader2, Plus, Trash2, FolderOpen, Play, DownloadCloud, CheckCircle2, Server, Globe, Terminal, Upload, FileText } from 'lucide-react'
-import { moduleGeneratorApi } from '../api/client'
+import { Loader2, Plus, Trash2, FolderOpen, Play, DownloadCloud, CheckCircle2, Server, Globe, Terminal, Upload, FileText, CloudUpload } from 'lucide-react'
+import { moduleGeneratorApi, agentMarketApi } from '../api/client'
+import { useAuth } from '../context/AuthContext'
 import DirectoryPicker from '../components/DirectoryPicker'
 import InterpreterMissingBanner from '../components/InterpreterMissingBanner'
 
@@ -44,6 +45,7 @@ function kvToObject(list) {
 export default function MCPInstall() {
   // 嵌入 DDIY 工作室（Studio）内容区，页头/SEO 由 Studio 统一负责。
 
+  const { isLoggedIn } = useAuth()
   const [transport, setTransport] = useState('mcp_stdio')
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -66,6 +68,8 @@ export default function MCPInstall() {
   const [installing, setInstalling] = useState(false)
   const [installError, setInstallError] = useState(null)
   const [result, setResult] = useState(null)
+  const [submitting, setSubmitting] = useState(false)
+  const [submitMsg, setSubmitMsg] = useState(null)
 
   // M4：批量导入标准 MCP 配置（粘贴 Claude Desktop / Cursor / .mcp.json）
   const [importText, setImportText] = useState('')
@@ -133,6 +137,31 @@ export default function MCPInstall() {
       setInstallError({ message: e.message, data: e.data })
     } finally {
       setInstalling(false)
+    }
+  }
+
+  // 上传 MCP 安装模块到云端审核（POST /claw-console/modules/submit-review，body {module_id: runtime_id}）。
+  // 后端 PackageModule 对 DB-only MCP 运行时物化 package.json 打包（module_archive.go packageMCPRuntime），
+  // 故 module_id 传 result.runtime_id 即可，与「造秘技」走同一条审批发布链路。
+  const handleSubmitReview = async () => {
+    if (!result?.runtime_id) return
+    if (!isLoggedIn) {
+      setSubmitMsg({ ok: false, text: '请先登录账号，再上传到云端审核' })
+      return
+    }
+    setSubmitting(true)
+    setSubmitMsg(null)
+    try {
+      const res = await agentMarketApi.submitForReview(result.runtime_id)
+      const sid = res?.submission_id || ''
+      setSubmitMsg({
+        ok: true,
+        text: `已提交审核${sid ? `（submission_id: ${sid}）` : ''}，待管理员审批通过后即可在「云端模块」目录下载`,
+      })
+    } catch (e) {
+      setSubmitMsg({ ok: false, text: e.message || '提交审核失败' })
+    } finally {
+      setSubmitting(false)
     }
   }
 
@@ -543,10 +572,25 @@ export default function MCPInstall() {
               <Link to="/agents" className="btn-primary text-xs px-4 py-2">
                 去秘技市场配置凭证并启用
               </Link>
+              <button
+                type="button"
+                onClick={handleSubmitReview}
+                disabled={submitting}
+                className="btn-secondary text-xs px-4 py-2 inline-flex items-center gap-1 disabled:opacity-50"
+                title="打包上传到云端，经管理员审批后在「云端模块」目录发布"
+              >
+                {submitting ? <Loader2 className="w-3 h-3 animate-spin" /> : <CloudUpload className="w-3 h-3" />}
+                上传到云端审核
+              </button>
               <span className="text-[11px] text-eleball-text-tertiary">
                 安装的秘技默认未启用；若用了 {'${credentials.KEY}'} 模板环境变量/请求头，需在市场填写实际值后开启。
               </span>
             </div>
+            {submitMsg && (
+              <div className={`text-xs px-3 py-2 rounded-xl ${submitMsg.ok ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'}`}>
+                {submitMsg.text}
+              </div>
+            )}
           </div>
         )}
       </div>
