@@ -21,17 +21,30 @@ Write-Host ">> build_web=$doBuild (NoBuildWeb switch=$NoBuildWeb)" -ForegroundCo
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptDir
 $Gateway = Join-Path $ScriptDir "gateway"
-$Go = Join-Path $RepoRoot ".tools\go\bin\go.exe"
+
+# Toolchain root: git worktrees (.claude/worktrees/...) don't carry .tools/ — the main
+# checkout does. Walk up from RepoRoot until we find .tools\go\bin\go.exe so dev-run works
+# from both the main checkout and any worktree.
+$ToolRoot = $RepoRoot
+$Go = $null
+$cursor = $RepoRoot
+while ($cursor) {
+    $candidate = Join-Path $cursor ".tools\go\bin\go.exe"
+    if (Test-Path $candidate) { $Go = $candidate; $ToolRoot = $cursor; break }
+    $parent = Split-Path -Parent $cursor
+    if ($parent -eq $cursor) { break }
+    $cursor = $parent
+}
 
 # Go env: caches on project disk to avoid C: drive exhaustion
-$env:TMP = Join-Path $RepoRoot ".tools\tmp"
+$env:TMP = Join-Path $ToolRoot ".tools\tmp"
 $env:TEMP = $env:TMP
-$env:GOMODCACHE = Join-Path $RepoRoot ".tools\gomodcache"
-$env:GOCACHE = Join-Path $RepoRoot ".tools\gocache"
+$env:GOMODCACHE = Join-Path $ToolRoot ".tools\gomodcache"
+$env:GOCACHE = Join-Path $ToolRoot ".tools\gocache"
 $env:GOPROXY = "https://goproxy.cn,direct"
 
-if (-not (Test-Path $Go)) {
-    Write-Host "ERROR: Go not found at $Go (ensure main repo .tools\go is present)" -ForegroundColor Red
+if (-not $Go) {
+    Write-Host "ERROR: Go not found under .tools\go\bin\go.exe (searched from $RepoRoot upward). Ensure main repo .tools\go is present" -ForegroundColor Red
     exit 1
 }
 
