@@ -14,15 +14,16 @@ import (
 // 三段能力：skills（纯 prompt，skills/{name}/SKILL.md）、tools（process/docker/http）、mcpServers（stdio/http/sse）。
 // 目录事实源；DB 中的 SkillRuntime/AgentItem 是其物化视图。
 type PackageManifest struct {
-	Name        string                       `json:"name"`
-	Version     string                       `json:"version"`
-	Description string                       `json:"description"`
-	Author      string                       `json:"author,omitempty"`
-	Category    string                       `json:"category,omitempty"`
-	Level       int                          `json:"level,omitempty"`
-	Skills      []PackageSkill               `json:"skills,omitempty"`
-	Tools       []PackageTool                `json:"tools,omitempty"`
-	MCPServers  map[string]PackageMCPServer  `json:"mcpServers,omitempty"`
+	Name        string                      `json:"name"`
+	Version     string                      `json:"version"`
+	Title       string                      `json:"title,omitempty"`
+	Description string                      `json:"description"`
+	Author      string                      `json:"author,omitempty"`
+	Category    string                      `json:"category,omitempty"`
+	Level       int                         `json:"level,omitempty"`
+	Skills      []PackageSkill              `json:"skills,omitempty"`
+	Tools       []PackageTool               `json:"tools,omitempty"`
+	MCPServers  map[string]PackageMCPServer `json:"mcpServers,omitempty"`
 	// AutoSKU 由 mcpServers 经 DeriveSKUs 派生逐工具 SKU（对齐 legacy module.json auto_sku）：
 	// true 时跳过 D5「每 mcpServer 一个通用 SKU」，由 MCP tools/list 派生 mcp__{server}__{tool}。
 	AutoSKU bool `json:"auto_sku,omitempty"`
@@ -37,19 +38,19 @@ type PackageSkill struct {
 // PackageTool 工具项；每项 → 1 个 tool 型 SKU（{package}-{name}）。
 // transport 决定执行方式：process=子进程 / docker=容器镜像 / http=远程服务。
 type PackageTool struct {
-	Name        string                  `json:"name"`
-	Description string                  `json:"description"`
-	Transport   string                  `json:"transport"` // process | docker | http
-	Command     []string                `json:"command,omitempty"`
-	Args        []string                `json:"args,omitempty"`
-	Env         map[string]string       `json:"env,omitempty"`
-	Image       string                  `json:"image,omitempty"`
-	Endpoint    string                  `json:"endpoint,omitempty"`
-	Parameters  *PackageToolParameters  `json:"parameters,omitempty"`
-	Credentials map[string]PackageCredential `json:"credentials,omitempty"`
-	Pricing     *PackagePricing         `json:"pricing,omitempty"`
-	TimeoutSeconds int                  `json:"timeout_seconds,omitempty"`
-	ErrorCodes  []string                `json:"error_codes,omitempty"`
+	Name           string                       `json:"name"`
+	Description    string                       `json:"description"`
+	Transport      string                       `json:"transport"` // process | docker | http
+	Command        []string                     `json:"command,omitempty"`
+	Args           []string                     `json:"args,omitempty"`
+	Env            map[string]string            `json:"env,omitempty"`
+	Image          string                       `json:"image,omitempty"`
+	Endpoint       string                       `json:"endpoint,omitempty"`
+	Parameters     *PackageToolParameters       `json:"parameters,omitempty"`
+	Credentials    map[string]PackageCredential `json:"credentials,omitempty"`
+	Pricing        *PackagePricing              `json:"pricing,omitempty"`
+	TimeoutSeconds int                          `json:"timeout_seconds,omitempty"`
+	ErrorCodes     []string                     `json:"error_codes,omitempty"`
 }
 
 // PackageToolParameters OpenAI function calling 参数 schema（type 必须为 object）。

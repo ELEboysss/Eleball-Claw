@@ -168,6 +168,7 @@ func packagePromptSkillDir(moduleID, moduleDir string) (*PackageModuleResult, er
 	manifest := model.PackageManifest{
 		Name:        model.GenerateModuleID(moduleID),
 		Version:     "0.1.0",
+		Title:       skillmd.Name,
 		Description: skillmd.Description,
 		Level:       1,
 		Skills:      []model.PackageSkill{{Name: skillName, Description: skillmd.Description}},
@@ -274,6 +275,7 @@ func manifestFromSkillRuntime(rt *model.SkillRuntime) model.PackageManifest {
 	m := model.PackageManifest{
 		Name:        rt.ID,
 		Version:     version,
+		Title:       rt.Name,
 		Description: rt.Description,
 		Author:      rt.Actor,
 		Level:       1,

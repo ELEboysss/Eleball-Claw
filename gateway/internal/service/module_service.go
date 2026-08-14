@@ -889,6 +889,7 @@ func writeUserPackageJSON(moduleDir, moduleID string, req UserModuleGenerateRequ
 	pkg := model.PackageManifest{
 		Name:        moduleID,
 		Version:     version,
+		Title:       req.Name,
 		Description: req.Description,
 		Category:    req.Category,
 		Level:       1,

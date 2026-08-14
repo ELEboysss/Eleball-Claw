@@ -108,8 +108,8 @@ const (
 // 旧枚举值兼容别名（T1.4 状态机重构：值改名后映射到新枚举）。
 // 新代码请直接用新常量；旧常量仅保证存量调用点在新语义下编译通过。
 const (
-	SkillRuntimeStatusOnline   = SkillRuntimeStatusActive    // 旧 "online"  -> active
-	SkillRuntimeStatusOffline  = SkillRuntimeStatusInstalled // 旧 "offline" -> installed
+	SkillRuntimeStatusOnline   = SkillRuntimeStatusActive     // 旧 "online"  -> active
+	SkillRuntimeStatusOffline  = SkillRuntimeStatusInstalled  // 旧 "offline" -> installed
 	SkillRuntimeStatusStarting = SkillRuntimeStatusActivating // 旧 "starting" -> activating
 	SkillRuntimeStatusError    = SkillRuntimeStatusDegraded   // 旧 "error"   -> degraded
 )
@@ -125,22 +125,27 @@ type SkillRuntime struct {
 	// 集市扫描默认 cloud（云端）；claw 内置模块扫描默认 builtin；用户造模块/MCP 安装=user。
 	Origin SkillRuntimeOrigin `gorm:"default:cloud" json:"origin"`
 	// Actor 来源主体：user 时为作者（用户名 / MCP 名）；builtin/cloud（eleball 维护）为空。
-	Actor             string                 `json:"actor,omitempty"`
-	Transport         SkillRuntimeTransport  `gorm:"not null" json:"transport"`
-	Deployment        SkillRuntimeDeployment `gorm:"not null" json:"deployment"`
-	Endpoint          string                 `json:"endpoint,omitempty"` // HTTP 类 transport 连接地址
-	Command           string                 `json:"command,omitempty"`  // process/stdio 启动命令
-	Args              string                 `json:"args,omitempty"`     // JSON array
-	Env               string                 `json:"env,omitempty"`      // JSON map
-	WorkDir           string                 `json:"work_dir,omitempty"` // 工作目录
-	DockerComposePath string                 `json:"docker_compose_path,omitempty"`
-	ImageRef          string                 `json:"image_ref,omitempty"`
-	ImageDigest       string                 `json:"image_digest,omitempty"`
-	Signature         string                 `json:"signature,omitempty"`
-	Capabilities      string                 `json:"capabilities"` // JSON ["search", ...]
-	Version           string                 `json:"version"`
-	AuthToken         string                 `gorm:"index:idx_skill_runtime_auth_token" json:"auth_token,omitempty"`
-	Official          bool                   `gorm:"default:false" json:"official"`
+	Actor string `json:"actor,omitempty"`
+	// 包身份（package.json 物化时写入，供 DeriveSKUs 派生 SKU 继承包级分类/展示名）。
+	Category           string                 `json:"category,omitempty"`            // 包分类（package.json category）
+	PackageName        string                 `json:"package_name,omitempty"`        // 包 slug（package.json name）
+	PackageTitle       string                 `json:"package_title,omitempty"`       // 包人类标题（package.json title，空回退 name）
+	PackageDescription string                 `json:"package_description,omitempty"` // 包描述（package.json description）
+	Transport          SkillRuntimeTransport  `gorm:"not null" json:"transport"`
+	Deployment         SkillRuntimeDeployment `gorm:"not null" json:"deployment"`
+	Endpoint           string                 `json:"endpoint,omitempty"` // HTTP 类 transport 连接地址
+	Command            string                 `json:"command,omitempty"`  // process/stdio 启动命令
+	Args               string                 `json:"args,omitempty"`     // JSON array
+	Env                string                 `json:"env,omitempty"`      // JSON map
+	WorkDir            string                 `json:"work_dir,omitempty"` // 工作目录
+	DockerComposePath  string                 `json:"docker_compose_path,omitempty"`
+	ImageRef           string                 `json:"image_ref,omitempty"`
+	ImageDigest        string                 `json:"image_digest,omitempty"`
+	Signature          string                 `json:"signature,omitempty"`
+	Capabilities       string                 `json:"capabilities"` // JSON ["search", ...]
+	Version            string                 `json:"version"`
+	AuthToken          string                 `gorm:"index:idx_skill_runtime_auth_token" json:"auth_token,omitempty"`
+	Official           bool                   `gorm:"default:false" json:"official"`
 	// AutoSKU 是否据 tools/list 自动派生可购买 SKU（默认 false，保护手写 SKU 模块）。
 	// 为 true 时，supervisor/探活成功后由 SkillRuntimeSKUService 合成并同步 AgentItem+ToolManifest，
 	// 免去在 marketplace/<mod>/skus/ 下手写 SKU 文件。stdio 模块凭证须 scope=module。

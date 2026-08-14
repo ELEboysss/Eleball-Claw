@@ -199,17 +199,17 @@ func (s *SkillRuntimeSKUService) deriveAndSync(rt *model.SkillRuntime, tools []M
 }
 
 // buildDerivedManifest 据 MCPTool + SkillRuntime 合成 ToolManifest。
-// - Driver=rt.DriverID：命中 SkillRuntimeDriver 别名，Execute 时 resolveRuntimeID 经 GetByDriverID 定位运行时。
-//   DriverID 已编码能力种类（package 三段：tool→{pkg}-{tool}、mcp→{pkg}-mcp-{key}），即 T2.3
-//   「按 kind 落 driver」：module/mcp 走运行时驱动，none（prompt-only skill）无运行时不会进入本路径。
-// - kind 标注能力种类（tool/mcp），写入 Metadata.package_derived（与 rescan 路径同键）。
-// - version=rt.Version（package.json version），写入 manifest.Version + Metadata.package_version，
-//   供 T4.4 更新检测比对。
-// - Metadata.module=rt.ID：AgentToolLoader 的在线门控（模块离线则不暴露工具）。
-// - Metadata.auto_sku_module=rt.ID：diff 时精确识别本服务派生的 SKU。
-// - Parameters=tool.InputSchema 透传（MCP JSON Schema 即 OpenAI function parameters）。
-// - Actions=[{Name:tool.Name}]：buildToolFunc 取首个 action 作为 tools/call 的 name。
-// - Credentials=rt.CredentialsMap()：从 module.json 透传，供 web 提示用户填写；env 模板 ${credentials.KEY} 引用同名 key。
+//   - Driver=rt.DriverID：命中 SkillRuntimeDriver 别名，Execute 时 resolveRuntimeID 经 GetByDriverID 定位运行时。
+//     DriverID 已编码能力种类（package 三段：tool→{pkg}-{tool}、mcp→{pkg}-mcp-{key}），即 T2.3
+//     「按 kind 落 driver」：module/mcp 走运行时驱动，none（prompt-only skill）无运行时不会进入本路径。
+//   - kind 标注能力种类（tool/mcp），写入 Metadata.package_derived（与 rescan 路径同键）。
+//   - version=rt.Version（package.json version），写入 manifest.Version + Metadata.package_version，
+//     供 T4.4 更新检测比对。
+//   - Metadata.module=rt.ID：AgentToolLoader 的在线门控（模块离线则不暴露工具）。
+//   - Metadata.auto_sku_module=rt.ID：diff 时精确识别本服务派生的 SKU。
+//   - Parameters=tool.InputSchema 透传（MCP JSON Schema 即 OpenAI function parameters）。
+//   - Actions=[{Name:tool.Name}]：buildToolFunc 取首个 action 作为 tools/call 的 name。
+//   - Credentials=rt.CredentialsMap()：从 module.json 透传，供 web 提示用户填写；env 模板 ${credentials.KEY} 引用同名 key。
 func buildDerivedManifest(rt *model.SkillRuntime, t MCPTool, kind, version string) model.ToolManifest {
 	name := t.Name
 	if t.Title != "" {
@@ -237,6 +237,18 @@ func buildDerivedManifest(rt *model.SkillRuntime, t MCPTool, kind, version strin
 		"module":          rt.ID,
 		"auto_sku_module": rt.ID,
 	}
+	// 包级标识：package_module 是前端包卡分组键（= package.json name slug），
+	// package_title/description 供包卡展示。module 键（rt.ID）是 AgentToolLoader 在线门控的
+	// load-bearing 键，保持 rt.ID 不改。
+	if rt.PackageName != "" {
+		metadata["package_module"] = rt.PackageName
+	}
+	if rt.PackageTitle != "" {
+		metadata["package_title"] = rt.PackageTitle
+	}
+	if rt.PackageDescription != "" {
+		metadata["package_description"] = rt.PackageDescription
+	}
 	if kind != "" {
 		metadata["package_derived"] = kind // T2.3：能力种类标注（tool/mcp），与 rescan 路径同键
 	}
@@ -252,6 +264,12 @@ func buildDerivedManifest(rt *model.SkillRuntime, t MCPTool, kind, version strin
 		metadata["pseudo_tool"] = "prompt"
 	}
 
+	// 分类取包级 category（rt.Category），空回退 rt.Name（保 legacy 模块无 category 时的旧行为）。
+	category := rt.Category
+	if category == "" {
+		category = rt.Name
+	}
+
 	return model.ToolManifest{
 		ID:          moduleSKUID(rt.ID, t.Name),
 		Name:        name,
@@ -259,7 +277,7 @@ func buildDerivedManifest(rt *model.SkillRuntime, t MCPTool, kind, version strin
 		Driver:      model.ToolDriverType(rt.DriverID),
 		Version:     version,
 		RuntimeType: runtimeType,
-		Category:    rt.Name,
+		Category:    category,
 		Level:       int(model.AgentLevelHuang),
 		PriceDanwan: 0,
 		Parameters:  params,

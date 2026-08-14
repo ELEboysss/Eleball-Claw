@@ -72,7 +72,7 @@ func (s *ModuleService) RescanPackage(side string, logger *zap.Logger) error {
 // materializePackageDir 物化 package.json 目录（新格式）：
 //   - SkillRuntime：tools 各一条（ID {pkg}-{tool}）+ mcpServers 各一条（ID {pkg}-mcp-{key}）。
 //   - AgentItem：派生（tool→{pkg}-{tool} / skill→{pkg}-skill-{name} / mcp→{pkg}-mcp-{key}）
-//     + 手写 skus/*.json 合并；源消失 → 下架。
+//   - 手写 skus/*.json 合并；源消失 → 下架。
 func (s *ModuleService) materializePackageDir(modDir, side string, logger *zap.Logger) error {
 	modName := filepath.Base(modDir)
 	data, err := os.ReadFile(filepath.Join(modDir, "package.json"))
@@ -96,6 +96,7 @@ func (s *ModuleService) materializePackageDir(modDir, side string, logger *zap.L
 	// 1. tools → SkillRuntime + 派生 SKU
 	for _, t := range pkg.Tools {
 		rt := buildPackageToolRuntime(modName, pkg.Version, t, origin, official, modDir, side)
+		applyPackageIdentity(rt, pkg)
 		s.upsertRuntime(rt, logger)
 		skuID := modName + "-" + t.Name
 		seen[skuID] = true
@@ -107,6 +108,7 @@ func (s *ModuleService) materializePackageDir(modDir, side string, logger *zap.L
 	//    DeriveSKUs 在探活拿到 tools/list 后据此派生。旧通用 SKU 不在 seen 内 → delist 下架。
 	for key, srv := range pkg.MCPServers {
 		rt := buildPackageMCPRuntime(modName, pkg.Version, key, srv, origin, official, pkg.AutoSKU, modDir, side)
+		applyPackageIdentity(rt, pkg)
 		s.upsertRuntime(rt, logger)
 		skuID := modName + "-mcp-" + key
 		if pkg.AutoSKU {
@@ -172,22 +174,25 @@ func (s *ModuleService) materializeLegacyModuleDir(modDir, side string, logger *
 	official := origin.IsOfficial(m.ID)
 
 	rt := &model.SkillRuntime{
-		ID:                m.ID,
-		Name:              m.Name,
-		Description:       m.Description,
-		Source:            model.SkillRuntimeSource(m.Source),
-		Origin:            origin,
-		Actor:             m.Actor,
-		Transport:         transport,
-		Deployment:        deployment,
-		Endpoint:          endpoint,
-		Command:           m.Command,
-		WorkDir:           m.WorkDir,
-		DockerComposePath: m.DockerComposePath,
-		Official:          official,
-		DriverID:          m.Driver.ID,
-		AutoSKU:           m.AutoSKU,
-		Version:           m.Version,
+		ID:                 m.ID,
+		Name:               m.Name,
+		Description:        m.Description,
+		Source:             model.SkillRuntimeSource(m.Source),
+		Origin:             origin,
+		Actor:              m.Actor,
+		Transport:          transport,
+		Deployment:         deployment,
+		Endpoint:           endpoint,
+		Command:            m.Command,
+		WorkDir:            m.WorkDir,
+		DockerComposePath:  m.DockerComposePath,
+		Official:           official,
+		DriverID:           m.Driver.ID,
+		AutoSKU:            m.AutoSKU,
+		Version:            m.Version,
+		PackageName:        m.ID,
+		PackageTitle:       m.Name,
+		PackageDescription: m.Description,
 	}
 	rt.SetArgs(m.Args)
 	rt.SetEnv(m.Env)
@@ -285,6 +290,7 @@ func buildPackageToolRuntime(pkgName, version string, t model.PackageTool, origi
 //     Endpoint=hostUrl（缺省回退 url），DockerComposePath=packageComposePath（.claw.yml 优先）。
 //   - cloud：模块是预部署容器（deployments/docker-compose.prod.yml 随网关同网），只探活不 spawn →
 //     Deployment=external，Endpoint=url。
+//
 // credentials（D-B）：mcpServers 凭证声明经 rt.SetCredentials 透传，逐工具派生 SKU 继承。
 func buildPackageMCPRuntime(pkgName, version, key string, srv model.PackageMCPServer, origin model.SkillRuntimeOrigin, official, autoSKU bool, modDir, side string) *model.SkillRuntime {
 	id := pkgName + "-mcp-" + key
@@ -377,6 +383,41 @@ func (s *ModuleService) upsertRuntime(rt *model.SkillRuntime, logger *zap.Logger
 	}
 }
 
+// ===== 包身份传播 =====
+
+// applyPackageIdentity 把 package.json 的包级身份（category/title/description/name）写进运行时，
+// 供 DeriveSKUs 派生 SKU 时经 buildDerivedManifest 继承包级分类与展示名（title 空回退包 slug）。
+func applyPackageIdentity(rt *model.SkillRuntime, pkg *model.PackageManifest) {
+	rt.PackageName = pkg.Name
+	rt.Category = pkg.Category
+	rt.PackageTitle = packageTitle(pkg)
+	rt.PackageDescription = pkg.Description
+}
+
+// packageTitle 包人类标题：title 优先，空回退 name slug。
+func packageTitle(pkg *model.PackageManifest) string {
+	if pkg == nil {
+		return ""
+	}
+	if pkg.Title != "" {
+		return pkg.Title
+	}
+	return pkg.Name
+}
+
+// packageDerivedMetadata 构造 package 派生 SKU 的 metadata：module/package_module/package_derived 必带，
+// package_title/package_description 据 package.json 补齐（title 空回退包 slug）。
+func packageDerivedMetadata(modName string, pkg *model.PackageManifest, kind string) map[string]string {
+	m := map[string]string{"module": modName, "package_module": modName, "package_derived": kind}
+	if title := packageTitle(pkg); title != "" {
+		m["package_title"] = title
+	}
+	if pkg != nil && pkg.Description != "" {
+		m["package_description"] = pkg.Description
+	}
+	return m
+}
+
 // ===== AgentItem 派生 =====
 
 // upsertPackageToolSKU 派生 tool SKU：{pkg}-{tool}，driver=运行时 DriverID。
@@ -399,7 +440,7 @@ func (s *ModuleService) upsertPackageToolSKU(modName string, pkg *model.PackageM
 		PriceDanwan:    packagePricingDanwan(t.Pricing),
 		Parameters:     params,
 		Actions:        []model.ToolAction{{Name: t.Name, Description: t.Description}},
-		Metadata:       map[string]string{"module": modName, "package_module": modName, "package_derived": "tool"},
+		Metadata:       packageDerivedMetadata(modName, pkg, "tool"),
 		Credentials:    packageCredentialsToModel(t.Credentials),
 		TimeoutSeconds: t.TimeoutSeconds,
 	}
@@ -421,7 +462,7 @@ func (s *ModuleService) upsertPackageMCPDerivedSKU(modName string, pkg *model.Pa
 		Category:    pkg.Category,
 		Level:       pkg.Level,
 		Parameters:  packageParametersMap(nil),
-		Metadata:    map[string]string{"module": modName, "package_module": modName, "package_derived": "mcp"},
+		Metadata:    packageDerivedMetadata(modName, pkg, "mcp"),
 		Credentials: packageCredentialsToModel(srv.Credentials),
 	}
 	s.upsertSKUFromManifest(mf, adminID, now, logger)
@@ -448,7 +489,7 @@ func (s *ModuleService) upsertPackageSkillSKU(modName string, pkg *model.Package
 		Category:    pkg.Category,
 		Level:       pkg.Level,
 		Parameters:  packageParametersMap(nil),
-		Metadata:    map[string]string{"module": modName, "package_module": modName, "package_derived": "skill"},
+		Metadata:    packageDerivedMetadata(modName, pkg, "skill"),
 	}
 	s.upsertPromptSKU(mf, skillmd.Body, adminID, now, logger)
 }
