@@ -100,6 +100,13 @@ export const moduleApi = {
     client.post('/claw-console/modules/submit-review', { module_id: moduleId }),
 }
 
+// ====== 本地秘技 SKU（AgentItem）清单（claw 本地集市 /agents，复用 agentHandler）======
+// 供「本地秘技」页把派生 SKU 归组到所属秘技包（manifest.metadata.package_module）。
+export const agentApi = {
+  listAgents: (page = 1, pageSize = 500) =>
+    client.get(`/agents?page=${page}&page_size=${pageSize}`),
+}
+
 // ====== claw 云端秘技拉取（已购列表，安装到本地）======
 // 契约：GET /v1/market/modules/installed -> ModuleInstallMeta[]（见 specs/api-schema.yml）
 export const clawMarketApi = {
