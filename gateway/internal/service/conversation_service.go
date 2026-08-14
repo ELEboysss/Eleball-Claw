@@ -258,6 +258,8 @@ type UpdateConversationReq struct {
 	Provider  *string `json:"provider,omitempty"`
 	// PermissionMode C1 权限模式（default/acceptEdits/plan/auto），Shift+Tab 切换时 PATCH 持久化。
 	PermissionMode *string `json:"permission_mode,omitempty"`
+	// Mode F3 对话模式（standard/creator），对话页顶栏切换时 PATCH 持久化。
+	Mode      *string `json:"mode,omitempty"`
 	UpdatedAt *int64  `json:"updated_at,omitempty"`
 }
 
@@ -313,6 +315,9 @@ func (s *ConversationService) Update(ctx context.Context, id, userID string, req
 	}
 	if req.PermissionMode != nil {
 		updates["permission_mode"] = string(model.NormalizePermissionMode(*req.PermissionMode))
+	}
+	if req.Mode != nil {
+		updates["mode"] = NormalizeAgentMode(*req.Mode)
 	}
 	return s.repo.UpdateFields(id, updates)
 }

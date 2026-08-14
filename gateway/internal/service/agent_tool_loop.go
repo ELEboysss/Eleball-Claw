@@ -22,6 +22,15 @@ type AgentLLMClient interface {
 	ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan llm.ChatChunk, error)
 }
 
+// ToolCallStart 工具执行前的事件负载（F1：对齐 DSH tool/call 前置，前端即时 running 状态）
+type ToolCallStart struct {
+	Step      int    `json:"step"`
+	CallID    string `json:"call_id,omitempty"`
+	Tool      string `json:"tool"`
+	Arguments string `json:"arguments"`
+	Summary   string `json:"summary,omitempty"` // 参数关键字段一行摘要（命令/路径/URL），供卡片标题
+}
+
 // ToolCallRecord 工具调用记录
 type ToolCallRecord struct {
 	Step      int                    `json:"step"`
@@ -154,6 +163,8 @@ type AssistantOutput struct {
 	ReasoningContent string
 	Delta            string
 	IsFinal          bool
+	// Usage 本次 LLM 调用的 token 用量（F1：step_usage 事件，含缓存命中 CachedTokens）
+	Usage *llm.Usage
 }
 
 // CompactEvent C4：工具循环内压缩事件，透传到 SSE。
@@ -175,11 +186,12 @@ func (l *ToolCallingLoop) Run(
 	onToolCall func(record ToolCallRecord) error,
 	onAssistantOutput func(output AssistantOutput),
 ) (*RunResult, error) {
-	return l.RunWithRegistry(ctx, l.registry, client, model, tools, messages, nil, env, onToolCall, onAssistantOutput, nil)
+	return l.RunWithRegistry(ctx, l.registry, client, model, tools, messages, nil, env, nil, onToolCall, onAssistantOutput, nil)
 }
 
 // RunWithRegistry 执行 Function Calling 循环，使用传入的 Registry（支持动态工具）
 // messageIDs 与 messages 平行，C4 压缩时定位 first_kept_entry_id；onCompactEvent 在压缩开始/结束时触发。
+// onToolStart（F1，可空）在每个工具执行前调用，供 SSE 前置下发 running 状态（对齐 DSH tool/call 前置语义）。
 func (l *ToolCallingLoop) RunWithRegistry(
 	ctx context.Context,
 	registry *ToolRegistry,
@@ -189,6 +201,7 @@ func (l *ToolCallingLoop) RunWithRegistry(
 	messages []llm.Message,
 	messageIDs []string,
 	env *ToolEnv,
+	onToolStart func(start ToolCallStart),
 	onToolCall func(record ToolCallRecord) error,
 	onAssistantOutput func(output AssistantOutput),
 	onCompactEvent func(event CompactEvent),
@@ -382,6 +395,7 @@ func (l *ToolCallingLoop) RunWithRegistry(
 				ReasoningContent: resp.ReasoningContent,
 				Delta:            resp.Delta,
 				IsFinal:          isFinal,
+				Usage:            resp.Usage,
 			})
 		}
 
@@ -435,6 +449,9 @@ func (l *ToolCallingLoop) RunWithRegistry(
 			// AR-26：FunctionGet 元工具拦截。走内嵌标记的模型用它主动拉取工具列表，
 			// 不执行真实工具，返回当前 assistant 的工具能力（RenderToolsAsText）作为 tool_result。
 			if strings.EqualFold(tc.Function.Name, functionGetName) {
+				if onToolStart != nil {
+					onToolStart(ToolCallStart{Step: callIndex, CallID: tc.ID, Tool: functionGetName, Arguments: tc.Function.Arguments, Summary: "拉取工具列表"})
+				}
 				functionGetCalls++
 				var list string
 				if functionGetCalls <= maxFunctionGetCalls {
@@ -469,6 +486,18 @@ func (l *ToolCallingLoop) RunWithRegistry(
 				Step:      callIndex,
 				Tool:      tc.Function.Name,
 				Arguments: tc.Function.Arguments,
+			}
+
+			// F1：工具执行前回调（对齐 DSH tool/call 前置）——前端据此即时渲染 running 卡片，
+			// 覆盖审批等待与实际执行全程；onToolCall 仍在执行结束后携带结果回调。
+			if onToolStart != nil {
+				onToolStart(ToolCallStart{
+					Step:      callIndex,
+					CallID:    tc.ID,
+					Tool:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+					Summary:   summarizeToolCall(tc.Function.Name, input),
+				})
 			}
 
 			tool, resolvedName, ok := registry.Resolve(tc.Function.Name)
@@ -612,9 +641,50 @@ func (l *ToolCallingLoop) RunWithRegistry(
 			ReasoningContent: finalResp.ReasoningContent,
 			Delta:            finalResp.Delta,
 			IsFinal:          true,
+			Usage:            finalResp.Usage,
 		})
 	}
 	return result, nil
+}
+
+// summarizeToolCall 提取工具参数的一行摘要（F1：工具卡片标题，对齐 DSH deriveSummary）。
+// 按工具名取关键字段（Shell→command，文件类→path，FetchURL→url，SearchWeb→query），
+// 缺省时回落到第一个非空字符串参数；截断到 80 字符。
+func summarizeToolCall(toolName string, input map[string]interface{}) string {
+	if input == nil {
+		return ""
+	}
+	keyByTool := map[string]string{
+		"Shell": "command", "BackgroundShell": "command",
+		"ReadFile": "path", "WriteFile": "path", "StrReplaceFile": "path", "ListDir": "path",
+		"Grep": "pattern", "Glob": "pattern",
+		"FetchURL": "url", "SearchWeb": "query",
+	}
+	pick := func(keys ...string) string {
+		for _, k := range keys {
+			if v, ok := input[k].(string); ok && v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+	summary := ""
+	if key, ok := keyByTool[toolName]; ok {
+		summary = pick(key)
+	}
+	if summary == "" {
+		for _, v := range input {
+			if s, ok := v.(string); ok && s != "" {
+				summary = s
+				break
+			}
+		}
+	}
+	// 只取首行，避免多行命令撑爆卡片标题
+	if idx := strings.IndexByte(summary, '\n'); idx >= 0 {
+		summary = summary[:idx]
+	}
+	return truncateByRunes(strings.TrimSpace(summary), 80)
 }
 
 // normalizeToolMessages 防御性校验 messages 中 assistant tool_calls 与 tool messages 的对应关系。

@@ -67,11 +67,26 @@ type AgentService struct {
 	contextFileSvc *ContextFileService
 	// C10：运行中 Session 跟踪器，供前端实时感知会话运行状态。
 	runningSessions *RunningSessionTracker
+	// F3 创造模式：秘技创造/导入依赖（仅 claw 装配）。skillSyncFn 由 main 注入
+	//（service 不依赖 seed 包），签名对齐 seed.SyncPromptSkillDir 去掉 repo/logger。
+	moduleSvc    *ModuleService
+	mcpStdio     *MCPStdioProtocol
+	mcpRegistry  *MCPRegistryClient
+	skillSyncFn  func(dir, skillID, creatorID, creatorName string) (created, synced, skipped int)
 }
 
 // SetUnrestricted 设置是否跳过 VIP 门控（claw 本地不限 Agent 模式）。
 func (s *AgentService) SetUnrestricted(b bool) {
 	s.unrestricted = b
+}
+
+// SetStudioServices 装配创造模式依赖（F3，claw）：模块服务 + stdio 探测协议 + MCP 注册表客户端
+// + prompt 秘技 SKU 同步函数（main 侧适配 seed.SyncPromptSkillDir，避免 service 依赖 seed 包）。
+func (s *AgentService) SetStudioServices(moduleSvc *ModuleService, mcpStdio *MCPStdioProtocol, registryClient *MCPRegistryClient, skillSyncFn func(dir, skillID, creatorID, creatorName string) (int, int, int)) {
+	s.moduleSvc = moduleSvc
+	s.mcpStdio = mcpStdio
+	s.mcpRegistry = registryClient
+	s.skillSyncFn = skillSyncFn
 }
 
 // NewAgentService 创建服务
@@ -237,6 +252,9 @@ type AgentExecuteRequest struct {
 	PermissionMode *string `json:"permission_mode,omitempty"`
 	// PlanFilePath C3/C4：plan 模式下已提交的计划文件路径，用于 accept_edits 模式加载已批准计划并跨 compact 保留。
 	PlanFilePath string `json:"plan_file_path,omitempty"`
+	// Mode F3 对话模式（standard/creator，空=standard）。creator=秘技创造模式：注入创造工具集
+	//（SearchMCPRegistry/InstallMCPServer/CreatePromptSkill）与接入规范 system prompt 段。仅 claw 生效。
+	Mode string `json:"mode,omitempty"`
 }
 
 func (req *AgentExecuteRequest) normalize() {
@@ -387,8 +405,16 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	if planFilePath == "" && permissionMode == model.PermissionModeAcceptEdits {
 		planFilePath = extractPlanPathFromHistory(req.History)
 	}
+	// F3：对话模式解析（会话持久化 < 请求覆盖）。创造模式仅 claw（unrestricted）生效，云端恒 standard。
+	agentMode := AgentModeStandard
+	if s.unrestricted {
+		agentMode = NormalizeAgentMode(conv.Mode)
+		if req.Mode != "" {
+			agentMode = NormalizeAgentMode(req.Mode)
+		}
+	}
 	// 同时持久化到 conversation（AR-23：req.Cwd 非空时一并写回会话，供后续 execute 回填）
-	if req.EnableTools != nil || req.EnableWebSearch != nil || req.SearchProvider != nil || req.Cwd != "" {
+	if req.EnableTools != nil || req.EnableWebSearch != nil || req.SearchProvider != nil || req.Cwd != "" || req.Mode != "" {
 		updateReq := UpdateConversationReq{
 			EnableTools:     req.EnableTools,
 			EnableWebSearch: req.EnableWebSearch,
@@ -397,6 +423,10 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		if req.Cwd != "" {
 			cwdVal := req.Cwd
 			updateReq.Cwd = &cwdVal
+		}
+		if req.Mode != "" {
+			modeVal := agentMode
+			updateReq.Mode = &modeVal
 		}
 		if err := s.conversationSvc.Update(ctx, conv.ID, userID, updateReq); err != nil {
 			s.logger.Warn("同步 conversation 工具/搜索设置失败", zap.Error(err))
@@ -588,6 +618,11 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		}
 	}
 
+	// F3：创造模式注入创造工具集（SearchMCPRegistry/InstallMCPServer/CreatePromptSkill）
+	if agentMode == AgentModeCreator {
+		dynamicTools = append(dynamicTools, s.buildCreatorTools()...)
+	}
+
 	registry := s.registry.Clone()
 	for _, t := range dynamicTools {
 		registry.Register(t)
@@ -601,6 +636,14 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 		agentModelName = s.model
 	}
 	messages, msgIDs := s.buildInitialMessages(ctx, req, preprocessed, userID, conv.TeamID, resolvedCwd, true, s.supportsVision(req.Provider, agentModelName), permissionMode, planFilePath)
+
+	// F3：创造模式在 system prompt 尾部追加秘技接入规范段（静态段在前、动态段在后的顺序不变，
+	// 创造段本身内容稳定，不破坏前缀缓存）。
+	if agentMode == AgentModeCreator && len(messages) > 0 && messages[0].Role == "system" {
+		if content, ok := messages[0].Content.(string); ok {
+			messages[0].Content = content + creatorModeSystemPrompt
+		}
+	}
 
 	// 11. Function Calling 循环
 	// AR-03：执行中余额校验节流计数器（每 balanceCheckEvery 步查一次 DB，避免每轮查库）
@@ -692,18 +735,25 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 	// 自动追加为 user message 进入下一轮，对前端表现为同一 SSE 连接的持续输出。
 	runOneTurn := func(turnMessages []llm.Message, turnMsgIDs []string) (*RunResult, error) {
 		return s.toolLoop.RunWithRegistry(ctx, registry, llmClient, modelName, availableTools, turnMessages, turnMsgIDs, env,
-			func(record ToolCallRecord) error {
+			// F1：工具执行前置事件（对齐 DSH tool/call 前置）——执行/审批全程前端可见 running 态
+			func(start ToolCallStart) {
 				s.writeEvent(w, "tool_call", map[string]interface{}{
-					"step":      record.Step,
-					"tool":      record.Tool,
-					"arguments": json.RawMessage(record.Arguments),
+					"step":      start.Step,
+					"tool":      start.Tool,
+					"arguments": json.RawMessage(start.Arguments),
+					"call_id":   start.CallID,
+					"summary":   start.Summary,
 				})
+			},
+			func(record ToolCallRecord) error {
 				s.writeEvent(w, "tool_result", map[string]interface{}{
 					"step":          record.Step,
 					"tool":          record.Tool,
 					"status":        map[bool]string{true: "succeeded", false: "failed"}[record.Error == ""],
 					"output":        record.Output,
 					"error_message": record.Error,
+					"latency_ms":    record.LatencyMs,
+					"output_size":   record.OutputSize,
 				})
 				// 如果工具产生了可下载资源，下发 resource 事件供前端展示下载入口
 				if record.Output != nil {
@@ -726,6 +776,15 @@ func (s *AgentService) Execute(ctx context.Context, req AgentExecuteRequest, w i
 				}
 				if !output.IsFinal && output.Delta != "" {
 					s.writeEvent(w, "intermediate_answer", map[string]string{"delta": output.Delta})
+				}
+				// F1：每次 LLM 调用后下发逐步 token 用量（含缓存命中），供前端实时用量条
+				if output.Usage != nil {
+					s.writeEvent(w, "step_usage", map[string]interface{}{
+						"prompt_tokens":     output.Usage.PromptTokens,
+						"completion_tokens": output.Usage.CompletionTokens,
+						"total_tokens":      output.Usage.TotalTokens,
+						"cached_tokens":     output.Usage.CachedTokens,
+					})
 				}
 			},
 			func(event CompactEvent) {
@@ -1367,6 +1426,13 @@ func (s *AgentService) buildUsagePayload(totalUsage *llm.Usage, stepCount int, b
 		payload["total_tokens"] = total
 		payload["prompt_tokens"] = totalUsage.PromptTokens
 		payload["completion_tokens"] = totalUsage.CompletionTokens
+		// F1：缓存命中可见性（对齐 DSH cacheRead 计量；Kimi/Gemini 上游返回 cached_tokens）
+		if totalUsage.CachedTokens > 0 {
+			payload["cached_tokens"] = totalUsage.CachedTokens
+			if totalUsage.PromptTokens > 0 {
+				payload["cache_hit_rate"] = float64(totalUsage.CachedTokens) / float64(totalUsage.PromptTokens)
+			}
+		}
 		if s.billingService != nil {
 			payload["cost_amount"] = s.billingService.EstimateCost(billingProvider, billingModel, CurrencyDanwan, totalUsage)
 			payload["currency"] = CurrencyDanwan

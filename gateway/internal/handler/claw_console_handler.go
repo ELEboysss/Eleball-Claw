@@ -28,6 +28,8 @@ type ClawConsoleHandler struct {
 	processWorkDirs      []string                      // process 沙箱允许的工作目录前缀（探测时校验）
 	moduleService        *service.ModuleService        // /mcp/generate 写模块 + rescan + autostart
 	interpreterBootstrap *service.InterpreterBootstrap // H1 托管解释器安装（python-build-standalone）
+	dshPluginSvc         *service.DSHPluginService     // F4：DSH 插件（npm 包）预览/导入
+	skillSyncFn          func(dir, skillID, creatorID, creatorName string) (int, int, int) // F4：SKU 定向同步（main 适配 seed）
 }
 
 // NewClawConsoleHandler 创建 claw 控制台处理器
@@ -53,6 +55,72 @@ func (h *ClawConsoleHandler) SetModuleService(s *service.ModuleService) {
 // SetInterpreterBootstrap 注入托管解释器引导器（H1，供 /tools/install-interpreter）
 func (h *ClawConsoleHandler) SetInterpreterBootstrap(b *service.InterpreterBootstrap) {
 	h.interpreterBootstrap = b
+}
+
+// SetDSHPluginService 注入 DSH 插件导入服务（F4，/dsh-plugin/preview|import）
+func (h *ClawConsoleHandler) SetDSHPluginService(s *service.DSHPluginService) {
+	h.dshPluginSvc = s
+}
+
+// SetSkillSyncFn 注入 prompt 秘技 SKU 定向同步函数（F4，main 侧适配 seed.SyncPromptSkillDir）
+func (h *ClawConsoleHandler) SetSkillSyncFn(fn func(dir, skillID, creatorID, creatorName string) (int, int, int)) {
+	h.skillSyncFn = fn
+}
+
+// dshPluginPreviewRequest /v1/claw-console/dsh-plugin/preview 请求体
+type dshPluginPreviewRequest struct {
+	Package string `json:"package"` // npm 包名（可带 @version / @scope）
+}
+
+// PreviewDSHPlugin 预览 DSH 插件（npm 包）可导入内容（F4）。
+// POST /v1/claw-console/dsh-plugin/preview：拉 tarball 扫描 SKILL.md + mcpServers，不写盘。
+func (h *ClawConsoleHandler) PreviewDSHPlugin(c *gin.Context) {
+	var req dshPluginPreviewRequest
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Package) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "package 不能为空（npm 包名，可带 @version）"})
+		return
+	}
+	if h.dshPluginSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 2002, "message": "DSH 插件服务未初始化"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	defer cancel()
+	preview, err := h.dshPluginSvc.Preview(ctx, req.Package)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": preview})
+}
+
+// dshPluginImportRequest /v1/claw-console/dsh-plugin/import 请求体
+type dshPluginImportRequest struct {
+	Package    string   `json:"package"`
+	Skills     []string `json:"skills"`      // 选中的包内 SKILL.md 路径；空=全部
+	MCPServers []string `json:"mcp_servers"` // 选中的 MCP server 名；空=不导入
+}
+
+// ImportDSHPlugin 导入 DSH 插件选中项（F4）。
+// POST /v1/claw-console/dsh-plugin/import：SKILL.md → 秘技包落盘+SKU 同步；mcpServers → 探测安装。
+func (h *ClawConsoleHandler) ImportDSHPlugin(c *gin.Context) {
+	var req dshPluginImportRequest
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Package) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "package 不能为空"})
+		return
+	}
+	if h.dshPluginSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 2002, "message": "DSH 插件服务未初始化"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 120*time.Second)
+	defer cancel()
+	result, err := h.dshPluginSvc.Import(ctx, req.Package, req.Skills, req.MCPServers, c.GetString("user_id"), h.skillSyncFn)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": err.Error(), "data": result})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": result})
 }
 
 // tokenUsageStats 本地 token 用量聚合

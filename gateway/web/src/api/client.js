@@ -237,6 +237,11 @@ export const moduleGeneratorApi = {
   // E4：生成 prompt-only 秘技（Anthropic 标准 SKILL.md）-> { skill_id, sku_id, dir }
   // body = { skill_id?, name, description, category?, body, username? }；失败 code=2002 + 可读 message。
   generateSkill: (body) => client.post('/claw-console/skills/generate', body, { timeout: 30000 }),
+  // F4：预览 DSH 插件（npm 包）-> { package, version, description, skills: [{path,slug,name,description}], mcp_servers: [...] }
+  dshPluginPreview: (pkg) => client.post('/claw-console/dsh-plugin/preview', { package: pkg }, { timeout: 65000 }),
+  // F4：导入 DSH 插件选中项 -> { skills: [skill_id], mcps: [name], skipped: [...] }
+  // body = { package, skills?: [path...]（空=全部）, mcp_servers?: [name...]（空=不导入） }
+  dshPluginImport: (body) => client.post('/claw-console/dsh-plugin/import', body, { timeout: 130000 }),
   // H1：安装托管解释器（python/node，SHA-256 校验）-> { interpreter, path, version, source, reused }
   // 解释器缺失横幅「自动安装」按钮调用；系统已有则直接返回（source=system）。下载 ~30MB，超时放宽到 5 分钟。
   installInterpreter: (body) => client.post('/claw-console/tools/install-interpreter', body, { timeout: 300000 }),

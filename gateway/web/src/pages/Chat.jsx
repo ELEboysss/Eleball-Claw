@@ -28,7 +28,8 @@ import {
   GitFork,
   Folder,
   PanelRight,
-  Shield
+  Shield,
+  Sparkles
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { useChat } from '../context/ChatContext'
@@ -137,6 +138,8 @@ export default function Chat() {
   const [searchProvider, setSearchProvider] = useState('baidu')
   // C1 权限模式（default/acceptEdits/plan）：控制工具执行审批策略，随会话持久化
   const [permissionMode, setPermissionMode] = useState('default')
+  // F3 对话模式（standard/creator）：creator=秘技创造模式（注入创造工具集），随会话持久化
+  const [agentMode, setAgentMode] = useState('standard')
   const [availableSearchProviders, setAvailableSearchProviders] = useState([])
   // 会话绑定的助手（'' = 默认，全部已激活工具）与我的助手列表
   const [assistantId, setAssistantId] = useState('')
@@ -216,7 +219,9 @@ export default function Chat() {
     isStreaming: agentIsStreaming,
     streamingMessage: agentStreamingMessage,
     // C10 T5：运行中 Session 集合，传给 AgentSessionList 显示实时指示
-    runningSessionIds: agentRunningSessionIds
+    runningSessionIds: agentRunningSessionIds,
+    // F1：执行中实时 token 用量（step_usage 累计）
+    liveUsage: agentLiveUsage
   } = useAgent()
 
   // 模型 Profile 状态（与 App 端 ModelProfile 对齐），按当前登录用户隔离
@@ -496,6 +501,8 @@ export default function Chat() {
     setEnableWebSearch(!!currentConversation.enableWebSearch)
     // C1：恢复会话持久化的权限模式（旧数据无该字段时回落 default）
     setPermissionMode(currentConversation.permissionMode || 'default')
+    // F3：恢复会话持久化的对话模式（旧数据回落 standard）
+    setAgentMode(currentConversation.mode || 'standard')
     const savedProvider = currentConversation.searchProvider || 'baidu'
     const exists = availableSearchProviders.some((p) => p.name === savedProvider)
     setSearchProvider(exists ? savedProvider : (availableSearchProviders[0]?.name || 'baidu'))
@@ -544,13 +551,14 @@ export default function Chat() {
       !!currentConversation.enableWebSearch !== enableWebSearch ||
       (currentConversation.searchProvider || 'baidu') !== searchProvider ||
       (currentConversation.assistantId || '') !== assistantId ||
-      (currentConversation.permissionMode || 'default') !== permissionMode
+      (currentConversation.permissionMode || 'default') !== permissionMode ||
+      (currentConversation.mode || 'standard') !== agentMode
     if (!needsUpdate) return
 
     updateConversations((prev) =>
       prev.map((c) =>
         c.id === currentConversation.id
-          ? { ...c, enableTools, enableWebSearch, searchProvider, assistantId, permissionMode, updatedAt: Date.now() }
+          ? { ...c, enableTools, enableWebSearch, searchProvider, assistantId, permissionMode, mode: agentMode, updatedAt: Date.now() }
           : c
       )
     )
@@ -561,10 +569,11 @@ export default function Chat() {
         search_provider: searchProvider,
         // 空字符串 = 清除会话绑定的助手
         assistant_id: assistantId,
-        permission_mode: permissionMode
+        permission_mode: permissionMode,
+        mode: agentMode
       })
       .catch(() => {})
-  }, [enableTools, enableWebSearch, searchProvider, assistantId, permissionMode, currentConversation?.id, isLoggedIn])
+  }, [enableTools, enableWebSearch, searchProvider, assistantId, permissionMode, agentMode, currentConversation?.id, isLoggedIn])
 
   // AR-11：cwd 变化或手动刷新时拉取 Git 状态，供 FileExplorer 色标
   useEffect(() => {
@@ -1279,7 +1288,8 @@ export default function Chat() {
           searchProvider,
           assistantId,
           cwd,
-          permissionMode
+          permissionMode,
+          mode: agentMode
         })
       } catch (err) {
         const errorMsg = err.message || 'Agent 执行失败'
@@ -1952,6 +1962,7 @@ export default function Chat() {
         </div>
 
         {/* AR-07：用量可见性状态条（tokens/步数/成本/上下文规模），Agent 完成后展示；claw 无 cost_amount 自动裁剪成本 */}
+        {/* F1：缓存命中率展示（cached_tokens/prompt_tokens，对齐 DSH cacheRead 计量） */}
         {lastUsage && agentStatus === 'done' && !loading && (
           <div className="flex-shrink-0 bg-eleball-surface/95 border-b border-eleball-outline-variant px-4 py-1 flex items-center gap-3 text-[11px] text-eleball-text-secondary overflow-x-auto">
             <span className="inline-flex items-center gap-1 whitespace-nowrap">
@@ -1966,8 +1977,24 @@ export default function Chat() {
             {lastUsage.prompt_tokens != null && (
               <span className="whitespace-nowrap">上下文 {formatTokens(lastUsage.prompt_tokens)}</span>
             )}
+            {lastUsage.cached_tokens > 0 && (
+              <span className="whitespace-nowrap text-green-600" title="命中提示缓存的 token 数（不计费的重复上下文）">
+                缓存命中 {formatTokens(lastUsage.cached_tokens)}
+                {lastUsage.cache_hit_rate != null && `（${Math.round(lastUsage.cache_hit_rate * 100)}%）`}
+              </span>
+            )}
             {lastUsage.cost_amount != null && (
               <span className="whitespace-nowrap">{lastUsage.cost_amount} 弹丸</span>
+            )}
+          </div>
+        )}
+
+        {/* F1：执行中实时用量条（step_usage 累计，含缓存命中） */}
+        {agentLiveUsage && (agentStatus === 'executing' || agentStatus === 'answering') && (
+          <div className="flex-shrink-0 bg-eleball-surface/95 border-b border-eleball-outline-variant px-4 py-1 flex items-center gap-3 text-[11px] text-eleball-text-secondary overflow-x-auto">
+            <span className="whitespace-nowrap">已用 {formatTokens(agentLiveUsage.totalTokens)} tokens</span>
+            {agentLiveUsage.cachedTokens > 0 && (
+              <span className="whitespace-nowrap text-green-600">缓存命中 {formatTokens(agentLiveUsage.cachedTokens)}</span>
             )}
           </div>
         )}
@@ -2322,6 +2349,42 @@ export default function Chat() {
                       <Shield className="w-3.5 h-3.5" />
                       <span>{permissionMode === 'plan' ? '计划' : permissionMode === 'acceptEdits' ? '自动编辑' : permissionMode === 'auto' ? '自动' : permissionMode === 'strict' ? '严格' : '默认'}</span>
                     </button>
+                  )}
+                  {/* F3：标准/创造模式切换（借鉴 DSH 创造流）。creator=对话内按接入规范造秘技并导入 */}
+                  {enableTools && supportsAgent && (
+                    <div
+                      className="inline-flex items-center rounded-full border border-eleball-outline text-xs font-medium overflow-hidden"
+                      role="group" aria-label="对话模式"
+                      title="标准：日常对话；创造：对话式造秘技（搜索/安装 MCP、创建提示词秘技，自动按接入规范导入）"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setAgentMode('standard')}
+                        disabled={loading}
+                        aria-pressed={agentMode !== 'creator'}
+                        className={`px-2.5 py-1.5 transition-colors disabled:opacity-50 ${
+                          agentMode !== 'creator'
+                            ? 'bg-eleball-primary text-white'
+                            : 'bg-transparent text-eleball-text-secondary hover:bg-gray-50'
+                        }`}
+                      >
+                        标准
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAgentMode('creator')}
+                        disabled={loading}
+                        aria-pressed={agentMode === 'creator'}
+                        className={`px-2.5 py-1.5 transition-colors disabled:opacity-50 inline-flex items-center gap-1 ${
+                          agentMode === 'creator'
+                            ? 'bg-amber-500 text-white'
+                            : 'bg-transparent text-eleball-text-secondary hover:bg-gray-50'
+                        }`}
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        创造
+                      </button>
+                    </div>
                   )}
                   {enableTools && supportsAgent && (
                     <button

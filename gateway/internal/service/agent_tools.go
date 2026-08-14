@@ -1064,13 +1064,26 @@ func (r *ToolRegistry) toolShell(ctx context.Context, input map[string]interface
 	}
 	headLimit := parseHeadLimit(input["head_limit"], defaultShellHeadLimit)
 
-	output, truncated, exitCode, err := r.runner.ShellStream(ctx, command, args, env.Cwd, headLimit)
+	// F2：截断时完整输出 spill 到 session 目录（模型可 ReadFile 分段查看全文）
+	spillDir := ""
+	if env != nil && env.Sandbox != nil {
+		if dir, dErr := env.Sandbox.SessionDir(env.UserID, env.SessionID); dErr == nil && dir != "" {
+			spillDir = filepath.Join(dir, "spill")
+		}
+	}
+	output, truncated, spillPath, exitCode, err := r.runner.ShellStream(ctx, command, args, env.Cwd, headLimit, spillDir)
+	if truncated && spillPath != "" {
+		output += fmt.Sprintf("\n[输出已截断；完整输出已保存: %s（可用 ReadFile 按 offset/limit 分段查看）]", spillPath)
+	}
 	result := map[string]interface{}{
 		"command":   command,
 		"args":      args,
 		"output":    output,
 		"truncated": truncated,
 		"exit_code": exitCode,
+	}
+	if spillPath != "" {
+		result["spill_path"] = spillPath
 	}
 	if err != nil {
 		result["error"] = err.Error()

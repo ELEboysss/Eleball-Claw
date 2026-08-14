@@ -77,9 +77,9 @@ export default function SkillGenerator() {
       <div className="card mb-4">
         <SectionTitle
           icon={Sparkles}
-          desc="纯指令/人格/方法论类能力无需代码：一个 Anthropic 标准 SKILL.md 即一个秘技，购买/激活后作为 SystemPrompt 注入对话。该文件可直接被 Claude Code / Cursor / DSH 等平台复用。"
+          desc="纯指令/人格/方法论类能力无需代码：一个 Anthropic 标准 SKILL.md 即一个秘技，购买/激活后作为 SystemPrompt 注入对话。该文件可直接被 Claude Code / Cursor / DSH 等平台复用；也可在对话页「创造」模式中让 Agent 自动生成。"
         >
-          写提示词造秘技（SKILL.md）
+          Skill 加载（SKILL.md 提示词秘技）
         </SectionTitle>
 
         <div className="space-y-3">

@@ -449,6 +449,11 @@ func main() {
 	// Agent Team P5：装配 BYOK api_key 加密器
 	assistantService.SetKeyEncryption(keyEncryption)
 	agentWorkflowService.SetAssistantService(assistantService)
+	// F3：创造模式（对话内造秘技）依赖装配——模块服务/stdio 探测/MCP 注册表 + prompt 秘技 SKU 同步适配
+	skillSyncFn := func(dir, skillID, creatorID, creatorName string) (int, int, int) {
+		return seed.SyncPromptSkillDir(agentRepo, filepath.Dir(dir), skillID, creatorID, creatorName, logger)
+	}
+	agentWorkflowService.SetStudioServices(moduleService, mcpStdioProtocol, service.NewMCPRegistryClient(), skillSyncFn)
 	// 组共享记忆服务（Agent Team P2）：执行前检索注入 + 执行后异步提取
 	agentWorkflowService.SetTeamMemoryService(teamMemoryService)
 	// C8：项目记忆文件加载服务（CLAUDE.md / AGENTS.md 自动注入 system prompt）
@@ -505,6 +510,9 @@ func main() {
 	// H2 装依赖（moduleService.InstallDeps）复用同一引导器确保解释器可用。
 	interpreterBootstrap := service.NewInterpreterBootstrap(logger)
 	clawConsoleHandler.SetInterpreterBootstrap(interpreterBootstrap)
+	// F4：DSH 插件（npm 包）预览/导入 + SKU 定向同步
+	clawConsoleHandler.SetDSHPluginService(service.NewDSHPluginService(moduleService, mcpStdioProtocol))
+	clawConsoleHandler.SetSkillSyncFn(skillSyncFn)
 	moduleService.SetInterpreterBootstrap(interpreterBootstrap)
 	clawCwdHandler := handler.NewClawCwdHandler()
 	clawFilesHandler := handler.NewClawFilesHandler(agentSandbox)

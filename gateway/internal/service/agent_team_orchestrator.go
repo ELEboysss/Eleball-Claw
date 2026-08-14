@@ -355,19 +355,27 @@ func (s *AgentService) executeCallAssistant(ctx context.Context, input map[strin
 	subCtx, cancel := context.WithTimeout(ctx, callAssistantTimeout)
 	defer cancel()
 	result, runErr := s.toolLoop.RunWithRegistry(subCtx, subRegistry, subClient, subModel, buildSubToolSchemas(subTools), messages, nil, childEnv,
+		// F1：子工具执行前置事件（与主循环同一 SSE 流，带 sub 标记嵌套分组）
+		func(start ToolCallStart) {
+			if rt.writer != nil {
+				s.writeEvent(rt.writer, "tool_call", map[string]interface{}{
+					"step": start.Step, "tool": start.Tool, "arguments": json.RawMessage(start.Arguments),
+					"call_id": start.CallID, "summary": start.Summary,
+					"session_id": childSession.ID, "parent_session_id": parentSessionID, "sub": true,
+				})
+			}
+		},
 		// Agent Team P5：子任务进度流式下发，事件带 session_id/parent_session_id/sub 标记，前端据此嵌套分组
 		func(record ToolCallRecord) error {
 			if rt.writer != nil {
-				s.writeEvent(rt.writer, "tool_call", map[string]interface{}{
-					"step": record.Step, "tool": record.Tool, "arguments": json.RawMessage(record.Arguments),
-					"session_id": childSession.ID, "parent_session_id": parentSessionID, "sub": true,
-				})
 				s.writeEvent(rt.writer, "tool_result", map[string]interface{}{
 					"step":              record.Step,
 					"tool":              record.Tool,
 					"status":            map[bool]string{true: "succeeded", false: "failed"}[record.Error == ""],
 					"output":            record.Output,
 					"error_message":     record.Error,
+					"latency_ms":        record.LatencyMs,
+					"output_size":       record.OutputSize,
 					"session_id":        childSession.ID,
 					"parent_session_id": parentSessionID,
 					"sub":               true,

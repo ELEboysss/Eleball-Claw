@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -122,13 +123,38 @@ func setTreeKill(cmd *exec.Cmd) {
 	cmd.WaitDelay = 5 * time.Second
 }
 
+// spillFullOutput 把完整输出写入 spillDir 下的新文件（F2，借鉴 DSH spill），返回文件路径。
+// spillDir 为空或写入失败时返回空串（不阻断主流程）。调用方负责提示模型可 ReadFile 查看。
+func spillFullOutput(spillDir, full string) string {
+	if spillDir == "" || full == "" {
+		return ""
+	}
+	if err := os.MkdirAll(spillDir, 0750); err != nil {
+		return ""
+	}
+	f, err := os.CreateTemp(spillDir, "shell-*.log")
+	if err != nil {
+		return ""
+	}
+	if _, err := f.WriteString(full); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return ""
+	}
+	if err := f.Close(); err != nil {
+		return ""
+	}
+	return f.Name()
+}
+
 // runStreamingCommand 流式执行已构造的 cmd，合并 stdout/stderr，按 headLimit 行截断。
-// headLimit<=0 表示不限。返回合并输出、是否截断、退出码与错误（非零退出时 err 为 ExitError 包裹）。
+// headLimit<=0 表示不限。spillDir 非空时，截断发生后把完整输出（已缓冲头部+后续行）落盘，
+// 返回 spillPath。返回合并输出、是否截断、spill 路径、退出码与错误（非零退出时 err 为 ExitError 包裹）。
 //
 // 流式而非 CombinedOutput：通过 io.Pipe 让 stdout/stderr 写入同一管道（exec 检测到
 // Stdout==Stderr 同值时复用单一管道），读取侧按行累计至 headLimit 后继续 drain（不阻塞子进程），
 // 既避免一次性缓冲海量输出，又能在截断后仍拿到退出码。
-func runStreamingCommand(ctx context.Context, cmd *exec.Cmd, headLimit int) (output string, truncated bool, exitCode int, err error) {
+func runStreamingCommand(ctx context.Context, cmd *exec.Cmd, headLimit int, spillDir string) (output string, truncated bool, spillPath string, exitCode int, err error) {
 	pr, pw := io.Pipe()
 	cmd.Stdout = pw
 	cmd.Stderr = pw // 同值 -> exec 合并为单一管道
@@ -136,6 +162,7 @@ func runStreamingCommand(ctx context.Context, cmd *exec.Cmd, headLimit int) (out
 	type readResult struct {
 		output    string
 		truncated bool
+		spillPath string
 	}
 	resCh := make(chan readResult, 1)
 
@@ -145,11 +172,33 @@ func runStreamingCommand(ctx context.Context, cmd *exec.Cmd, headLimit int) (out
 		var b strings.Builder
 		trunc := false
 		count := 0
+		// F2 spill：截断开始后懒创建 spill 文件，先回写已缓冲头部，再流式写入后续行
+		var spillFile *os.File
+		spill := ""
+		defer func() {
+			if spillFile != nil {
+				spillFile.Close()
+			}
+		}()
 		for {
 			line, rerr := reader.ReadString('\n')
 			if line != "" {
 				if headLimit > 0 && count >= headLimit {
 					trunc = true // 超限：继续读取 drain，但不累计，防子进程写阻塞
+					if spillDir != "" {
+						if spillFile == nil {
+							if mkErr := os.MkdirAll(spillDir, 0750); mkErr == nil {
+								if f, cErr := os.CreateTemp(spillDir, "shell-*.log"); cErr == nil {
+									spillFile = f
+									spill = f.Name()
+									spillFile.WriteString(b.String()) // 回写头部，保证 spill 是完整输出
+								}
+							}
+						}
+						if spillFile != nil {
+							spillFile.WriteString(line)
+						}
+					}
 				} else {
 					b.WriteString(line)
 					count++
@@ -159,14 +208,14 @@ func runStreamingCommand(ctx context.Context, cmd *exec.Cmd, headLimit int) (out
 				break // io.EOF 或管道关闭
 			}
 		}
-		resCh <- readResult{output: b.String(), truncated: trunc}
+		resCh <- readResult{output: b.String(), truncated: trunc, spillPath: spill}
 	}()
 
 	startErr := cmd.Start()
 	if startErr != nil {
 		pw.Close()
 		<-resCh
-		return "", false, -1, startErr
+		return "", false, "", -1, startErr
 	}
 
 	waitErr := cmd.Wait()
@@ -182,7 +231,7 @@ func runStreamingCommand(ctx context.Context, cmd *exec.Cmd, headLimit int) (out
 		}
 		err = fmt.Errorf("shell 执行失败: %w", waitErr)
 	}
-	return res.output, res.truncated, exitCode, err
+	return res.output, res.truncated, res.spillPath, exitCode, err
 }
 
 // truncateLines 按行从头截断（用于 builtin 输出补截断）。limit<=0 不截断。

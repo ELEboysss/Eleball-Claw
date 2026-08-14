@@ -62,3 +62,18 @@ claw 当前的 Shell 工具是**白名单沙箱**，约束来自云端多租户�
 ## 5. 语言
 
 工具层用 Go 实现（`os/exec` 完全支持管道/流式/后台）。语言切换仅在嵌入式目标或实测性能瓶颈时评估（见 eleball 主仓路线图 D1）。
+
+## 6. DSH 对齐增强（F 系列）
+
+对照 DeepSeek Harness（DSH）agent loop 调研后的吸收项（plan：主仓 `.claude/plans/dsh-agent-loop-alignment-20260815.md`）：
+
+- **工具即时状态（F1）**：tool loop 新增 `onToolStart` 回调，`tool_call` SSE 事件**前置到工具执行前**（含 `call_id` 与参数一行摘要 `summary`），覆盖审批等待与执行全程；`tool_result` 增加 `latency_ms`/`output_size`。前端卡片即时显示 running/耗时/摘要。此前两个事件都在执行后同一回调发出，running 态不可见。
+- **逐步用量（F1）**：每次 LLM 调用后下发 `step_usage` 事件（prompt/completion/total/cached）；`done` 的 usage 增加 `cached_tokens`/`cache_hit_rate`（Kimi/Gemini 上游返回的提示缓存命中）。前端执行中实时用量条 + 完成后缓存命中率。
+- **原子写（F2）**：`FileSandbox.WriteFile` 改 tmp+rename（借鉴 dsh-atomic-write），rename 失败回退直接写。
+- **Shell spill（F2）**：输出超 `head_limit` 截断时，完整输出落盘 `{session}/spill/shell-*.log`，结果附 `spill_path` 并在 output 末尾提示模型用 ReadFile 分段查看（借鉴 DSH spill；此前截断部分直接丢弃）。
+- **创造工具（F3）**：creator 模式注入 `SearchMCPRegistry`（只读）/`InstallMCPServer`/`CreatePromptSkill` 三工具，走与 DIY 工作室相同的 ModuleService 路径。
+
+### 明确不做的取舍
+- **不全量事件溯源重写**：DSH 的 session event log + surface projection 属架构级重写；claw 现有消息表 + C4 compaction 已覆盖需求，仅汲取事件协议与状态思想。
+- **不做并行工具调度**：审批器（sseApprover）与 SSE writer 非并发安全，DSH 式 parallel pool 风险大于收益（记 backlog）。
+

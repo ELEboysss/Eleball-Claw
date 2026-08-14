@@ -34,11 +34,11 @@ func (m *mockRunner) Shell(ctx context.Context, command string, args []string, c
 	return m.shellOutput, m.shellErr
 }
 
-// ShellStream AR-E6：mock 流式接口，直接回 shellOutput/exit 0，忽略 headLimit 截断。
-func (m *mockRunner) ShellStream(ctx context.Context, command string, args []string, cwd string, headLimit int) (string, bool, int, error) {
+// ShellStream AR-E6：mock 流式接口，直接回 shellOutput/exit 0，忽略 headLimit 截断与 spill。
+func (m *mockRunner) ShellStream(ctx context.Context, command string, args []string, cwd string, headLimit int, spillDir string) (string, bool, string, int, error) {
 	m.lastShellCmd = command
 	m.lastShellArgs = args
-	return m.shellOutput, false, 0, m.shellErr
+	return m.shellOutput, false, "", 0, m.shellErr
 }
 
 // mockSearchProvider 搜索提供者桩
