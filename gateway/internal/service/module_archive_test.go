@@ -294,3 +294,72 @@ func TestPackageModule_NotFound(t *testing.T) {
 	_, err := svc.PackageModule("does-not-exist")
 	require.Error(t, err)
 }
+
+// TestPackageModule_PromptSkill 验证「只有 SKILL.md 无 package.json/module.json」的 prompt-only skill
+// 打包：物化最小 package.json（skills:[{name}]）+ skills/<name>/SKILL.md（原文保真）+ .origin；
+// 解压回扫按 package 布局派生 prompt-only SKU（{id}-skill-{name}，driver=none，SystemPrompt=body）。
+func TestPackageModule_PromptSkill(t *testing.T) {
+	svc, agentRepo, root := newRescanTestSvc(t)
+
+	const moduleID = "copywriting"
+	skillMD := "---\nname: copywriting\ndescription: 文案撰写专家\n---\n\n你是文案撰写专家。\n"
+	require.NoError(t, os.MkdirAll(filepath.Join(root, moduleID), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, moduleID, "SKILL.md"), []byte(skillMD), 0o644))
+
+	res, err := svc.PackageModule(moduleID)
+	require.NoError(t, err)
+	assert.Equal(t, "copywriting.tar.gz", res.Filename)
+
+	files := readTarGz(t, res.Data)
+	assert.Contains(t, files, "package.json")
+	assert.Contains(t, files, "skills/copywriting/SKILL.md")
+	assert.Contains(t, files, ".origin")
+	assert.Equal(t, "user", strings.TrimSpace(files[".origin"]), "prompt skill 缺 .origin 时默认 user")
+
+	// 物化的 package.json：name/version/description + skills[{name,description}]
+	var pm model.PackageManifest
+	require.NoError(t, json.Unmarshal([]byte(files["package.json"]), &pm))
+	assert.Equal(t, "copywriting", pm.Name)
+	assert.Equal(t, "0.1.0", pm.Version)
+	assert.Equal(t, "文案撰写专家", pm.Description)
+	require.Len(t, pm.Skills, 1)
+	assert.Equal(t, "copywriting", pm.Skills[0].Name)
+	assert.Equal(t, "文案撰写专家", pm.Skills[0].Description)
+	// SKILL.md 原文保真（含 frontmatter）
+	assert.Equal(t, skillMD, files["skills/copywriting/SKILL.md"])
+
+	// 回扫：解压到新根后 RescanPackage 按 package 布局派生 prompt-only SKU {id}-skill-{name}
+	root2 := t.TempDir()
+	extractTarGzTo(t, res.Data, filepath.Join(root2, moduleID))
+	os.Setenv("CLAW_MARKETPLACE_DIR", root2)
+	defer os.Unsetenv("CLAW_MARKETPLACE_DIR")
+	require.NoError(t, svc.RescanPackage("claw", zap.NewNop()))
+
+	item, err := agentRepo.GetByID(moduleID + "-skill-copywriting")
+	require.NoError(t, err)
+	require.NotNil(t, item)
+	assert.Equal(t, "你是文案撰写专家。", item.SystemPrompt)
+	mf, err := item.Manifest()
+	require.NoError(t, err)
+	assert.Equal(t, model.ToolDriverNone, mf.Driver)
+}
+
+// TestModuleSubmissionMetaFor_PromptSkill 验证 prompt-only skill 的审核元数据：
+// ModuleID=目录名、Name/Description 取 frontmatter、Origin 缺省 user、Version 缺省 0.1.0。
+func TestModuleSubmissionMetaFor_PromptSkill(t *testing.T) {
+	svc, _, root := newRescanTestSvc(t)
+
+	const moduleID = "copywriting"
+	skillMD := "---\nname: copywriting\ndescription: 文案撰写专家\n---\n\n你是文案撰写专家。\n"
+	require.NoError(t, os.MkdirAll(filepath.Join(root, moduleID), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, moduleID, "SKILL.md"), []byte(skillMD), 0o644))
+
+	meta, err := svc.ModuleSubmissionMetaFor(moduleID)
+	require.NoError(t, err)
+	require.NotNil(t, meta)
+	assert.Equal(t, moduleID, meta.ModuleID)
+	assert.Equal(t, "copywriting", meta.Name)
+	assert.Equal(t, "文案撰写专家", meta.Description)
+	assert.Equal(t, "user", meta.Origin)
+	assert.Equal(t, "0.1.0", meta.Version)
+}

@@ -541,7 +541,7 @@ func (s *ModuleService) syncPromptSkillSKU(root, modName string, now time.Time, 
 		Driver:      model.ToolDriverNone,
 		Category:    category,
 		Parameters:  map[string]interface{}{},
-		Metadata:    map[string]string{"skillmd": "1"},
+		Metadata:    map[string]string{"skillmd": "1", "module": modName},
 	}
 	s.upsertPromptSKU(mf, skillmd.Body, adminID, now, logger)
 }

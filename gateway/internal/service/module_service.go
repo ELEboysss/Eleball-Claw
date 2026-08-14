@@ -240,6 +240,23 @@ func (s *ModuleService) ModuleSubmissionMetaFor(moduleID string) (*model.ModuleS
 				Version:     pkg.Version,
 			}, nil
 		}
+		// SKILL.md-only prompt skill（无 package.json）：解析 frontmatter 构造审核元数据，
+		// 使 prompt-only 秘技也可经 submit-review 上传云端分发（PackageModule 同路径物化最小 package.json）。
+		if skillmd, serr := ParseSkillMD(filepath.Join(modDir, "SKILL.md")); serr == nil {
+			origin := string(model.SkillRuntimeOriginUser)
+			if ob, oerr := os.ReadFile(filepath.Join(modDir, ".origin")); oerr == nil {
+				if s := strings.TrimSpace(string(ob)); s != "" {
+					origin = s
+				}
+			}
+			return &model.ModuleSubmissionMeta{
+				ModuleID:    moduleID,
+				Name:        skillmd.Name,
+				Description: skillmd.Description,
+				Origin:      origin,
+				Version:     "0.1.0",
+			}, nil
+		}
 	}
 	rt, err := s.GetModule(moduleID)
 	if err != nil {

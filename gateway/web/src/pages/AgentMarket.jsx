@@ -23,6 +23,7 @@ import {
   Cloud,
   CloudOff,
   CloudDownload,
+  CloudUpload,
   AlertCircle,
   Wand2,
   Package
@@ -118,6 +119,8 @@ export default function AgentMarket() {
   const [depsLoading, setDepsLoading] = useState(false)
   const [depsInstalling, setDepsInstalling] = useState(false)
   const [depsError, setDepsError] = useState('')
+  // prompt-only skill（skillmd）上传云端审核的进行态（详情弹窗按钮）
+  const [submittingSkillId, setSubmittingSkillId] = useState(null)
   // C1：卡片详情大窗 + 评论区懒加载
   const [detailAgent, setDetailAgent] = useState(null)
   const [detailReviews, setDetailReviews] = useState([])
@@ -420,6 +423,31 @@ export default function AgentMarket() {
       }
     } finally {
       setDownloadingId(null)
+    }
+  }
+
+  // prompt-only skill（skillmd）上传云端审核：module_id 取 manifest.metadata.module（syncPromptSkillSKU
+  // 记录目录名），复用 submit-review 链路；后端 PackageModule 物化最小 package.json 打包。
+  const handleSubmitPromptSkill = async (agent, manifest) => {
+    const moduleId = manifest?.metadata?.module
+    if (!moduleId) {
+      setMessage('该秘技缺少可上传的模块目录信息')
+      return
+    }
+    if (!isLoggedIn) {
+      setLoginOpen(true)
+      return
+    }
+    setSubmittingSkillId(agent.id)
+    setMessage('')
+    try {
+      const res = await agentMarketApi.submitForReview(moduleId)
+      const sid = res?.submission_id || ''
+      setMessage(`已提交「${agent.name}」审核${sid ? `（submission_id: ${sid}）` : ''}，待管理员审批通过后即可在「云端模块」目录下载`)
+    } catch (err) {
+      setMessage(err.message || '提交审核失败')
+    } finally {
+      setSubmittingSkillId(null)
     }
   }
 
@@ -1465,7 +1493,7 @@ export default function AgentMarket() {
 
               {/* 底部动作区：凭证 / 依赖 + 价格与主操作（与卡片共用 renderAgentActions） */}
               <div className="p-4 border-t border-eleball-outline">
-                {(hasCreds || (agent.has_deps && !agent.deps_installed)) && (
+                {(hasCreds || (agent.has_deps && !agent.deps_installed) || manifest?.metadata?.skillmd === '1') && (
                   <div className="flex items-center gap-2 mb-3">
                     {hasCreds && (
                       <button
@@ -1481,6 +1509,17 @@ export default function AgentMarket() {
                         className="text-xs px-3 py-1.5 rounded-full border border-eleball-outline text-orange-600 hover:bg-orange-50 transition-colors flex items-center gap-1.5"
                       >
                         <Package className="w-3.5 h-3.5" /> 安装依赖
+                      </button>
+                    )}
+                    {manifest?.metadata?.skillmd === '1' && (
+                      <button
+                        onClick={() => handleSubmitPromptSkill(agent, manifest)}
+                        disabled={submittingSkillId === agent.id}
+                        className="text-xs px-3 py-1.5 rounded-full border border-eleball-outline text-eleball-primary hover:bg-eleball-surface-variant transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                        title="打包上传到云端，经管理员审批后在「云端模块」目录发布"
+                      >
+                        <CloudUpload className="w-3.5 h-3.5" />
+                        {submittingSkillId === agent.id ? '提交中...' : '上传到云端审核'}
                       </button>
                     )}
                   </div>

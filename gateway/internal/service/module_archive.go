@@ -55,7 +55,17 @@ func (s *ModuleService) PackageModule(moduleID string) (*PackageModuleResult, er
 	if root != "" {
 		moduleDir := filepath.Join(root, moduleID)
 		if fi, err := os.Stat(moduleDir); err == nil && fi.IsDir() {
-			return packageModuleDir(moduleID, moduleDir)
+			// 按目录事实源优先级分派：package.json / module.json（脚本/秘技包）→ SKILL.md-only（prompt-only skill）。
+			if _, perr := os.Stat(filepath.Join(moduleDir, "package.json")); perr == nil {
+				return packageModuleDir(moduleID, moduleDir)
+			}
+			if _, merr := os.Stat(filepath.Join(moduleDir, "module.json")); merr == nil {
+				return packageModuleDir(moduleID, moduleDir)
+			}
+			if _, serr := os.Stat(filepath.Join(moduleDir, "SKILL.md")); serr == nil {
+				return packagePromptSkillDir(moduleID, moduleDir)
+			}
+			return nil, fmt.Errorf("模块目录 %s 缺少 package.json（或 module.json / SKILL.md），无法打包", moduleDir)
 		}
 	}
 
@@ -136,6 +146,77 @@ func packageModuleDir(moduleID, moduleDir string) (*PackageModuleResult, error) 
 	}
 	if err := gw.Close(); err != nil {
 		return nil, fmt.Errorf("关闭 gzip 失败: %w", err)
+	}
+	return &PackageModuleResult{Data: buf.Bytes(), Filename: moduleID + ".tar.gz"}, nil
+}
+
+// packagePromptSkillDir 打包「只有 SKILL.md 无 package.json/module.json」的 prompt-only skill 目录。
+// 物化最小 package.json（skills:[{name,description}]，version 缺省 0.1.0）+ skills/<name>/SKILL.md
+// （原文保真）+ .origin 侧车，使云端按标准 package 布局派生 prompt-only SKU（{pkg}-skill-{name}，
+// driver=none）。skill/包名经 GenerateModuleID 规范化为小写 slug，保证 package.json 字段合法。
+func packagePromptSkillDir(moduleID, moduleDir string) (*PackageModuleResult, error) {
+	skillmd, err := ParseSkillMD(filepath.Join(moduleDir, "SKILL.md"))
+	if err != nil {
+		return nil, fmt.Errorf("解析模块 %s 的 SKILL.md 失败: %w", moduleID, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(moduleDir, "SKILL.md"))
+	if err != nil {
+		return nil, fmt.Errorf("读取模块 %s 的 SKILL.md 失败: %w", moduleID, err)
+	}
+
+	skillName := model.GenerateModuleID(skillmd.Name)
+	manifest := model.PackageManifest{
+		Name:        model.GenerateModuleID(moduleID),
+		Version:     "0.1.0",
+		Description: skillmd.Description,
+		Level:       1,
+		Skills:      []model.PackageSkill{{Name: skillName, Description: skillmd.Description}},
+	}
+	manifestJSON, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("序列化 prompt-only skill package.json 失败: %w", err)
+	}
+
+	origin := "user"
+	if ob, oerr := os.ReadFile(filepath.Join(moduleDir, ".origin")); oerr == nil {
+		if s := strings.TrimSpace(string(ob)); s != "" {
+			origin = s
+		}
+	}
+
+	buf := &bytes.Buffer{}
+	gw := gzip.NewWriter(buf)
+	tw := tar.NewWriter(gw)
+	writeEntry := func(name string, content []byte, mode int64) error {
+		hdr := &tar.Header{Name: name, Mode: mode, Size: int64(len(content)), Typeflag: tar.TypeReg}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return fmt.Errorf("写 %s tar 头失败: %w", name, err)
+		}
+		if _, err := tw.Write(content); err != nil {
+			return fmt.Errorf("写 %s 内容失败: %w", name, err)
+		}
+		return nil
+	}
+	if err := writeEntry("package.json", manifestJSON, 0o644); err != nil {
+		_ = tw.Close()
+		_ = gw.Close()
+		return nil, err
+	}
+	if err := writeEntry("skills/"+skillName+"/SKILL.md", raw, 0o644); err != nil {
+		_ = tw.Close()
+		_ = gw.Close()
+		return nil, err
+	}
+	if err := writeEntry(".origin", []byte(origin), 0o644); err != nil {
+		_ = tw.Close()
+		_ = gw.Close()
+		return nil, err
+	}
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	if err := gw.Close(); err != nil {
+		return nil, err
 	}
 	return &PackageModuleResult{Data: buf.Bytes(), Filename: moduleID + ".tar.gz"}, nil
 }
