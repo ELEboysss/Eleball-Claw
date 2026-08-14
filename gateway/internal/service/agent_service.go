@@ -215,19 +215,19 @@ type AgentHistoryMessage struct {
 
 // AgentExecuteRequest Agent 执行请求
 type AgentExecuteRequest struct {
-	SessionID       string               `json:"session_id"`
-	ConversationID  string               `json:"conversation_id"`
-	Message         string               `json:"message"`
-	Content         string               `json:"content"`
-	Attachments     []AgentAttachment    `json:"attachments"`
+	SessionID       string                `json:"session_id"`
+	ConversationID  string                `json:"conversation_id"`
+	Message         string                `json:"message"`
+	Content         string                `json:"content"`
+	Attachments     []AgentAttachment     `json:"attachments"`
 	History         []AgentHistoryMessage `json:"history"`
-	Model           string               `json:"model"`
-	Provider        string               `json:"provider"`
-	BaseURL         string               `json:"base_url"`
-	APIKey          string               `json:"api_key"`
-	EnableTools     *bool                `json:"enable_tools,omitempty"`
-	EnableWebSearch *bool                `json:"enable_web_search,omitempty"`
-	SearchProvider  *string              `json:"search_provider,omitempty"`
+	Model           string                `json:"model"`
+	Provider        string                `json:"provider"`
+	BaseURL         string                `json:"base_url"`
+	APIKey          string                `json:"api_key"`
+	EnableTools     *bool                 `json:"enable_tools,omitempty"`
+	EnableWebSearch *bool                 `json:"enable_web_search,omitempty"`
+	SearchProvider  *string               `json:"search_provider,omitempty"`
 	// AssistantID 本次执行应用的助手（非空优先于会话绑定的 assistant_id）
 	AssistantID string `json:"assistant_id"`
 	// AR-06：claw 本地工作目录（用户授权的项目目录）。仅 claw（unrestricted=true）启用；
@@ -238,6 +238,7 @@ type AgentExecuteRequest struct {
 	// PlanFilePath C3/C4：plan 模式下已提交的计划文件路径，用于 accept_edits 模式加载已批准计划并跨 compact 保留。
 	PlanFilePath string `json:"plan_file_path,omitempty"`
 }
+
 func (req *AgentExecuteRequest) normalize() {
 	if req.Message == "" && req.Content != "" {
 		req.Message = req.Content
@@ -928,18 +929,18 @@ func (s *AgentService) ensureSessionQuota(ctx context.Context, userID string) er
 func projectBuildHints(cwd string) string {
 	sep := string(os.PathSeparator)
 	hints := ""
-	if _, err := os.Stat(cwd+sep+"go.mod"); err == nil {
+	if _, err := os.Stat(cwd + sep + "go.mod"); err == nil {
 		hints += "\n- Go 项目：go test ./...、go build ./...、go vet ./..."
 	}
-	if _, err := os.Stat(cwd+sep+"package.json"); err == nil {
+	if _, err := os.Stat(cwd + sep + "package.json"); err == nil {
 		hints += "\n- Node 项目：npm test、npm run build、npm run dev"
 	}
-	if _, err := os.Stat(cwd+sep+"Cargo.toml"); err == nil {
+	if _, err := os.Stat(cwd + sep + "Cargo.toml"); err == nil {
 		hints += "\n- Rust 项目：cargo build、cargo test"
 	}
-	if _, err := os.Stat(cwd+sep+"build.gradle"); err == nil {
+	if _, err := os.Stat(cwd + sep + "build.gradle"); err == nil {
 		hints += "\n- Gradle 项目：./gradlew assembleDebug、./gradlew test"
-	} else if _, err := os.Stat(cwd+sep+"build.gradle.kts"); err == nil {
+	} else if _, err := os.Stat(cwd + sep + "build.gradle.kts"); err == nil {
 		hints += "\n- Gradle 项目：./gradlew assembleDebug、./gradlew test"
 	}
 	if hints == "" {
@@ -1007,6 +1008,16 @@ func (s *AgentService) buildInitialMessages(ctx context.Context, req AgentExecut
 			systemContent += "\n\n【已批准计划】(" + planFilePath + ")：\n" + string(content)
 		} else if err != nil && s.logger != nil {
 			s.logger.Warn("加载已批准计划文件失败", zap.String("plan_path", planFilePath), zap.Error(err))
+		}
+	}
+	// T2.4：注入用户已激活的 prompt-only 秘技（增量披露：名称/描述进系统提示，body 按需加载）。
+	// 复用 agentToolLoader.LoadActivePromptSkills（已购买+已激活+approved+driver=none 过滤）；
+	// 停用（Active=false）或未购买的不注入。toolsEnabled=false 时仍注入（纯 prompt 技能无工具）。
+	if s.agentToolLoader != nil && userID != "" {
+		if skills, err := s.agentToolLoader.LoadActivePromptSkills(userID); err == nil && len(skills) > 0 {
+			if block := formatSkillsForPrompt(skills); block != "" {
+				systemContent += "\n\n" + block
+			}
 		}
 	}
 	messages = append(messages, llm.Message{
@@ -1101,10 +1112,44 @@ func (s *AgentService) supportsVision(provider, modelName string) bool {
 	return false
 }
 
+// formatSkillsForPrompt T2.4：把用户已激活的 prompt-only 秘技（driver=none）格式化为
+// system 提示中的技能区块（增量披露：名称/描述引导模型感知技能，body 即 SystemPrompt
+// 随请求加载供模型使用）。停用/未购买的不在此列（由 LoadActivePromptSkills 保证）。
+// 输出形如：
+// 【已激活技能】
+// 技能提示（文案）：你是文案撰写专家，输出有感染力的营销文案。
+func formatSkillsForPrompt(skills []*model.AgentItem) string {
+	if len(skills) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("【已激活技能】")
+	for _, sk := range skills {
+		name := strings.TrimSpace(sk.Name)
+		if name == "" {
+			name = sk.ID
+		}
+		line := "技能提示（" + name + "）"
+		if desc := strings.TrimSpace(sk.Description); desc != "" {
+			line += "：" + desc
+		}
+		if body := strings.TrimSpace(sk.SystemPrompt); body != "" {
+			if strings.Contains(line, "：") {
+				line += "\n" + body
+			} else {
+				line += "：" + body
+			}
+		}
+		b.WriteString("\n" + line)
+	}
+	return b.String()
+}
+
 // buildAttachmentContentParts C7：把附件构建为 OpenAI 兼容 content parts。
-// - image：视觉模型 -> image_url（data URI）；非视觉模型 -> OCR 降级为文本 part（复用 OCRDataURI/tesseract）；
-//   OCR 不可用时降级为占位说明，避免图片被静默丢弃。
-// - file：文本内容直接拼为 text part（带文件名前缀）；二进制文件（无 text）给占位说明。
+//   - image：视觉模型 -> image_url（data URI）；非视觉模型 -> OCR 降级为文本 part（复用 OCRDataURI/tesseract）；
+//     OCR 不可用时降级为占位说明，避免图片被静默丢弃。
+//   - file：文本内容直接拼为 text part（带文件名前缀）；二进制文件（无 text）给占位说明。
+//
 // 附件在前、用户文本在后（OpenAI/Kimi 多模态惯例），用户文本由调用方追加。
 func (s *AgentService) buildAttachmentContentParts(ctx context.Context, attachments []AgentAttachment, supportsVision bool) []interface{} {
 	var parts []interface{}
@@ -1644,13 +1689,13 @@ func (s *AgentService) runStopHook(ctx context.Context, env *ToolEnv, result *Ru
 		ToolName:       "stop",
 		HookEventName:  string(model.HookEventStop),
 		ToolResult: map[string]interface{}{
-			"record_count":     len(result.Records),
-			"loop_detected":    result.LoopDetected,
-			"reach_max_steps":  result.ReachMaxSteps,
+			"record_count":       len(result.Records),
+			"loop_detected":      result.LoopDetected,
+			"reach_max_steps":    result.ReachMaxSteps,
 			"reach_token_budget": result.ReachTokenBudget,
-			"cancelled":        result.Cancelled,
-			"budget_exceeded":  result.BudgetExceeded,
-			"reach_cost_budget": result.ReachCostBudget,
+			"cancelled":          result.Cancelled,
+			"budget_exceeded":    result.BudgetExceeded,
+			"reach_cost_budget":  result.ReachCostBudget,
 		},
 	}
 	return env.HookSvc.Dispatch(ctx, model.HookEventStop, input)

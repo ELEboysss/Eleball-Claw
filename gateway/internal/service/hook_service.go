@@ -349,6 +349,9 @@ func (s *HookService) runCommandHook(ctx context.Context, cfg model.HookConfig, 
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, shell, args...)
+	// ctx 超时/取消须杀整棵进程树（Windows Git Bash 孙进程持有管道会致 Wait 挂死，
+	// 见 setTreeKill 注释）；后台 shell 路径同样经 buildExecCmd 走该逻辑。
+	setTreeKill(cmd)
 	cmd.Stdin = bytes.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

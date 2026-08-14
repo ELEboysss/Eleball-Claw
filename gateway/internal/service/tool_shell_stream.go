@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -90,13 +92,34 @@ func buildExecCmd(ctx context.Context, command string, args []string, raw, cwd s
 		if cwd != "" {
 			cmd.Dir = cwd
 		}
+		setTreeKill(cmd)
 		return cmd, nil
 	}
 	cmd := exec.CommandContext(ctx, command, args...)
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
+	setTreeKill(cmd)
 	return cmd, nil
+}
+
+// setTreeKill 让 ctx 取消（stop/timeout）时终止 cmd 的整棵进程树（仅 Windows）。
+// Windows 下 bash/sh（Git Bash/MSYS）会把 -c 命令体跑在 fork 出的孙进程里，
+// CommandContext 默认只 Kill 直接子进程：孙进程存活并持有 stdout 管道，
+// Wait 永远等不到 EOF（后台 shell stop 后仍 running / 超时钩子挂死）。
+// Cancel 改为 taskkill /T /F 杀树；WaitDelay 兜底：管道仍未闭合时 Wait 也在
+// 进程退出后 5s 内返回。Unix 下保持默认 Kill（进程组语义由 shell 自身管理）。
+func setTreeKill(cmd *exec.Cmd) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
+	}
+	cmd.WaitDelay = 5 * time.Second
 }
 
 // runStreamingCommand 流式执行已构造的 cmd，合并 stdout/stderr，按 headLimit 行截断。
