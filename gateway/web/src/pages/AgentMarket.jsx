@@ -358,6 +358,8 @@ export default function AgentMarket() {
       await agentMarketApi.saveCredentials(credentialModal.id, credentialValues)
       setMessage(`${credentialModal.name} 凭证已保存`)
       setCredentialModal(null)
+      // 凭证保存后刷新列表：credential_complete 重新计算，勾选/激活不再被旧状态禁用
+      loadAgents()
     } catch (err) {
       setCredentialError(err.message || '凭证保存失败')
     } finally {
@@ -1520,6 +1522,16 @@ export default function AgentMarket() {
                       )}
                       {purchased && m.credential_complete === false && (
                         <span className="text-xs px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 shrink-0">凭证不全</span>
+                      )}
+                      {Object.keys(parseManifestCredentials(m)).length > 0 && (
+                        <button
+                          type="button"
+                          onClick={(e) => { e.preventDefault(); e.stopPropagation(); openCredentialModal(m) }}
+                          className="text-eleball-text-tertiary hover:text-eleball-primary transition-colors shrink-0"
+                          title="配置凭证"
+                        >
+                          <Settings className="w-4 h-4" />
+                        </button>
                       )}
                     </label>
                   )
