@@ -14,6 +14,7 @@ auto_sku=true：网关探活拿到 tools/list 后自动派生三份可购买 SKU
 claw 经宿主机端口映射 http://localhost:8095 访问）。
 """
 
+import datetime
 import json
 import os
 import urllib.error
@@ -208,13 +209,17 @@ def _do_crawl_status(args, api_key):
         "total": data.get("total"),
         "completed": data.get("completed"),
         "credits_used": data.get("creditsUsed"),
+        # 心跳字段：每次轮询返回必不同，网关 no-progress 循环检测据此识别「轮询在推进」，
+        # 避免同 job_id 多次轮询被误判为无意义重复调用（同 tool+args+同返回才计 strike）。
+        "polled_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
     }
     status = data.get("status")
     if status == "completed":
         result["data"] = _truncate_crawl_pages(data.get("data"))
     elif status in ("scraping",):
-        # 进行中：附带已完成页数提示，引导继续轮询而非重复发起 crawl
-        result["hint"] = "任务进行中，请稍后再次调用 crawl_status 查询。"
+        # 进行中：附带进度与节奏提示。模型无法 sleep，密集轮询只会空烧步数预算；
+        # 长任务正确姿势是告知进度后收尾，稍后由用户追问时再查。
+        result["hint"] = "任务进行中（completed/total 见上）。任务推进需要时间，请勿立即连续轮询：可先向用户说明当前进度，稍后用户追问时再查；任务完成后 crawl_status 会返回 data。"
     elif status in ("failed", "cancelled"):
         result["data"] = _truncate_crawl_pages(data.get("data"))
         result["hint"] = "任务已%s。" % ("失败" if status == "failed" else "取消")
