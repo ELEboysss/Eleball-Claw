@@ -92,7 +92,9 @@ def _firecrawl_request(path, payload, api_key):
         return None, "缺少 firecrawl_api_key（请在模块凭证配置 firecrawl_api_key）"
     url = FIRECRAWL_BASE_URL + path
     body = json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json", "x-api-key": api_key}
+    # Firecrawl API 鉴权只认 Authorization: Bearer <key>（官方文档/SDK 统一形态）；
+    # 误用 x-api-key（Anthropic/Exa 风格）会被视为未提供 Key，一律 401。
+    headers = {"Content-Type": "application/json", "Authorization": "Bearer " + api_key}
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
