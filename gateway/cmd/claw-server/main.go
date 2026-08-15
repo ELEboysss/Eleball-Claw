@@ -513,6 +513,8 @@ func main() {
 	// F4：DSH 插件（npm 包）预览/导入 + SKU 定向同步
 	clawConsoleHandler.SetDSHPluginService(service.NewDSHPluginService(moduleService, mcpStdioProtocol))
 	clawConsoleHandler.SetSkillSyncFn(skillSyncFn)
+	// T5：DSH 桥接运行时导入（dsh-mcp-bridge 发现与命令组装）
+	clawConsoleHandler.SetDSHBridgeService(service.NewDSHBridgeService(logger))
 	moduleService.SetInterpreterBootstrap(interpreterBootstrap)
 	clawCwdHandler := handler.NewClawCwdHandler()
 	clawFilesHandler := handler.NewClawFilesHandler(agentSandbox)

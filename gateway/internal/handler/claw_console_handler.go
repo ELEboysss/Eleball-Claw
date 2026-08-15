@@ -29,6 +29,7 @@ type ClawConsoleHandler struct {
 	moduleService        *service.ModuleService        // /mcp/generate 写模块 + rescan + autostart
 	interpreterBootstrap *service.InterpreterBootstrap // H1 托管解释器安装（python-build-standalone）
 	dshPluginSvc         *service.DSHPluginService     // F4：DSH 插件（npm 包）预览/导入
+	dshBridgeSvc         *service.DSHBridgeService     // T5：DSH 桥接运行时导入（dsh-mcp-bridge）
 	skillSyncFn          func(dir, skillID, creatorID, creatorName string) (int, int, int) // F4：SKU 定向同步（main 适配 seed）
 }
 
@@ -60,6 +61,11 @@ func (h *ClawConsoleHandler) SetInterpreterBootstrap(b *service.InterpreterBoots
 // SetDSHPluginService 注入 DSH 插件导入服务（F4，/dsh-plugin/preview|import）
 func (h *ClawConsoleHandler) SetDSHPluginService(s *service.DSHPluginService) {
 	h.dshPluginSvc = s
+}
+
+// SetDSHBridgeService 注入 DSH 桥接服务（T5，/dsh/bridge-status|import-runtime）
+func (h *ClawConsoleHandler) SetDSHBridgeService(s *service.DSHBridgeService) {
+	h.dshBridgeSvc = s
 }
 
 // SetSkillSyncFn 注入 prompt 秘技 SKU 定向同步函数（F4，main 侧适配 seed.SyncPromptSkillDir）
@@ -677,6 +683,125 @@ func (h *ClawConsoleHandler) TestCall(c *gin.Context) {
 	result, err := h.moduleService.TestCall(ctx, moduleID, req, userID)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "success",
+		"data":    result,
+	})
+}
+
+// DSHBridgeStatus 探测 DSH 桥接（dsh-mcp-bridge）本地可用性（T5）。
+// 返回桥接目录/dsh-home 候选/已知插件元数据（凭据预填行与能力标签），
+// 不可用时 available=false + hint 指引修复，前端据此渲染引导横幅。
+// GET /v1/claw-console/dsh/bridge-status
+func (h *ClawConsoleHandler) DSHBridgeStatus(c *gin.Context) {
+	if h.dshBridgeSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 2002, "message": "DSH 桥接服务未初始化"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "success",
+		"data":    h.dshBridgeSvc.Status(ctx),
+	})
+}
+
+// dshImportRuntimeRequest /v1/claw-console/dsh/import-runtime 请求体（T5）。
+type dshImportRuntimeRequest struct {
+	Package     string            `json:"package"`    // 必填，DSH 工具插件包名（如 @deepseek-ai/dsh-tool-fs）
+	Name        string            `json:"name"`       // 运行时名，缺省由包名派生
+	Description string            `json:"description"`
+	DSHHome     string            `json:"dsh_home"`   // 已安装 DSH 包树目录，缺省用自动发现的首选
+	Env         map[string]string `json:"env"`        // 凭据等环境变量（如 DEEPSEEK_API_KEY）
+	Tools       []string          `json:"tools"`      // 工具白名单（可选）
+}
+
+// DSHImportRuntime 一键导入 DSH 工具插件为本地秘技运行时（T5）。
+// 组装桥接命令（node <bridge>/dist/server.js --dsh-home ... --plugin ...），
+// 复用 G3 probeAndInstallMCP 完成探测 → 建 SkillRuntime → 派生 SKU 全链路。
+// POST /v1/claw-console/dsh/import-runtime
+func (h *ClawConsoleHandler) DSHImportRuntime(c *gin.Context) {
+	var req dshImportRuntimeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "请求参数错误: " + err.Error()})
+		return
+	}
+	if strings.TrimSpace(req.Package) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "package 不能为空"})
+		return
+	}
+	if h.moduleService == nil || h.dshBridgeSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 2002, "message": "模块服务或 DSH 桥接服务未初始化"})
+		return
+	}
+
+	bridgeDir := h.dshBridgeSvc.DiscoverBridgeDir()
+	if bridgeDir == "" {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": "未找到 dsh-mcp-bridge 安装目录（需含 dist/server.js）；可设置环境变量 DSH_MCP_BRIDGE_HOME 指定"})
+		return
+	}
+	dshHome := strings.TrimSpace(req.DSHHome)
+	if dshHome == "" {
+		candidates := h.dshBridgeSvc.DiscoverDSHHomeCandidates()
+		if len(candidates) > 0 {
+			dshHome = candidates[0]
+		}
+	}
+	if dshHome == "" {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": "未发现已安装的 DSH 包树；请执行 npm install @deepseek-ai/dsh 或在表单中指定目录"})
+		return
+	}
+
+	args, err := service.BuildBridgeArgs(bridgeDir, dshHome, []string{req.Package}, req.Tools)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": err.Error()})
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = service.DefaultDSHRuntimeName(req.Package)
+	}
+	description := strings.TrimSpace(req.Description)
+	if description == "" {
+		// 缺省描述取插件元数据（静态副本/实时 describe 均覆盖已知插件）。
+		for _, p := range h.dshBridgeSvc.DescribePlugins(c.Request.Context(), bridgeDir) {
+			if p.Package == req.Package {
+				description = p.Description
+				break
+			}
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	result, fail := h.probeAndInstallMCP(ctx, mcpInstallRequest{
+		mcpProbeRequest: mcpProbeRequest{
+			Transport: "mcp_stdio",
+			Command:   "node",
+			Args:      args,
+			Env:       req.Env,
+		},
+		Name:        name,
+		Description: description,
+	})
+	if fail != nil {
+		if fail.ErrorCode == "interpreter_missing" {
+			c.JSON(http.StatusOK, gin.H{
+				"code":    2002,
+				"message": fail.Message,
+				"data": gin.H{
+					"error_code":  "interpreter_missing",
+					"interpreter": fail.Interpreter,
+					"hint":        fail.Hint,
+				},
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": fail.Message})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{

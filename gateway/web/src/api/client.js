@@ -242,6 +242,12 @@ export const moduleGeneratorApi = {
   // F4：导入 DSH 插件选中项 -> { skills: [skill_id], mcps: [name], skipped: [...] }
   // body = { package, skills?: [path...]（空=全部）, mcp_servers?: [name...]（空=不导入） }
   dshPluginImport: (body) => client.post('/claw-console/dsh-plugin/import', body, { timeout: 130000 }),
+  // T5：DSH 桥接可用性探测 -> { available, node_available, bridge_dir, dsh_home, dsh_home_candidates, plugins, hint }
+  // plugins 每项 { package, label, description, tools, env: [{name,hint,required}], tags }
+  dshBridgeStatus: () => client.get('/claw-console/dsh/bridge-status', { timeout: 20000 }),
+  // T5：一键导入 DSH 工具插件为本地秘技运行时 -> 同 mcp/install（{ runtime_id, tools, sku_count }）
+  // body = { package, name?, description?, dsh_home?, env?, tools? }
+  dshImportRuntime: (body) => client.post('/claw-console/dsh/import-runtime', body, { timeout: 40000 }),
   // H1：安装托管解释器（python/node，SHA-256 校验）-> { interpreter, path, version, source, reused }
   // 解释器缺失横幅「自动安装」按钮调用；系统已有则直接返回（source=system）。下载 ~30MB，超时放宽到 5 分钟。
   installInterpreter: (body) => client.post('/claw-console/tools/install-interpreter', body, { timeout: 300000 }),

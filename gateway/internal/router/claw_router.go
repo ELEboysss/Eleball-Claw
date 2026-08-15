@@ -277,6 +277,10 @@ func NewClawRouter(
 				console.POST("/dsh-plugin/preview", clawConsoleHandler.PreviewDSHPlugin)
 				console.POST("/dsh-plugin/import", clawConsoleHandler.ImportDSHPlugin)
 
+				// T5：DSH 桥接运行时导入（dsh-mcp-bridge 把 DSH 工具插件挂为 mcp_stdio 运行时）
+				console.GET("/dsh/bridge-status", clawConsoleHandler.DSHBridgeStatus)
+				console.POST("/dsh/import-runtime", clawConsoleHandler.DSHImportRuntime)
+
 				// F1 收尾：skill-maker AI 起草 main.py 草稿（能力描述 + 凭证声明 -> 对话模型生成 stdio MCP 脚本）
 				console.POST("/mcp/draft-main", clawConsoleHandler.DraftMainPy)
 

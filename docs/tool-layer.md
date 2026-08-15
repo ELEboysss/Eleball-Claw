@@ -77,3 +77,15 @@ claw 当前的 Shell 工具是**白名单沙箱**，约束来自云端多租户�
 - **不全量事件溯源重写**：DSH 的 session event log + surface projection 属架构级重写；claw 现有消息表 + C4 compaction 已覆盖需求，仅汲取事件协议与状态思想。
 - **不做并行工具调度**：审批器（sseApprover）与 SSE writer 非并发安全，DSH 式 parallel pool 风险大于收益（记 backlog）。
 
+## 7. DSH 插件运行时桥接（T 系列，dsh-mcp-bridge）
+
+DSH 工具插件（`@deepseek-ai/dsh-tool-*` Cordis npm 包）经桥接器（主仓 `tools/dsh-mcp-bridge`）挂载为本地 `mcp_stdio` 秘技运行时，复用「装 MCP」探测/安装/派生 SKU 全链路，claw 网关零改动。
+
+- **桥接原理**：桥接进程用 `dsh-app-boot` 的 `boot()` 从 `--dsh-home`（已安装 DSH 包树）动态拉起精简 cordis 树（工具注册表 + 目标工具插件 + 能力提供者预设），对外讲标准 MCP stdio；`ctx.tools.execute()` 无 agent 单工具调用，无需 LLM key。审批 `ask` 无 approval seam 时退化为拒绝（安全默认）。
+- **一键入口**：`/studio`「DSH 运行时」tab → `GET /v1/claw-console/dsh/bridge-status`（发现桥接目录 `DSH_MCP_BRIDGE_HOME`/候选路径与 dsh-home `DSH_PACKAGE_HOME`/npm 全局/npx 缓存 + `--describe` 插件元数据）→ `POST /v1/claw-console/dsh/import-runtime`（组装 `node server.js --dsh-home ... --plugin ...` 走 G3 探测安装）。
+- **能力预设**：tool-fs（read/write/edit，fs-local 无沙箱直读写）、tool-fs-search（glob/grep）、tool-web（web_search，需 `DEEPSEEK_API_KEY` 随运行时 env 注入）、tool-pwsh/tool-bash（按平台）。未预设插件 boot fail loud 报缺失服务。
+- **安全语义**：工具失败原样透传 MCP `isError`；agent 上下文工具（todo 等）返回其稳定错误文本（如 `todo_write requires an owning agent session`）不崩桥接；`--tool` 白名单可裁剪暴露面；导入 UI 按能力标签（filesystem/shell/subprocess/network）明示触达面。
+- **与 F4 的分工**：F4「DSH 插件」tab 扫描 npm tarball 内的 SKILL.md/mcpServers **静态资产**落盘；本路径把 DSH **工具插件**挂为实时运行时。
+
+详见主仓 `docs/tool-driver-guide.md` §15.8 与 `tools/dsh-mcp-bridge/README.md`。
+
