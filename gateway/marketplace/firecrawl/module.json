@@ -27,7 +27,7 @@
       "scope": "module"
     }
   },
-  "capabilities": ["scrape", "crawl", "extract"],
+  "capabilities": ["scrape", "crawl", "crawl_status", "extract"],
   "driver": {
     "driver_id": "firecrawl",
     "name": "Firecrawl 网页抓取",
