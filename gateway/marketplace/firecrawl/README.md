@@ -8,7 +8,7 @@ Eleball 弹丸集市中的网页抓取秘技模块，将 [Firecrawl](https://www
 
 - `scrape`：将单个网页转换为干净 Markdown，返回标题、URL、描述等元数据。
 - `crawl`：对指定网站启动批量爬取任务（异步），返回任务 ID；须配合 `crawl_status` 轮询结果。
-- `crawl_status`：查询 crawl 任务状态与结果（`status=completed` 时返回各页抓取内容，长 markdown 截断防撑爆上下文）。
+- `crawl_status`：查询 crawl 任务状态与结果。完成时默认只回**页面概览**（url/title 清单，支持 `offset`/`limit` 翻页，URL 永远枚举得全）；正文按需取：`include_content=true`（长 markdown 截断）或对单页调 `scrape`。
 - `extract`：按 JSON Schema 从网页中提取结构化数据。
 
 ## 运行模型（stdio + process + auto_sku）
