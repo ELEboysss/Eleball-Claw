@@ -70,11 +70,14 @@ def tools_list():
         {
             "name": "crawl_status",
             "title": "Firecrawl Crawl Status",
-            "description": "查询 crawl 批量爬取任务的状态与结果。crawl 为异步任务：调用 crawl 拿到 job_id 后，用本工具轮询（传 id=job_id）；status=completed 时 data 为各页抓取结果（长文已截断）。",
+            "description": "查询 crawl 批量爬取任务的状态与结果。crawl 为异步任务：调用 crawl 拿到 job_id 后，用本工具轮询（传 id=job_id）。status=completed 时默认只返回页面概览（url/title 清单，支持 offset/limit 翻页）；需要某页正文时传 include_content=true，或对目标 URL 调 scrape。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "description": "crawl 返回的 job_id"},
+                    "offset": {"type": "integer", "description": "页面概览起始偏移（翻页用），默认 0", "default": 0},
+                    "limit": {"type": "integer", "description": "页面概览每页条数，默认 100，最大 100", "default": 100},
+                    "include_content": {"type": "boolean", "description": "是否附带各页 markdown 正文（长文截断）；默认 false 只回概览", "default": False},
                 },
                 "required": ["id"],
             },
@@ -173,28 +176,41 @@ def _do_crawl(args, api_key):
         "job_id": data.get("id"),
         "status": "started",
         "check_url": data.get("url"),
-        "next_step": "crawl 为异步任务：请调用 crawl_status 工具（传 id=job_id）轮询进度；status=completed 时 data 即抓取结果。",
+        "next_step": "crawl 为异步任务：请调用 crawl_status 工具（传 id=job_id）轮询进度；status=completed 时返回页面概览（url/title 清单），正文经 include_content=true 或 scrape 按需获取。",
     }
     return _text(json.dumps(result, ensure_ascii=False))
 
 
-# crawl_status 返回中每页 markdown 的截断长度：防整站结果（数十页长文）撑爆 LLM 上下文。
+# crawl_status include_content=true 时单页 markdown 的截断长度：防单页长文撑爆 LLM 上下文。
 CRAWL_PAGE_MARKDOWN_MAX = 2000
 
+# crawl_status 页面概览默认分页大小：概览只含 url/title（轻量），页数超限时经 offset/limit 翻页。
+CRAWL_STATUS_PAGE_LIMIT = 100
 
-def _truncate_crawl_pages(pages):
-    """截断 crawl 结果各页的长 markdown，保留元数据。非列表原样返回。"""
+
+def _crawl_page_overview(pages, offset, limit, include_content):
+    """构建 crawl 结果的分页概览：默认只回 url/title（防数十页全文挤占上下文，
+    连 URL 清单都被网关二次压缩截断）；include_content=true 时附带截断后的 markdown。"""
     if not isinstance(pages, list):
-        return pages
+        return [], 0
+    total = len(pages)
     out = []
-    for p in pages:
-        if isinstance(p, dict):
-            p = dict(p)
+    for p in pages[offset:offset + limit]:
+        if not isinstance(p, dict):
+            continue
+        meta = p.get("metadata") or {}
+        item = {
+            "url": meta.get("sourceURL") or meta.get("url") or "",
+            "title": meta.get("title") or "",
+        }
+        if include_content:
             md = p.get("markdown")
-            if isinstance(md, str) and len(md) > CRAWL_PAGE_MARKDOWN_MAX:
-                p["markdown"] = md[:CRAWL_PAGE_MARKDOWN_MAX] + "\n...(内容过长已截断)"
-        out.append(p)
-    return out
+            if isinstance(md, str):
+                if len(md) > CRAWL_PAGE_MARKDOWN_MAX:
+                    md = md[:CRAWL_PAGE_MARKDOWN_MAX] + "\n...(内容过长已截断)"
+                item["markdown"] = md
+        out.append(item)
+    return out, total
 
 
 def _do_crawl_status(args, api_key):
@@ -214,15 +230,33 @@ def _do_crawl_status(args, api_key):
         "polled_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
     }
     status = data.get("status")
-    if status == "completed":
-        result["data"] = _truncate_crawl_pages(data.get("data"))
+    if status in ("completed", "failed", "cancelled"):
+        # 概览优先：默认只回 url/title 清单（轻量、URL 永远枚举得全）；
+        # 正文按需取：include_content=true（配合 offset/limit 翻页）或对单页用 scrape（命中 Firecrawl 缓存）。
+        try:
+            offset = max(0, int(args.get("offset") or 0))
+        except (TypeError, ValueError):
+            offset = 0
+        try:
+            limit = int(args.get("limit") or CRAWL_STATUS_PAGE_LIMIT)
+            limit = min(max(1, limit), CRAWL_STATUS_PAGE_LIMIT)
+        except (TypeError, ValueError):
+            limit = CRAWL_STATUS_PAGE_LIMIT
+        include_content = bool(args.get("include_content"))
+        pages, pages_total = _crawl_page_overview(data.get("data"), offset, limit, include_content)
+        result["pages"] = pages
+        result["pages_total"] = pages_total
+        result["pages_offset"] = offset
+        if offset + limit < pages_total:
+            result["pages_hint"] = "仅返回第 %d-%d 页（共 %d 页）：传 offset=%d 继续翻页。" % (offset + 1, offset + len(pages), pages_total, offset + limit)
+        if not include_content:
+            result["content_hint"] = "概览只含页面 URL/标题；需要某页正文时：本工具传 include_content=true（可配 offset/limit 单页取），或对目标 URL 调 scrape。"
+        if status in ("failed", "cancelled"):
+            result["hint"] = "任务已%s。" % ("失败" if status == "failed" else "取消")
     elif status in ("scraping",):
         # 进行中：附带进度与节奏提示。模型无法 sleep，密集轮询只会空烧步数预算；
         # 长任务正确姿势是告知进度后收尾，稍后由用户追问时再查。
-        result["hint"] = "任务进行中（completed/total 见上）。任务推进需要时间，请勿立即连续轮询：可先向用户说明当前进度，稍后用户追问时再查；任务完成后 crawl_status 会返回 data。"
-    elif status in ("failed", "cancelled"):
-        result["data"] = _truncate_crawl_pages(data.get("data"))
-        result["hint"] = "任务已%s。" % ("失败" if status == "failed" else "取消")
+        result["hint"] = "任务进行中（completed/total 见上）。任务推进需要时间，请勿立即连续轮询：可先向用户说明当前进度，稍后用户追问时再查；任务完成后 crawl_status 会返回页面概览。"
     return _text(json.dumps(result, ensure_ascii=False))
 
 
