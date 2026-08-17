@@ -115,10 +115,35 @@ YAML
   echo "==> Config generated: ${CONFIG_DIR}/claw.yaml"
 fi
 
+# Relay 远程通道（P5.3）：CLAW_DEVICE_ID 首装生成并持久化到配置目录，重装复用
+DEVICE_ID_FILE="$CONFIG_DIR/device_id"
+if [ -f "$DEVICE_ID_FILE" ]; then
+  CLAW_DEVICE_ID="$(cat "$DEVICE_ID_FILE")"
+else
+  CLAW_DEVICE_ID="$(uuidgen 2>/dev/null || openssl rand -hex 16 2>/dev/null || echo "claw-$(date +%s)")"
+  echo "$CLAW_DEVICE_ID" > "$DEVICE_ID_FILE"
+fi
+
+# relay 环境变量文件：claw serve 前 source 生效；重装时已存在则保留（含用户已填的 token）
+RELAY_ENV="$CONFIG_DIR/relay.env"
+if [ ! -f "$RELAY_ENV" ]; then
+  cat > "$RELAY_ENV" <<ENV
+# Eleball-claw relay 远程通道配置（启动前执行: . "${CONFIG_DIR}/relay.env"）
+# 云端中继地址（生产）
+export RELAY_URL="wss://relay.eleball.cn"
+# 设备 ID（首装生成，持久化于 ${DEVICE_ID_FILE}，请勿修改）
+export CLAW_DEVICE_ID="${CLAW_DEVICE_ID}"
+# 云端账户登录后的 JWT（与 gateway 统一账户验签）；请到 eleball.cn 登录获取后填入，勿泄露
+export CLAW_RELAY_TOKEN=""
+ENV
+  echo "==> Relay env generated: ${RELAY_ENV} (fill in CLAW_RELAY_TOKEN to enable remote relay)"
+fi
+
 echo ""
 echo "Eleball-claw installed successfully."
-echo "   Start:   CONFIG_PATH=${CONFIG_DIR}/claw.yaml eleball-claw serve --port=${PORT}"
+echo "   Start:   . ${CONFIG_DIR}/relay.env && CONFIG_PATH=${CONFIG_DIR}/claw.yaml eleball-claw serve --port=${PORT}"
 echo "   URL:     http://localhost:${PORT}"
 echo "   Config:  ${CONFIG_DIR}/claw.yaml"
+echo "   Relay:   ${RELAY_ENV}   # remote relay via wss://relay.eleball.cn (fill CLAW_RELAY_TOKEN first; skipped if empty)"
 echo "   Modules: eleball-claw module ls   # module home: ${CONFIG_DIR}/marketplace (official modules seeded on first use)"
 echo "            eleball-claw module up   # start all modules via docker (Docker required)"

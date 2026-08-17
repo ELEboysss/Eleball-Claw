@@ -83,10 +83,36 @@ mail: { enabled: false, port: 465 }
     Write-Host "==> Config generated: $ConfigPath" -ForegroundColor Cyan
 }
 
+# Relay 远程通道（P5.3）：CLAW_DEVICE_ID 首装生成并持久化到配置目录，重装复用
+$DeviceIdFile = Join-Path $ConfigDir "device_id"
+if (Test-Path $DeviceIdFile) {
+    $ClawDeviceId = (Get-Content $DeviceIdFile -Raw).Trim()
+} else {
+    $ClawDeviceId = [guid]::NewGuid().ToString()
+    Set-Content -Path $DeviceIdFile -Value $ClawDeviceId -Encoding ASCII
+}
+
+# relay 环境变量脚本：claw serve 前 dot-source 生效；重装时已存在则保留（含用户已填的 token）
+$RelayEnvPath = Join-Path $ConfigDir "relay.env.ps1"
+if (-not (Test-Path $RelayEnvPath)) {
+    $RelayEnv = @"
+# Eleball-claw relay 远程通道配置（启动前执行: . "$RelayEnvPath"）
+# 云端中继地址（生产）
+`$env:RELAY_URL = "wss://relay.eleball.cn"
+# 设备 ID（首装生成，持久化于 $DeviceIdFile，请勿修改）
+`$env:CLAW_DEVICE_ID = "$ClawDeviceId"
+# 云端账户登录后的 JWT（与 gateway 统一账户验签）；请到 eleball.cn 登录获取后填入，勿泄露
+`$env:CLAW_RELAY_TOKEN = ""
+"@
+    Set-Content -Path $RelayEnvPath -Value $RelayEnv -Encoding UTF8
+    Write-Host "==> Relay env generated: $RelayEnvPath (fill in CLAW_RELAY_TOKEN to enable remote relay)" -ForegroundColor Cyan
+}
+
 Write-Host ""
 Write-Host "==> Eleball-claw installed" -ForegroundColor Green
-Write-Host "   Start: `$env:CONFIG_PATH='$ConfigPath'; & '$Binary' serve --port=$Port" -ForegroundColor Yellow
+Write-Host "   Start: . '$RelayEnvPath'; `$env:CONFIG_PATH='$ConfigPath'; & '$Binary' serve --port=$Port" -ForegroundColor Yellow
 Write-Host "   URL:   http://localhost:$Port"
 Write-Host "   Conf:  $ConfigPath"
+Write-Host "   Relay: $RelayEnvPath   # remote relay via wss://relay.eleball.cn (fill CLAW_RELAY_TOKEN first; skipped if empty)" -ForegroundColor Yellow
 Write-Host "   Modules: & '$Binary' module ls   # module home: $ConfigDir\marketplace (official modules seeded on first use)" -ForegroundColor Yellow
 Write-Host "            & '$Binary' module up   # start all modules via docker (Docker required)" -ForegroundColor Yellow
