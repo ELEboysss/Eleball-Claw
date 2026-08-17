@@ -426,6 +426,16 @@ func (c *ContextCompactor) findCutPoint(messages []llm.Message) (int, []llm.Mess
 		}
 	}
 
+	// 防御：调整后切点仍是 tool 消息（孤儿 tool——所属 assistant 不在前文，
+	// 可能来自历史异常数据），向后跳过连续 tool 消息并入待摘要前缀，
+	// 避免保留尾部以孤儿 tool 开头触发上游 400（tool 必须响应前置 tool_calls）。
+	for cut > 0 && cut < len(messages) && messages[cut].Role == "tool" {
+		cut++
+	}
+	if cut >= len(messages) {
+		return 0, messages, nil
+	}
+
 	if cut > lastUserIdx {
 		cut = lastUserIdx
 	}

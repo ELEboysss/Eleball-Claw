@@ -229,8 +229,17 @@ func (l *ToolCallingLoop) RunWithRegistry(
 	lastCallKey := ""
 	consecNoProgress := 0 // 同一 key 背靠背连续无进展次数
 	noProgressNudged := false
+	// 稀疏结果 nudge 延迟注入标记：循环内命中稀疏结果时置位，本轮 tool 消息全部追加完后统一注入。
+	// 直接在 tool 消息间插入 system 会破坏 assistant tool_calls 与 tool 响应的紧邻配对，
+	// 严格上游（DeepSeek 等）会报 400 "insufficient tool messages following tool_calls message"。
+	sparseNudgePending := false
 	// trackNoProgress 在每次工具调用完成后记录返回指纹并判定连续无进展循环。
 	// 首次 strike 注入一次 advisory nudge；连续 2 次 strike（3 次完全相同调用）返回 true。
+	// 注意：nudge 不在此处直接 append——并行 tool_calls 时本轮还有后续 tool 消息要追加，
+	// 在 tool 消息之间插入 system 会把同一 assistant 的 tool 响应隔开，严格上游
+	// （DeepSeek 等）会报 400 "insufficient tool messages following tool_calls message"。
+	// 故仅置 noProgressNudgePending 标记，本轮 tool 消息全部追加完后统一注入。
+	noProgressNudgePending := false
 	trackNoProgress := func(key, fingerprint string) bool {
 		const maxNoProgressConsec = 2
 		prev, seen := lastResultByKey[key]
@@ -248,8 +257,7 @@ func (l *ToolCallingLoop) RunWithRegistry(
 		lastCallKey = key
 		wouldBreak := consecNoProgress >= maxNoProgressConsec
 		if strike && !wouldBreak && !noProgressNudged {
-			result.Messages = append(result.Messages, llm.Message{Role: "system", Content: noProgressNudgePrompt})
-			msgIDs = append(msgIDs, "")
+			noProgressNudgePending = true
 			noProgressNudged = true
 		}
 		return wouldBreak
@@ -299,10 +307,14 @@ func (l *ToolCallingLoop) RunWithRegistry(
 					}})
 				}
 			} else if cErr != nil && onCompactEvent != nil {
-				// 压缩失败：下发 compact_error 或 compact_end（无节省）让前端收起 banner
+				// 压缩失败：下发 compact_end（无节省）让前端收起 banner。
+				// success/message 字段对齐云端契约（app 端按 success=false + message 渲染失败原因）；
+				// reason=error/error 字段保留以兼容 claw web 既有解析。
 				onCompactEvent(CompactEvent{Type: "compact_end", Data: map[string]interface{}{
-					"reason": "error",
-					"error":  cErr.Error(),
+					"success": false,
+					"message": cErr.Error(),
+					"reason":  "error",
+					"error":   cErr.Error(),
 				}})
 			} else if onCompactEvent != nil {
 				// 未触发阈值
@@ -575,14 +587,12 @@ func (l *ToolCallingLoop) RunWithRegistry(
 				Content:    toolContent,
 			})
 			msgIDs = append(msgIDs, "")
-			// 稀疏检测：工具返回内容过短时，追加 system nudge 提示 agent 仅基于返回内容作答（advisory）。
+			// 稀疏检测：工具返回内容过短时，本轮结束后追加 system nudge 提示 agent 仅基于返回内容作答（advisory）。
 			// 配合规则 6 忠实性约束，降低模型用稀疏返回编造可证伪事实的概率。
+			// 注意：仅置标记、延迟注入——并行 tool_calls 时若在此直接插入 system，
+			// 会把同一 assistant 的后续 tool 响应隔开，严格上游会报 tool_calls 配对 400。
 			if l.sparseResultThreshold > 0 && record.Error == "" && utf8.RuneCountInString(toolContent) < l.sparseResultThreshold {
-				result.Messages = append(result.Messages, llm.Message{
-					Role:    "system",
-					Content: sparseResultNudgePrompt,
-				})
-				msgIDs = append(msgIDs, "")
+				sparseNudgePending = true
 			}
 			toolCallCount++
 
@@ -592,6 +602,19 @@ func (l *ToolCallingLoop) RunWithRegistry(
 				result.LoopDetected = true
 			}
 
+		}
+
+		// 延迟 nudge 统一注入点：本轮所有 tool 消息已追加完毕，
+		// 此时插入 system 不会隔开 assistant tool_calls 与 tool 响应的配对。
+		if sparseNudgePending {
+			result.Messages = append(result.Messages, llm.Message{Role: "system", Content: sparseResultNudgePrompt})
+			msgIDs = append(msgIDs, "")
+			sparseNudgePending = false
+		}
+		if noProgressNudgePending {
+			result.Messages = append(result.Messages, llm.Message{Role: "system", Content: noProgressNudgePrompt})
+			msgIDs = append(msgIDs, "")
+			noProgressNudgePending = false
 		}
 
 		// C8：按本轮触及路径注入动态项目规则。在下一 LLM 调用前以 system 消息追加，
