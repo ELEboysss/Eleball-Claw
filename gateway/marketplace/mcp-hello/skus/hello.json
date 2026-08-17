@@ -22,5 +22,11 @@
   "actions": [
     { "name": "hello", "description": "返回问候语" }
   ],
+  "metadata": {
+    "module": "mcp-hello",
+    "package_module": "mcp-hello",
+    "package_title": "MCP Hello 示例",
+    "package_description": "MCP Streamable HTTP 驱动示例，暴露 hello/echo 工具。"
+  },
   "timeout_seconds": 30
 }

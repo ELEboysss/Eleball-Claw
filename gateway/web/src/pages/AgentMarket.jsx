@@ -94,6 +94,9 @@ export default function AgentMarket() {
   const [confirmAgent, setConfirmAgent] = useState(null)
   const [confirmLoading, setConfirmLoading] = useState(false)
   const [togglingId, setTogglingId] = useState(null)
+  // 能力包详情弹窗（存包分组键，渲染时从 packageCards 实时反查以拿最新成员状态）与包级激活忙碌态
+  const [packageDetail, setPackageDetail] = useState(null)
+  const [packageBusy, setPackageBusy] = useState(false)
   // 云端已购秘技（ModuleInstallMeta 列表）与安装中 module_id
   const [cloudMetas, setCloudMetas] = useState([])
   const [installingId, setInstallingId] = useState(null)
@@ -263,6 +266,67 @@ export default function AgentMarket() {
     )
   }, [displayAgents, keyword])
 
+  // 包分组键：package_module（= module.json id / package.json name slug）优先，回退 module（legacy 手写 SKU 的模块目录名）。
+  // module 键是 AgentToolLoader 在线门控的 load-bearing 键，仅作分组兜底，不写回。
+  const packageKeyOf = (agent) => {
+    const md = parseManifest(agent)?.metadata || {}
+    return md.package_module || md.module || ''
+  }
+  const packageTitleOf = (agent) => {
+    const md = parseManifest(agent)?.metadata || {}
+    return md.package_title || md.package_module || ''
+  }
+  const packageDescriptionOf = (agent) => {
+    const md = parseManifest(agent)?.metadata || {}
+    return md.package_description || ''
+  }
+
+  // 把 SKU 列表聚合成能力包卡（分组键 package_module || module）；无包的 SKU（云端已购未安装等）保持独立卡。
+  // 一个秘技包 = 一个卡片，包内多项能力（SKU）可被作为工具调用；包状态由成员 SKU 聚合。
+  const packageCards = useMemo(() => {
+    const groups = new Map()
+    const standalone = []
+    for (const agent of filteredAgents) {
+      const key = packageKeyOf(agent)
+      if (!key) {
+        standalone.push(agent)
+        continue
+      }
+      let g = groups.get(key)
+      if (!g) {
+        g = {
+          key,
+          title: packageTitleOf(agent) || key,
+          description: packageDescriptionOf(agent) || '',
+          category: agent.category || '',
+          level: agent.level || 1,
+          members: []
+        }
+        groups.set(key, g)
+      }
+      if (!g.title && packageTitleOf(agent)) g.title = packageTitleOf(agent)
+      if (!g.description && packageDescriptionOf(agent)) g.description = packageDescriptionOf(agent)
+      if (!g.category && agent.category) g.category = agent.category
+      g.members.push(agent)
+    }
+    return { packages: [...groups.values()], standalone }
+  }, [filteredAgents])
+
+  // 包聚合状态（购买/激活态由成员 SKU 聚合）
+  const packageAggregate = (pkg) => {
+    const members = pkg?.members || []
+    const purchasedCount = members.filter((m) => purchasedIds.has(m.id)).length
+    const activeCount = members.filter((m) => m.is_active).length
+    const priceDanwan = members.reduce((s, m) => s + (m.price_danwan || 0), 0)
+    return {
+      total: members.length,
+      purchasedCount,
+      activeCount,
+      priceDanwan,
+      allPurchased: members.length > 0 && purchasedCount === members.length
+    }
+  }
+
   const parseManifestCredentials = (agent) => {
     try {
       const manifest = typeof agent.manifest_json === 'string' ? JSON.parse(agent.manifest_json) : agent.manifest_json
@@ -271,6 +335,11 @@ export default function AgentMarket() {
       return {}
     }
   }
+
+  // 包级凭证代表成员：包内第一个声明了凭证的 SKU。凭证为模块级（scope=module，
+  // 存 module:<driver> 桶共享），用任一成员打开配置弹窗即可完成整个包的凭证。
+  const packageCredsRep = (pkg) =>
+    (pkg?.members || []).find((m) => Object.keys(parseManifestCredentials(m)).length > 0)
 
   const openCredentialModal = async (agent) => {
     setCredentialError('')
@@ -294,6 +363,8 @@ export default function AgentMarket() {
       await agentMarketApi.saveCredentials(credentialModal.id, credentialValues)
       setMessage(`${credentialModal.name} 凭证已保存`)
       setCredentialModal(null)
+      // 凭证保存后刷新列表：credential_complete 重新计算，勾选/激活不再被旧状态禁用
+      loadAgents()
     } catch (err) {
       setCredentialError(err.message || '凭证保存失败')
     } finally {
@@ -440,6 +511,120 @@ export default function AgentMarket() {
     } finally {
       setDepsInstalling(false)
     }
+  }
+
+  // 包级一键激活：对包内未激活成员逐条 toggle（勾选能力 → 加入 tools），单条失败（未购买/凭证不全）不阻断整包。
+  // 复用后端 ToggleAgentActive（内部含购买门禁 + 按部署拉起 runtime），与云端对称。
+  const handleActivateLocalPackage = async (pkg) => {
+    if (!pkg) return
+    const members = pkg.members.map((m) => agents.find((a) => a.id === m.id) || m)
+    setPackageBusy(true)
+    setMessage('')
+    let ok = 0
+    let skipped = 0
+    for (const m of members) {
+      if (m.is_active) continue
+      if (m.driver_registered === false) {
+        skipped++ // 驱动未注册的死项（后端对账下架前的前端防御），跳过
+        continue
+      }
+      try {
+        const res = await agentMarketApi.toggleActive(m.id)
+        const active = res?.active ?? true
+        setAgents((prev) => prev.map((a) => (a.id === m.id ? { ...a, is_active: active } : a)))
+        if (active) ok++
+      } catch {
+        continue
+      }
+    }
+    setMessage(`已激活 ${ok} 项能力${skipped > 0 ? `，跳过 ${skipped} 项失效能力` : ''}`)
+    setPackageBusy(false)
+  }
+
+  // 能力包卡：包级展示（标题/描述/分类/能力计数/激活态），点击打开详情窗口逐条勾选。
+  // claw 本地包免费 SKU 下载即自动 provision（已购），付费包保持「请到云端购买」提示（不提供包级购买）。
+  const renderPackageCard = (pkg) => {
+    const Icon = categoryIcons[pkg.category] || Package
+    const agg = packageAggregate(pkg)
+    return (
+      <div
+        key={`pkg-${pkg.key}`}
+        onClick={() => setPackageDetail(pkg.key)}
+        className="card p-5 flex flex-col hover:border-eleball-primary/40 transition-colors cursor-pointer"
+      >
+        <div className="flex items-start justify-between mb-4">
+          <div className="w-12 h-12 rounded-2xl bg-eleball-primary-light flex items-center justify-center shrink-0">
+            <Icon className="w-6 h-6 text-eleball-primary" />
+          </div>
+          <div className="flex items-center gap-2">
+            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${levelColors[pkg.level] || levelColors[1]}`}>
+              {levelNames[pkg.level] || '秘技'}
+            </span>
+            <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-eleball-surface-variant text-eleball-text-secondary">
+              能力包
+            </span>
+          </div>
+        </div>
+
+        <h3 className="font-semibold text-eleball-text mb-1">{pkg.title}</h3>
+        <p className="text-xs text-eleball-text-secondary line-clamp-2 mb-3">{pkg.description}</p>
+
+        <div className="flex items-center gap-1 text-xs text-eleball-text-tertiary mb-4">
+          {pkg.category && (
+            <>
+              <span>{pkg.category}</span>
+              <span className="mx-1">·</span>
+            </>
+          )}
+          <span>{agg.total} 个能力</span>
+          <span className="mx-1">·</span>
+          <span>{agg.activeCount} 已激活</span>
+        </div>
+
+        {/* 模块级配置凭证：配置一次，包内全部能力共享生效（scope=module 桶） */}
+        {(() => {
+          const rep = packageCredsRep(pkg)
+          if (!rep) return null
+          return (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); openCredentialModal(rep) }}
+              className="mb-3 w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-dashed border-amber-300 text-amber-600 hover:bg-amber-50 transition-colors"
+              title="模块级凭证：配置一次，包内全部能力共享生效"
+            >
+              <Settings className="w-3.5 h-3.5" /> 配置凭证（模块级）
+            </button>
+          )
+        })()}
+
+        <div className="mt-auto flex items-center justify-between gap-3">
+          <div className="text-sm">
+            {agg.priceDanwan === 0 ? (
+              <span className="text-emerald-600 font-medium">免费</span>
+            ) : (
+              <span className="font-bold text-eleball-text">{agg.priceDanwan.toLocaleString('zh-CN')} 弹丸</span>
+            )}
+          </div>
+          {agg.allPurchased ? (
+            agg.activeCount < agg.total ? (
+              <button
+                onClick={(e) => { e.stopPropagation(); handleActivateLocalPackage(pkg) }}
+                disabled={packageBusy}
+                className="btn-secondary text-sm px-4 py-2 disabled:opacity-50"
+              >
+                一键激活全部
+              </button>
+            ) : (
+              <span className="px-4 py-2 rounded-full text-sm font-medium bg-emerald-50 text-emerald-600">
+                已全部激活
+              </span>
+            )
+          ) : (
+            <span className="text-xs text-eleball-text-tertiary">付费秘技请到云端购买</span>
+          )}
+        </div>
+      </div>
+    )
   }
 
   // C1：卡片与详情大窗共用的底部动作区（价格 + 购买/激活/下载）。
@@ -735,9 +920,10 @@ export default function AgentMarket() {
         </div>
       )}
 
-      {/* 卡片网格 */}
+      {/* 卡片网格：能力包卡 + 独立 SKU 卡（一个秘技包 = 一个卡片，包内多项能力可被作为工具调用） */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {filteredAgents.map((agent) => {
+        {packageCards.packages.map(renderPackageCard)}
+        {packageCards.standalone.map((agent) => {
           const Icon = categoryIcons[agent.category] || Sparkles
           return (
             <div
@@ -842,7 +1028,7 @@ export default function AgentMarket() {
 
       {/* 购买确认弹窗 */}
       {confirmAgent && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[70] p-4">
           <div className="dialog-panel w-full max-w-sm">
             <div className="p-4 border-b border-eleball-outline flex items-center justify-between">
               <h3 className="font-bold text-eleball-text">确认购买</h3>
@@ -896,7 +1082,7 @@ export default function AgentMarket() {
 
       {/* SKU 凭证配置弹窗 */}
       {credentialModal && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[70] p-4">
           <div className="dialog-panel w-full max-w-md max-h-[80vh] overflow-auto">
             <div className="p-4 border-b border-eleball-outline flex items-center justify-between">
               <h3 className="font-bold text-eleball-text">{credentialModal.name} 凭证配置</h3>
@@ -924,7 +1110,9 @@ export default function AgentMarket() {
                         </span>
                       )}
                     </span>
-                    {def.required && <span className="text-xs text-red-500">必填</span>}
+                    {def.required
+                      ? <span className="text-xs text-red-500">必填</span>
+                      : <span className="text-xs text-eleball-text-tertiary">选填</span>}
                   </div>
                   {def.description && (
                     <p className="text-xs text-eleball-text-secondary">{def.description}</p>
@@ -951,7 +1139,7 @@ export default function AgentMarket() {
 
       {/* H2：依赖管理弹窗（模块级，展示包列表 + 风险提示 + 安装按钮） */}
       {depsModal && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[70] p-4">
           <div className="dialog-panel w-full max-w-md max-h-[80vh] overflow-auto">
             <div className="p-4 border-b border-eleball-outline flex items-center justify-between">
               <h3 className="font-bold text-eleball-text flex items-center gap-1.5">
@@ -1284,6 +1472,100 @@ export default function AgentMarket() {
                   </div>
                 )}
                 {renderAgentActions(agent)}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* 能力包详情弹窗：列出成员 SKU 逐条勾选（勾选=激活加入 tools）；包状态强关联成员模块 */}
+      {packageDetail && (() => {
+        const pkg = packageCards.packages.find((p) => p.key === packageDetail)
+        if (!pkg) return null
+        const Icon = categoryIcons[pkg.category] || Package
+        const agg = packageAggregate(pkg)
+        return (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setPackageDetail(null)}>
+            <div className="dialog-panel w-full max-w-lg max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+              <div className="p-4 border-b border-eleball-outline flex items-start gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-eleball-primary-light flex items-center justify-center shrink-0">
+                  <Icon className="w-6 h-6 text-eleball-primary" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="font-bold text-eleball-text truncate">{pkg.title}</h3>
+                    {pkg.category && (
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-eleball-surface-variant text-eleball-text-secondary">
+                        {pkg.category}
+                      </span>
+                    )}
+                  </div>
+                  {pkg.description && (
+                    <p className="text-xs text-eleball-text-secondary mt-0.5 line-clamp-2">{pkg.description}</p>
+                  )}
+                </div>
+                <button onClick={() => setPackageDetail(null)} className="text-eleball-text-tertiary hover:text-eleball-text shrink-0 text-xl leading-none">
+                  &times;
+                </button>
+              </div>
+
+              <div className="p-4 space-y-2 overflow-auto">
+                <div className="text-xs font-semibold text-eleball-text-tertiary uppercase tracking-wide">
+                  {agg.total} 个能力 · 勾选后加入 tools
+                </div>
+                {pkg.members.map((member) => {
+                  const m = agents.find((a) => a.id === member.id) || member
+                  const purchased = purchasedIds.has(m.id)
+                  const disabled = !purchased || m.driver_registered === false || m.credential_complete === false || togglingId === m.id
+                  return (
+                    <label
+                      key={m.id}
+                      className={`flex items-center gap-3 px-3 py-2.5 rounded-xl border transition-colors ${
+                        !purchased
+                          ? 'border-dashed border-eleball-outline cursor-not-allowed bg-gray-50 opacity-60'
+                          : disabled
+                            ? 'border-eleball-outline cursor-not-allowed bg-gray-50'
+                            : 'border-eleball-outline cursor-pointer hover:bg-eleball-primary-light/40'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        className="w-4 h-4 accent-eleball-primary shrink-0"
+                        checked={!!m.is_active}
+                        disabled={disabled}
+                        onChange={() => handleToggleActive(m)}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm text-eleball-text truncate">{m.name}</div>
+                        {m.description && <div className="text-xs text-eleball-text-tertiary truncate">{m.description}</div>}
+                      </div>
+                      {!purchased && <span className="text-xs text-eleball-text-tertiary shrink-0">未购买</span>}
+                      {purchased && m.driver_registered === false && (
+                        <span className="text-xs px-1.5 py-0.5 rounded-full bg-orange-50 text-orange-600 shrink-0">未注册</span>
+                      )}
+                      {purchased && m.credential_complete === false && (
+                        <span className="text-xs px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 shrink-0">凭证不全</span>
+                      )}
+                    </label>
+                  )
+                })}
+              </div>
+
+              <div className="p-4 border-t border-eleball-outline flex gap-3">
+                {agg.allPurchased && agg.activeCount < agg.total && (
+                  <button
+                    onClick={() => handleActivateLocalPackage(pkg)}
+                    disabled={packageBusy}
+                    className="flex-1 btn-secondary text-sm py-2 justify-center disabled:opacity-50"
+                  >
+                    一键激活全部
+                  </button>
+                )}
+                {!agg.allPurchased && (
+                  <span className="flex-1 text-center text-xs text-eleball-text-tertiary px-3 py-2 rounded-xl bg-eleball-surface-variant">
+                    付费秘技请到云端购买后，再下载安装激活
+                  </span>
+                )}
               </div>
             </div>
           </div>

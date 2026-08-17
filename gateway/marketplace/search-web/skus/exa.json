@@ -22,7 +22,13 @@
   "actions": [
     { "name": "search", "description": "按关键词进行 Exa 语义搜索（keyless，无需配置）" }
   ],
-  "metadata": { "module": "search-web", "provider": "exa" },
+  "metadata": {
+    "module": "search-web",
+    "package_module": "search-web",
+    "package_title": "联网搜索（本地）",
+    "package_description": "本地运行的网页搜索工具。",
+    "provider": "exa"
+  },
   "timeout_seconds": 45,
   "error_codes": [
     "credential_missing",

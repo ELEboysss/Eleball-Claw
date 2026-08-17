@@ -1,4 +1,4 @@
-import { memo, useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkBreaks from 'remark-breaks'
@@ -84,6 +84,25 @@ function IntermediateStep({ content }) {
   )
 }
 
+// formatLatency 耗时格式化（对齐 DSH stats.toolCall）：<1s 显示毫秒，否则秒
+function formatLatency(ms) {
+  if (ms == null || ms <= 0) return ''
+  if (ms < 1000) return `${ms}ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+// LiveElapsed 运行中工具的实时耗时（500ms 跳表），startedAt 缺失时不显示
+function LiveElapsed({ startedAt }) {
+  const [, forceTick] = useState(0)
+  useEffect(() => {
+    if (!startedAt) return undefined
+    const timer = setInterval(() => forceTick((v) => v + 1), 500)
+    return () => clearInterval(timer)
+  }, [startedAt])
+  if (!startedAt) return null
+  return <span className="text-eleball-text-tertiary">{formatLatency(Date.now() - startedAt)}</span>
+}
+
 function ToolStep({ step }) {
   const [expanded, setExpanded] = useState(false)
   const status = step.status || 'running'
@@ -118,12 +137,24 @@ function ToolStep({ step }) {
         <span className="flex items-center gap-2 min-w-0">
           {statusIcon}
           <span className="font-medium truncate">{step.tool}</span>
+          {/* F1：参数一行摘要（命令/路径/URL），对齐 DSH 工具卡片标题 */}
+          {step.summary && (
+            <span className="text-eleball-text-tertiary truncate font-mono">{step.summary}</span>
+          )}
         </span>
-        <ChevronDown
-          className={`w-3.5 h-3.5 text-eleball-text-tertiary flex-shrink-0 transition-transform ${
-            expanded ? 'rotate-180' : ''
-          }`}
-        />
+        <span className="flex items-center gap-1.5 flex-shrink-0">
+          {/* F1：即时状态——运行中实时计时；完成后展示后端回传耗时 */}
+          {status === 'running' ? (
+            <LiveElapsed startedAt={step.startedAt} />
+          ) : step.latencyMs > 0 ? (
+            <span className="text-eleball-text-tertiary">{formatLatency(step.latencyMs)}</span>
+          ) : null}
+          <ChevronDown
+            className={`w-3.5 h-3.5 text-eleball-text-tertiary transition-transform ${
+              expanded ? 'rotate-180' : ''
+            }`}
+          />
+        </span>
       </button>
       {expanded && (
         <div className="px-2.5 pb-2.5 space-y-2 text-eleball-text-secondary border-t border-eleball-outline-variant/50 pt-2">

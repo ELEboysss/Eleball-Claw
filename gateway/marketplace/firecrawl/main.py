@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Firecrawl MCP HTTP 服务器（cloud + claw 双端同构）。
 
-经 MCP Streamable HTTP JSON-RPC 暴露 scrape / crawl / extract 三工具，内部调用 Firecrawl API。
+经 MCP Streamable HTTP JSON-RPC 暴露 scrape / crawl / crawl_status / extract 四工具，内部调用 Firecrawl API。
 transport=mcp_http + deployment=docker：网关经 POST / 发 JSON-RPC，探活走 initialize + tools/list。
 API Key 由网关经 mcp_server_config.headers 的 X-Firecrawl-Key（${credentials.firecrawl_api_key}）
 逐请求注入；FIRECRAWL_BASE_URL 取 env（非密配置）。tools/list 不需 Key，tools/call 缺 Key 报错。
+crawl 为异步任务：返回 job_id 后经 crawl_status（GET /v1/crawl/{id}）轮询结果。
 
 仅依赖标准库（urllib + http.server），无需 pip install（对标 mcp-stdio-echo 零依赖，比 agent-reach 更轻）。
 auto_sku=true：网关探活拿到 tools/list 后自动派生三份可购买 SKU，免手写 skus/*.json。
@@ -13,6 +14,7 @@ auto_sku=true：网关探活拿到 tools/list 后自动派生三份可购买 SKU
 claw 经宿主机端口映射 http://localhost:8095 访问）。
 """
 
+import datetime
 import json
 import os
 import urllib.error
@@ -55,7 +57,7 @@ def tools_list():
         {
             "name": "crawl",
             "title": "Firecrawl Crawl",
-            "description": "基于 Firecrawl 的批量爬取：对指定网站启动批量爬取任务，返回任务 ID",
+            "description": "基于 Firecrawl 的批量爬取：对指定网站启动批量爬取任务（异步），返回任务 ID。拿到 job_id 后必须调用 crawl_status 工具轮询进度与抓取结果。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -63,6 +65,21 @@ def tools_list():
                     "limit": {"type": "integer", "description": "最大抓取页数", "default": 10},
                 },
                 "required": ["url"],
+            },
+        },
+        {
+            "name": "crawl_status",
+            "title": "Firecrawl Crawl Status",
+            "description": "查询 crawl 批量爬取任务的状态与结果。crawl 为异步任务：调用 crawl 拿到 job_id 后，用本工具轮询（传 id=job_id）。status=completed 时默认只返回页面概览（url/title 清单，支持 offset/limit 翻页）；需要某页正文时传 include_content=true，或对目标 URL 调 scrape。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "crawl 返回的 job_id"},
+                    "offset": {"type": "integer", "description": "页面概览起始偏移（翻页用），默认 0", "default": 0},
+                    "limit": {"type": "integer", "description": "页面概览每页条数，默认 100，最大 100", "default": 100},
+                    "include_content": {"type": "boolean", "description": "是否附带各页 markdown 正文（长文截断）；默认 false 只回概览", "default": False},
+                },
+                "required": ["id"],
             },
         },
         {
@@ -86,14 +103,16 @@ def tools_list():
     ]
 
 
-def _firecrawl_request(path, payload, api_key):
+def _firecrawl_request(path, payload, api_key, method="POST"):
     """调用 Firecrawl API，返回 (data, error)。api_key 由网关经 X-Firecrawl-Key 头逐请求注入。"""
     if not api_key:
         return None, "缺少 firecrawl_api_key（请在模块凭证配置 firecrawl_api_key）"
     url = FIRECRAWL_BASE_URL + path
-    body = json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json", "x-api-key": api_key}
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    # Firecrawl API 鉴权只认 Authorization: Bearer <key>（官方文档/SDK 统一形态）；
+    # 误用 x-api-key（Anthropic/Exa 风格）会被视为未提供 Key，一律 401。
+    headers = {"Content-Type": "application/json", "Authorization": "Bearer " + api_key}
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             return json.loads(resp.read().decode("utf-8")), None
@@ -153,7 +172,91 @@ def _do_crawl(args, api_key):
         return _error_text(err)
     if not data.get("success"):
         return _error_text(data.get("error", "Firecrawl crawl 失败"))
-    result = {"job_id": data.get("id"), "status": "started", "check_url": data.get("url")}
+    result = {
+        "job_id": data.get("id"),
+        "status": "started",
+        "check_url": data.get("url"),
+        "next_step": "crawl 为异步任务：请调用 crawl_status 工具（传 id=job_id）轮询进度；status=completed 时返回页面概览（url/title 清单），正文经 include_content=true 或 scrape 按需获取。",
+    }
+    return _text(json.dumps(result, ensure_ascii=False))
+
+
+# crawl_status include_content=true 时单页 markdown 的截断长度：防单页长文撑爆 LLM 上下文。
+CRAWL_PAGE_MARKDOWN_MAX = 2000
+
+# crawl_status 页面概览默认分页大小：概览只含 url/title（轻量），页数超限时经 offset/limit 翻页。
+CRAWL_STATUS_PAGE_LIMIT = 100
+
+
+def _crawl_page_overview(pages, offset, limit, include_content):
+    """构建 crawl 结果的分页概览：默认只回 url/title（防数十页全文挤占上下文，
+    连 URL 清单都被网关二次压缩截断）；include_content=true 时附带截断后的 markdown。"""
+    if not isinstance(pages, list):
+        return [], 0
+    total = len(pages)
+    out = []
+    for p in pages[offset:offset + limit]:
+        if not isinstance(p, dict):
+            continue
+        meta = p.get("metadata") or {}
+        item = {
+            "url": meta.get("sourceURL") or meta.get("url") or "",
+            "title": meta.get("title") or "",
+        }
+        if include_content:
+            md = p.get("markdown")
+            if isinstance(md, str):
+                if len(md) > CRAWL_PAGE_MARKDOWN_MAX:
+                    md = md[:CRAWL_PAGE_MARKDOWN_MAX] + "\n...(内容过长已截断)"
+                item["markdown"] = md
+        out.append(item)
+    return out, total
+
+
+def _do_crawl_status(args, api_key):
+    job_id = args.get("id")
+    if not job_id:
+        return _error_text("缺少 id 参数（crawl 返回的 job_id）")
+    data, err = _firecrawl_request("/v1/crawl/%s" % job_id, None, api_key, method="GET")
+    if err:
+        return _error_text(err)
+    result = {
+        "status": data.get("status"),
+        "total": data.get("total"),
+        "completed": data.get("completed"),
+        "credits_used": data.get("creditsUsed"),
+        # 心跳字段：每次轮询返回必不同，网关 no-progress 循环检测据此识别「轮询在推进」，
+        # 避免同 job_id 多次轮询被误判为无意义重复调用（同 tool+args+同返回才计 strike）。
+        "polled_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+    }
+    status = data.get("status")
+    if status in ("completed", "failed", "cancelled"):
+        # 概览优先：默认只回 url/title 清单（轻量、URL 永远枚举得全）；
+        # 正文按需取：include_content=true（配合 offset/limit 翻页）或对单页用 scrape（命中 Firecrawl 缓存）。
+        try:
+            offset = max(0, int(args.get("offset") or 0))
+        except (TypeError, ValueError):
+            offset = 0
+        try:
+            limit = int(args.get("limit") or CRAWL_STATUS_PAGE_LIMIT)
+            limit = min(max(1, limit), CRAWL_STATUS_PAGE_LIMIT)
+        except (TypeError, ValueError):
+            limit = CRAWL_STATUS_PAGE_LIMIT
+        include_content = bool(args.get("include_content"))
+        pages, pages_total = _crawl_page_overview(data.get("data"), offset, limit, include_content)
+        result["pages"] = pages
+        result["pages_total"] = pages_total
+        result["pages_offset"] = offset
+        if offset + limit < pages_total:
+            result["pages_hint"] = "仅返回第 %d-%d 页（共 %d 页）：传 offset=%d 继续翻页。" % (offset + 1, offset + len(pages), pages_total, offset + limit)
+        if not include_content:
+            result["content_hint"] = "概览只含页面 URL/标题；需要某页正文时：本工具传 include_content=true（可配 offset/limit 单页取），或对目标 URL 调 scrape。"
+        if status in ("failed", "cancelled"):
+            result["hint"] = "任务已%s。" % ("失败" if status == "failed" else "取消")
+    elif status in ("scraping",):
+        # 进行中：附带进度与节奏提示。模型无法 sleep，密集轮询只会空烧步数预算；
+        # 长任务正确姿势是告知进度后收尾，稍后由用户追问时再查。
+        result["hint"] = "任务进行中（completed/total 见上）。任务推进需要时间，请勿立即连续轮询：可先向用户说明当前进度，稍后用户追问时再查；任务完成后 crawl_status 会返回页面概览。"
     return _text(json.dumps(result, ensure_ascii=False))
 
 
@@ -179,6 +282,8 @@ def tools_call(name, arguments, api_key):
         return _do_scrape(arguments, api_key)
     if name == "crawl":
         return _do_crawl(arguments, api_key)
+    if name == "crawl_status":
+        return _do_crawl_status(arguments, api_key)
     if name == "extract":
         return _do_extract(arguments, api_key)
     return _error_text("Unknown tool: %s" % name)
@@ -227,7 +332,7 @@ class Handler(BaseHTTPRequestHandler):
                 "module_id": "firecrawl",
                 "version": "1.0.0",
                 "status": "ok",
-                "capabilities": ["scrape", "crawl", "extract"],
+                "capabilities": ["scrape", "crawl", "crawl_status", "extract"],
             })
             return
         self._send_json(404, {"error": "not found"})

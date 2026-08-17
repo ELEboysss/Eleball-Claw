@@ -7,7 +7,8 @@ Eleball 弹丸集市中的网页抓取秘技模块，将 [Firecrawl](https://www
 ## 能力
 
 - `scrape`：将单个网页转换为干净 Markdown，返回标题、URL、描述等元数据。
-- `crawl`：对指定网站启动批量爬取任务，返回任务 ID。
+- `crawl`：对指定网站启动批量爬取任务（异步），返回任务 ID；须配合 `crawl_status` 轮询结果。
+- `crawl_status`：查询 crawl 任务状态与结果。完成时默认只回**页面概览**（url/title 清单，支持 `offset`/`limit` 翻页，URL 永远枚举得全）；正文按需取：`include_content=true`（长 markdown 截断）或对单页调 `scrape`。
 - `extract`：按 JSON Schema 从网页中提取结构化数据。
 
 ## 运行模型（stdio + process + auto_sku）
@@ -28,7 +29,7 @@ Firecrawl Cloud API 需要 API Key，在 `module.json` 顶层声明：
 }
 ```
 
-- API Key 由网关 per-call 注入：每次 `tools/call` 经 `_meta.credentials.firecrawl_api_key` 透传给子进程，子进程用作 `x-api-key` 头调 Firecrawl API（不再 spawn 时烤进 env）。
+- API Key 由网关 per-call 注入：每次 `tools/call` 经 `_meta.credentials.firecrawl_api_key` 透传给子进程，子进程用作 `Authorization: Bearer <key>` 头调 Firecrawl API（不再 spawn 时烤进 env；Firecrawl 不识别 `x-api-key`，误用会一律 401）。
 - 凭证须 `scope=module`（同模块三 SKU 共用一份），网关按调用用户从 `module:firecrawl` 桶加载。
 - 用户在 web「配置凭证」填写后，下次调用即取新值生效（per-call 注入，无需重 spawn 子进程）。
 - `FIRECRAWL_BASE_URL`（非密）仍经 env 传入，默认 `https://api.firecrawl.dev`；自托管 Firecrawl 时改为自托管 API 地址（自托管通常无需 Key）。

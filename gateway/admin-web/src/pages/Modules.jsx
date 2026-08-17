@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { moduleApi, clawMarketApi } from '../api/client'
+import { useEffect, useMemo, useState } from 'react'
+import { moduleApi, clawMarketApi, agentApi } from '../api/client'
 import DockerMissingBanner from '../components/DockerMissingBanner'
 
 // 模块来源标签：eleball_cloud->eleball云端 / eleball_builtin->eleball内置 / user·mcp->主体名；
@@ -11,44 +11,61 @@ function sourceLabel(origin, actor, official) {
   return official ? '官方' : '第三方'
 }
 
+// 官方包判定（与后端 SkillRuntime.Official + SourceOrigin 对齐）：
+// official=true（内置/云端官方）恒官方；user/mcp/第三方 cloud 一律非官方可卸载。
+function isOfficialPkg(pkg) {
+  const anyRt = (pkg.runtimes || [])[0]
+  return !!anyRt?.official || anyRt?.source_origin === 'eleball_builtin'
+}
+
+// 包状态聚合优先级：在线 > 离线（含探活错误/未激活/未运行）
+function aggregateStatus(runtimes) {
+  if (!runtimes || runtimes.length === 0) return 'offline'
+  if (runtimes.some((r) => r.status === 'online')) return 'online'
+  return 'offline'
+}
+
+// SKU 所属包 slug（manifest.metadata.package_module，回退 legacy 的 metadata.module，与 AgentMarket.packageKeyOf 对齐）
+function skuPackageKey(sku) {
+  try {
+    const mf = typeof sku.manifest_json === 'string' ? JSON.parse(sku.manifest_json) : sku.manifest_json
+    return mf?.metadata?.package_module || mf?.metadata?.module || ''
+  } catch { return '' }
+}
+
+// 运行时能力清单（capabilities 为 JSON 字符串或数组）
+function parseCaps(raw) {
+  if (Array.isArray(raw)) return raw
+  if (typeof raw === 'string' && raw) {
+    try { const v = JSON.parse(raw); return Array.isArray(v) ? v : [] } catch { return [] }
+  }
+  return []
+}
+
 export default function Modules() {
-  const [modules, setModules] = useState([])
-  const [drivers, setDrivers] = useState([])
-  const [cloudInstalled, setCloudInstalled] = useState([]) // P4：云端已购可安装模块
-  const [installing, setInstalling] = useState(null) // P4：安装中 module_id
-  const [starting, setStarting] = useState(null) // 「启动服务」中的 module_id
+  const [modules, setModules] = useState([]) // 运行时（runtimeToModuleRecord 视图）
+  const [skus, setSkus] = useState([]) // 秘技 SKU（AgentItem，本地集市 /agents）
+  const [drivers, setDrivers] = useState([]) // 驱动映射（兼容视图）
+  const [cloudInstalled, setCloudInstalled] = useState([]) // 云端已购可安装模块
+  const [installing, setInstalling] = useState(null)
+  const [starting, setStarting] = useState(null) // 「启动服务」中的 runtime_id
+  const [uninstalling, setUninstalling] = useState(null) // 卸载中的包 key
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [activeTab, setActiveTab] = useState('modules')
-
-  const [moduleForm, setModuleForm] = useState({
-    module_id: '',
-    name: '',
-    description: '',
-    url: '',
-    transport_type: 'module',
-    capabilities: '',
-    version: '',
-    auth_token: ''
-  })
-
-  const [driverForm, setDriverForm] = useState({
-    driver_id: '',
-    name: '',
-    description: '',
-    transport_type: 'module',
-    module_id: '',
-    endpoint: '',
-    auth_token: '',
-    schema_json: ''
-  })
+  const [activeTab, setActiveTab] = useState('local')
 
   const fetchData = async () => {
     setLoading(true)
     setError('')
     try {
-      const [mRes, dRes] = await Promise.all([moduleApi.listModules(), moduleApi.listDrivers()])
-      setModules(mRes?.data?.items || mRes?.items || [])
+      const [mRes, aRes, dRes] = await Promise.all([
+        moduleApi.listModules().catch(() => null),
+        agentApi.listAgents().catch(() => null),
+        moduleApi.listDrivers().catch(() => null),
+      ])
+      setModules(mRes?.data?.items || mRes?.items || mRes || [])
+      const list = aRes?.data?.items || aRes?.items || aRes || []
+      setSkus(Array.isArray(list) ? list : [])
       setDrivers(dRes?.data?.items || dRes?.items || [])
       // P4：拉取云端已购可安装模块（失败不阻塞本地展示）
       clawMarketApi.listInstalledModules()
@@ -60,6 +77,46 @@ export default function Modules() {
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    fetchData()
+  }, [])
+
+  // SKU 按包 slug 分组
+  const skusByPackage = useMemo(() => {
+    const m = new Map()
+    for (const sku of skus) {
+      const key = skuPackageKey(sku)
+      if (!key) continue
+      if (!m.has(key)) m.set(key, [])
+      m.get(key).push(sku)
+    }
+    return m
+  }, [skus])
+
+  // 运行时按包（package_name 优先，空回退运行时 ID）分组 → 秘技包。
+  // 一个秘技包 = 一个卡片：包内多项能力（SKU）可被作为工具调用。
+  const packages = useMemo(() => {
+    const m = new Map()
+    for (const rt of modules) {
+      const key = rt.package_name || rt.module_id
+      let p = m.get(key)
+      if (!p) {
+        p = {
+          key,
+          title: rt.package_title || rt.name || key,
+          description: rt.package_description || '',
+          runtimes: [],
+        }
+        m.set(key, p)
+      }
+      if (rt.package_title) p.title = rt.package_title
+      else if (p.title === key && rt.name) p.title = rt.name
+      if (rt.package_description) p.description = rt.package_description
+      p.runtimes.push(rt)
+    }
+    return [...m.values()]
+  }, [modules])
 
   // P4：安装云端已购模块到本地（均需 VIP1+；官方直接激活预置，第三方拉镜像+签名校验）
   const handleInstall = async (meta) => {
@@ -78,90 +135,36 @@ export default function Modules() {
   }
 
   // T8：本地秘技分享到云端审核（先提交、审核后下发；免 auth_token 鸡生蛋）
-  const handleSubmitReview = async (m) => {
-    if (!window.confirm(`确定分享模块 ${m.module_id} 到云端？\n提交后由管理员审核，通过后上架为云端秘技。`)) return
+  const handleSubmitReview = async (pkg) => {
+    if (!window.confirm(`确定分享秘技包「${pkg.title}」到云端？\n提交后由管理员审核，通过后上架为云端秘技。`)) return
     setError('')
     try {
-      await moduleApi.submitForReview(m.module_id)
-      setError(`模块 ${m.module_id} 已分享到云端，等待审核`)
+      await moduleApi.submitForReview(pkg.key)
+      setError(`秘技包「${pkg.title}」已分享到云端，等待审核`)
     } catch (err) {
       setError(err?.message || err || '分享失败')
     }
   }
 
-  useEffect(() => {
-    fetchData()
-  }, [])
-
-  const handleModuleSubmit = async (e) => {
-    e.preventDefault()
+  // 真·卸载整个秘技包（停进程/容器 + 删本地目录 + 下架 SKU + 注销运行时；官方包拒绝）
+  const handleUninstall = async (pkg) => {
+    const rt = pkg.runtimes[0]
+    if (!rt) return
+    if (!window.confirm(`确定卸载秘技包「${pkg.title}」？\n将停止运行并删除本地文件，不可恢复。`)) return
+    setUninstalling(pkg.key)
     setError('')
     try {
-      const body = {
-        ...moduleForm,
-        capabilities: moduleForm.capabilities
-          ? moduleForm.capabilities.split(',').map((s) => s.trim()).filter(Boolean)
-          : []
-      }
-      await moduleApi.registerModule(body)
-      setModuleForm({
-        module_id: '',
-        name: '',
-        description: '',
-        url: '',
-        transport_type: 'module',
-        capabilities: '',
-        version: '',
-        auth_token: ''
-      })
-      fetchData()
+      await moduleApi.uninstallModule(rt.module_id)
+      setError(`已卸载「${pkg.title}」`)
+      await fetchData()
     } catch (err) {
-      setError(err?.message || err || '提交失败')
+      setError(err?.message || err || '卸载失败')
+    } finally {
+      setUninstalling(null)
     }
   }
 
-  const handleDriverSubmit = async (e) => {
-    e.preventDefault()
-    setError('')
-    try {
-      await moduleApi.registerDriver(driverForm)
-      setDriverForm({
-        driver_id: '',
-        name: '',
-        description: '',
-        transport_type: 'module',
-        module_id: '',
-        endpoint: '',
-        auth_token: '',
-        schema_json: ''
-      })
-      fetchData()
-    } catch (err) {
-      setError(err?.message || err || '提交失败')
-    }
-  }
-
-  const handleDeleteModule = async (id) => {
-    if (!window.confirm(`确定注销模块 ${id}？`)) return
-    try {
-      await moduleApi.deleteModule(id)
-      fetchData()
-    } catch (err) {
-      setError(err?.message || err || '删除失败')
-    }
-  }
-
-  const handleRefreshModule = async (id) => {
-    try {
-      await moduleApi.refreshModule(id)
-      fetchData()
-    } catch (err) {
-      setError(err?.message || err || '刷新失败')
-    }
-  }
-
-  // 拉起模块（process 同步 / docker 异步），「本地模块」页「启动服务」按钮调用。
-  // 未激活模块不会自动启动，需先到集市激活；此处仅对已注册模块按部署方式拉起。
+  // 拉起模块（process 同步 / docker 异步），「启动服务」按钮调用。
   const handleStartModule = async (id) => {
     setStarting(id)
     setError('')
@@ -178,8 +181,17 @@ export default function Modules() {
     }
   }
 
+  const handleRefreshModule = async (id) => {
+    try {
+      await moduleApi.refreshModule(id)
+      fetchData()
+    } catch (err) {
+      setError(err?.message || err || '刷新失败')
+    }
+  }
+
   const handleRescanMarketplace = async () => {
-    if (!window.confirm('确定重新扫描 marketplace/ 目录？这会自动补齐新增的官方内置模块与驱动别名。')) return
+    if (!window.confirm('确定重新扫描 marketplace/ 目录？这会自动补齐新增的官方内置模块，并据 module.json 重派生 SKU 使秘技包卡片同步更新。')) return
     setLoading(true)
     setError('')
     try {
@@ -211,13 +223,19 @@ export default function Modules() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">集市模块 / 动态驱动</h1>
+        <div>
+          <h1 className="text-2xl font-bold">本地秘技</h1>
+          <p className="text-sm text-eleball-text-secondary mt-1">
+            秘技包与派生能力（SKU）的本地管理：一个秘技包 = 一个卡片，包内多项能力可被作为工具调用。
+            官方包更新走「重新扫描」；非官方包可卸载。
+          </p>
+        </div>
         <div className="flex gap-2">
           <button
-            onClick={() => setActiveTab('modules')}
-            className={`px-4 py-2 rounded-xl text-sm font-medium ${activeTab === 'modules' ? 'bg-eleball-primary text-white' : 'bg-white border border-eleball-outline'}`}
+            onClick={() => setActiveTab('local')}
+            className={`px-4 py-2 rounded-xl text-sm font-medium ${activeTab === 'local' ? 'bg-eleball-primary text-white' : 'bg-white border border-eleball-outline'}`}
           >
-            模块
+            本地秘技包
           </button>
           <button
             onClick={() => setActiveTab('drivers')}
@@ -229,16 +247,16 @@ export default function Modules() {
             onClick={() => setActiveTab('cloud')}
             className={`px-4 py-2 rounded-xl text-sm font-medium ${activeTab === 'cloud' ? 'bg-eleball-primary text-white' : 'bg-white border border-eleball-outline'}`}
           >
-            云端已购
+            云端模块
+          </button>
+          <button
+            onClick={handleRescanMarketplace}
+            disabled={loading}
+            className="px-4 py-2 rounded-xl text-sm font-medium bg-eleball-primary text-white hover:bg-eleball-primary-dark disabled:opacity-50"
+          >
+            {loading ? '扫描中...' : '重新扫描'}
           </button>
         </div>
-        <button
-          onClick={handleRescanMarketplace}
-          disabled={loading}
-          className="px-4 py-2 rounded-xl text-sm font-medium bg-eleball-primary text-white hover:bg-eleball-primary-dark disabled:opacity-50"
-        >
-          {loading ? '扫描中...' : '扫描 Marketplace'}
-        </button>
       </div>
 
       {/* Docker 缺失引导横幅：未安装 Docker 时提示安装指引，可关闭（存 localStorage） */}
@@ -246,162 +264,219 @@ export default function Modules() {
 
       {error && <div className="rounded-xl bg-red-50 text-red-600 px-4 py-3 text-sm">{error}</div>}
 
-      {activeTab === 'modules' && (
+      {activeTab === 'local' && (
         <>
-          <div className="bg-white rounded-2xl border border-eleball-outline p-6">
-            <h2 className="font-semibold mb-4">注册/更新模块</h2>
-            <form onSubmit={handleModuleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <input value={moduleForm.module_id} onChange={(e) => setModuleForm({ ...moduleForm, module_id: e.target.value })} placeholder="模块 ID（留空自动生成）" className="input" />
-              <input required value={moduleForm.name} onChange={(e) => setModuleForm({ ...moduleForm, name: e.target.value })} placeholder="显示名称" className="input" />
-              <input required value={moduleForm.url} onChange={(e) => setModuleForm({ ...moduleForm, url: e.target.value })} placeholder="模块地址，如 http://firecrawl:8080" className="input" />
-              <select value={moduleForm.transport_type} onChange={(e) => setModuleForm({ ...moduleForm, transport_type: e.target.value })} className="input">
-                <option value="module">module</option>
-                <option value="remote_url">remote_url</option>
-              </select>
-              <input value={moduleForm.capabilities} onChange={(e) => setModuleForm({ ...moduleForm, capabilities: e.target.value })} placeholder="能力清单，逗号分隔，如 scrape,crawl" className="input" />
-              <input value={moduleForm.version} onChange={(e) => setModuleForm({ ...moduleForm, version: e.target.value })} placeholder="版本号" className="input" />
-              <input value={moduleForm.auth_token} onChange={(e) => setModuleForm({ ...moduleForm, auth_token: e.target.value })} placeholder="自助注册令牌（可选）" className="input" />
-              <input value={moduleForm.description} onChange={(e) => setModuleForm({ ...moduleForm, description: e.target.value })} placeholder="描述" className="input" />
-              <div className="md:col-span-2">
-                <button type="submit" className="px-4 py-2 bg-eleball-primary text-white rounded-xl text-sm font-medium hover:bg-eleball-primary-dark transition-colors">
-                  提交
-                </button>
-              </div>
-            </form>
-          </div>
+          {packages.length === 0 && !loading && (
+            <div className="bg-white rounded-2xl border border-eleball-outline px-4 py-12 text-center text-eleball-text-secondary">
+              暂无本地秘技。claw 启动时会扫描 marketplace/ 预置官方秘技包。
+            </div>
+          )}
 
-          <div className="bg-white rounded-2xl border border-eleball-outline overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-eleball-surface-variant">
-                <tr>
-                  <th className="text-left px-4 py-3 font-medium">模块 ID</th>
-                  <th className="text-left px-4 py-3 font-medium">名称</th>
-                  <th className="text-left px-4 py-3 font-medium">模块来源</th>
-                  <th className="text-left px-4 py-3 font-medium">传输类型</th>
-                  <th className="text-left px-4 py-3 font-medium">状态</th>
-                  <th className="text-left px-4 py-3 font-medium">版本</th>
-                  <th className="text-left px-4 py-3 font-medium">最后心跳</th>
-                  <th className="text-left px-4 py-3 font-medium">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {modules.map((m) => (
-                  <tr key={m.module_id} className="border-t border-eleball-outline">
-                    <td className="px-4 py-3 font-mono">{m.module_id}</td>
-                    <td className="px-4 py-3">{m.name}</td>
-                    <td className="px-4 py-3 text-xs text-eleball-text-secondary">{sourceLabel(m.source_origin, m.source_actor, m.official) || '-'}</td>
-                    <td className="px-4 py-3">{m.transport_type}</td>
-                    <td className="px-4 py-3">
-                      <span className={`px-2 py-1 rounded-lg text-xs font-medium ${m.status === 'online' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
-                        {m.status === 'online' ? '在线' : '离线'}
-                      </span>
-                      {m.status !== 'online' && (
-                        <div className="mt-1 text-[11px] leading-snug max-w-[180px]">
-                          <div>
-                            {!m.activated ? (
-                              <span className="text-amber-600">未激活</span>
-                            ) : m.error ? (
-                              <span className="text-red-500 cursor-help" title={m.error}>探活失败</span>
-                            ) : (
-                              <span className="text-eleball-text-tertiary">未运行</span>
-                            )}
-                          </div>
-                          {m.required_env && (
-                            <div className="text-eleball-text-tertiary">
-                              需{m.required_env === 'docker' ? 'Docker' : m.required_env === 'node' ? 'Node' : 'Python'}环境
-                            </div>
-                          )}
-                        </div>
+          {packages.map((pkg) => {
+            const official = isOfficialPkg(pkg)
+            const status = aggregateStatus(pkg.runtimes)
+            const pkgSkus = skusByPackage.get(pkg.key) || []
+            const activeSkus = pkgSkus.filter((s) => s.is_active).length
+            const firstRt = pkg.runtimes[0] || {}
+            return (
+              <div key={pkg.key} className="bg-white rounded-2xl border border-eleball-outline overflow-hidden">
+                {/* 包头 */}
+                <div className="px-5 py-4 border-b border-eleball-outline bg-eleball-surface-variant/40">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h2 className="font-semibold">{pkg.title}</h2>
+                        <span className="font-mono text-xs text-eleball-text-secondary">{pkg.key}</span>
+                        <span className={`px-2 py-0.5 rounded text-xs ${official ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
+                          {sourceLabel(firstRt.source_origin, firstRt.source_actor, firstRt.official)}
+                        </span>
+                        {official && <span className="px-2 py-0.5 rounded text-xs bg-emerald-50 text-emerald-600">官方</span>}
+                      </div>
+                      {pkg.description && (
+                        <p className="text-xs text-eleball-text-secondary mt-1 line-clamp-2">{pkg.description}</p>
                       )}
-                    </td>
-                    <td className="px-4 py-3">{m.version || '-'}</td>
-                    <td className="px-4 py-3">{formatTime(m.last_heartbeat)}</td>
-                    <td className="px-4 py-3 space-x-2">
-                      {m.status !== 'online' && m.required_env && (
+                      <div className="flex items-center gap-3 text-xs text-eleball-text-tertiary mt-2">
+                        <span className={`px-2 py-1 rounded-lg text-xs font-medium ${status === 'online' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
+                          {status === 'online' ? '在线' : '离线'}
+                        </span>
+                        {firstRt.version && <span>v{firstRt.version}</span>}
+                        <span>{pkg.runtimes.length} 个运行时</span>
+                        <span>{pkgSkus.length} 个能力{activeSkus > 0 ? ` · ${activeSkus} 已激活` : ''}</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {official ? (
                         <button
-                          onClick={() => handleStartModule(m.module_id)}
-                          disabled={starting === m.module_id}
-                          className="text-emerald-600 hover:underline disabled:opacity-50"
+                          onClick={() => setActiveTab('cloud')}
+                          className="px-3 py-1.5 rounded-lg text-xs font-medium border border-eleball-outline text-eleball-primary hover:bg-eleball-surface-variant"
+                          title="官方包不可卸载，更新在「云端模块」或点「重新扫描」"
                         >
-                          {starting === m.module_id ? '启动中…' : '启动服务'}
+                          云端更新
                         </button>
+                      ) : (
+                        <>
+                          {firstRt.source_origin === 'user' && (
+                            <button
+                              onClick={() => handleSubmitReview(pkg)}
+                              className="px-3 py-1.5 rounded-lg text-xs font-medium border border-eleball-outline text-blue-600 hover:bg-blue-50"
+                            >
+                              分享到云端
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleUninstall(pkg)}
+                            disabled={uninstalling === pkg.key}
+                            className="px-3 py-1.5 rounded-lg text-xs font-medium border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50"
+                          >
+                            {uninstalling === pkg.key ? '卸载中…' : '卸载'}
+                          </button>
+                        </>
                       )}
-                      <button onClick={() => handleRefreshModule(m.module_id)} className="text-eleball-primary hover:underline">刷新</button>
-                      <button onClick={() => handleSubmitReview(m)} className="text-blue-600 hover:underline">分享到云端</button>
-                      <button onClick={() => handleDeleteModule(m.module_id)} className="text-red-600 hover:underline">注销</button>
-                    </td>
-                  </tr>
-                ))}
-                {modules.length === 0 && !loading && (
-                  <tr><td colSpan={8} className="px-4 py-8 text-center text-eleball-text-secondary">暂无模块</td></tr>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 运行时子表 */}
+                <table className="w-full text-sm">
+                  <thead className="bg-eleball-surface-variant/40 text-eleball-text-secondary text-xs">
+                    <tr>
+                      <th className="text-left px-5 py-2 font-medium">运行时</th>
+                      <th className="text-left px-4 py-2 font-medium">传输</th>
+                      <th className="text-left px-4 py-2 font-medium">部署</th>
+                      <th className="text-left px-4 py-2 font-medium">状态</th>
+                      <th className="text-left px-4 py-2 font-medium">能力</th>
+                      <th className="text-right px-5 py-2 font-medium">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pkg.runtimes.map((rt) => {
+                      const online = rt.status === 'online'
+                      const canStart = !online && (rt.deployment === 'process' || rt.deployment === 'docker')
+                      const caps = parseCaps(rt.capabilities)
+                      return (
+                        <tr key={rt.module_id} className="border-t border-eleball-outline">
+                          <td className="px-5 py-2.5">
+                            <div className="font-medium">{rt.name}</div>
+                            <div className="text-xs text-eleball-text-secondary font-mono">{rt.module_id}</div>
+                          </td>
+                          <td className="px-4 py-2.5 text-xs text-eleball-text-secondary">{rt.transport_type || '-'}</td>
+                          <td className="px-4 py-2.5 text-xs text-eleball-text-secondary">{rt.deployment || '-'}</td>
+                          <td className="px-4 py-2.5">
+                            <span className={`px-2 py-1 rounded-lg text-xs font-medium ${online ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
+                              {online ? '在线' : '离线'}
+                            </span>
+                            {!online && (
+                              <div className="mt-1 text-[11px] leading-snug max-w-[180px]">
+                                <div>
+                                  {!rt.activated ? (
+                                    <span className="text-amber-600">未激活</span>
+                                  ) : rt.error ? (
+                                    <span className="text-red-500 cursor-help" title={rt.error}>探活失败</span>
+                                  ) : (
+                                    <span className="text-eleball-text-tertiary">未运行</span>
+                                  )}
+                                </div>
+                                {rt.required_env && (
+                                  <div className="text-eleball-text-tertiary">
+                                    需{rt.required_env === 'docker' ? 'Docker' : rt.required_env === 'node' ? 'Node' : 'Python'}环境
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <div className="flex flex-wrap gap-1">
+                              {caps.slice(0, 4).map((c) => (
+                                <span key={c} className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-eleball-text-secondary">{c}</span>
+                              ))}
+                              {caps.length > 4 && <span className="text-[10px] text-eleball-text-secondary">+{caps.length - 4}</span>}
+                              {caps.length === 0 && <span className="text-xs text-eleball-text-tertiary">-</span>}
+                            </div>
+                          </td>
+                          <td className="px-5 py-2.5 text-right space-x-2">
+                            {canStart && (
+                              <button onClick={() => handleStartModule(rt.module_id)} disabled={starting === rt.module_id} className="text-emerald-600 hover:underline disabled:opacity-50">
+                                {starting === rt.module_id ? '启动中…' : '启动'}
+                              </button>
+                            )}
+                            <button onClick={() => handleRefreshModule(rt.module_id)} className="text-eleball-primary hover:underline">刷新</button>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+
+                {/* 派生 SKU（能力）清单 */}
+                {pkgSkus.length > 0 && (
+                  <div className="px-5 py-3 border-t border-eleball-outline bg-eleball-surface-variant/20">
+                    <div className="text-xs font-medium text-eleball-text-secondary mb-2">派生能力（SKU）</div>
+                    <div className="flex flex-wrap gap-2">
+                      {pkgSkus.map((s) => (
+                        <span
+                          key={s.id}
+                          className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs border ${
+                            s.is_active ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-white border-eleball-outline text-eleball-text-secondary'
+                          }`}
+                          title={s.description || s.id}
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full ${s.is_active ? 'bg-emerald-500' : 'bg-gray-300'}`} />
+                          {s.name}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
                 )}
-              </tbody>
-            </table>
-          </div>
+              </div>
+            )
+          })}
         </>
       )}
 
       {activeTab === 'drivers' && (
-        <>
-          <div className="bg-white rounded-2xl border border-eleball-outline p-6">
-            <h2 className="font-semibold mb-4">注册/更新驱动映射</h2>
-            <form onSubmit={handleDriverSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <input required value={driverForm.driver_id} onChange={(e) => setDriverForm({ ...driverForm, driver_id: e.target.value })} placeholder="驱动 ID（如 firecrawl）" className="input" />
-              <input required value={driverForm.name} onChange={(e) => setDriverForm({ ...driverForm, name: e.target.value })} placeholder="显示名称" className="input" />
-              <select value={driverForm.transport_type} onChange={(e) => setDriverForm({ ...driverForm, transport_type: e.target.value })} className="input">
-                <option value="module">module</option>
-                <option value="remote_url">remote_url</option>
-              </select>
-              <input value={driverForm.module_id} onChange={(e) => setDriverForm({ ...driverForm, module_id: e.target.value })} placeholder="关联模块 ID（module 类型与 auth_token 二选一）" className="input" />
-              <input value={driverForm.endpoint} onChange={(e) => setDriverForm({ ...driverForm, endpoint: e.target.value })} placeholder="Endpoint（remote_url 类型必填）" className="input" />
-              <input value={driverForm.auth_token} onChange={(e) => setDriverForm({ ...driverForm, auth_token: e.target.value })} placeholder="自助注册令牌（module 类型与 module_id 二选一）" className="input" />
-              <input value={driverForm.description} onChange={(e) => setDriverForm({ ...driverForm, description: e.target.value })} placeholder="描述" className="input" />
-              <div className="md:col-span-2">
-                <button type="submit" className="px-4 py-2 bg-eleball-primary text-white rounded-xl text-sm font-medium hover:bg-eleball-primary-dark transition-colors">
-                  提交
-                </button>
-              </div>
-            </form>
+        <div className="bg-white rounded-2xl border border-eleball-outline overflow-hidden">
+          <div className="px-4 py-3 border-b border-eleball-outline bg-eleball-surface-variant">
+            <h2 className="font-semibold text-sm">动态驱动映射</h2>
+            <p className="text-xs text-eleball-text-secondary mt-1">
+              驱动别名（driver_id）已并入 SkillRuntime（DriverID 字段），此处为兼容视图，注销即解除运行时对外别名。
+            </p>
           </div>
-
-          <div className="bg-white rounded-2xl border border-eleball-outline overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-eleball-surface-variant">
-                <tr>
-                  <th className="text-left px-4 py-3 font-medium">驱动 ID</th>
-                  <th className="text-left px-4 py-3 font-medium">名称</th>
-                  <th className="text-left px-4 py-3 font-medium">传输类型</th>
-                  <th className="text-left px-4 py-3 font-medium">关联模块 / Endpoint</th>
-                  <th className="text-left px-4 py-3 font-medium">注册令牌</th>
-                  <th className="text-left px-4 py-3 font-medium">操作</th>
+          <table className="w-full text-sm">
+            <thead className="bg-eleball-surface-variant">
+              <tr>
+                <th className="text-left px-4 py-3 font-medium">驱动 ID</th>
+                <th className="text-left px-4 py-3 font-medium">名称</th>
+                <th className="text-left px-4 py-3 font-medium">传输类型</th>
+                <th className="text-left px-4 py-3 font-medium">关联模块 / Endpoint</th>
+                <th className="text-left px-4 py-3 font-medium">注册令牌</th>
+                <th className="text-left px-4 py-3 font-medium">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {drivers.map((d) => (
+                <tr key={d.driver_id} className="border-t border-eleball-outline">
+                  <td className="px-4 py-3 font-mono">{d.driver_id}</td>
+                  <td className="px-4 py-3">{d.name}</td>
+                  <td className="px-4 py-3">{d.transport_type}</td>
+                  <td className="px-4 py-3">{d.module_id || d.endpoint || '-'}</td>
+                  <td className="px-4 py-3 font-mono">{d.auth_token || '-'}</td>
+                  <td className="px-4 py-3">
+                    <button onClick={() => handleDeleteDriver(d.driver_id)} className="text-red-600 hover:underline">注销</button>
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {drivers.map((d) => (
-                  <tr key={d.driver_id} className="border-t border-eleball-outline">
-                    <td className="px-4 py-3 font-mono">{d.driver_id}</td>
-                    <td className="px-4 py-3">{d.name}</td>
-                    <td className="px-4 py-3">{d.transport_type}</td>
-                    <td className="px-4 py-3">{d.module_id || d.endpoint || '-'}</td>
-                    <td className="px-4 py-3 font-mono">{d.auth_token || '-'}</td>
-                    <td className="px-4 py-3">
-                      <button onClick={() => handleDeleteDriver(d.driver_id)} className="text-red-600 hover:underline">注销</button>
-                    </td>
-                  </tr>
-                ))}
-                {drivers.length === 0 && !loading && (
-                  <tr><td colSpan={6} className="px-4 py-8 text-center text-eleball-text-secondary">暂无驱动映射</td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </>
+              ))}
+              {drivers.length === 0 && !loading && (
+                <tr><td colSpan={6} className="px-4 py-8 text-center text-eleball-text-secondary">暂无驱动映射</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {activeTab === 'cloud' && (
         <div className="bg-white rounded-2xl border border-eleball-outline overflow-hidden">
           <div className="px-4 py-3 border-b border-eleball-outline bg-eleball-surface-variant">
-            <h2 className="font-semibold text-sm">云端已购秘技</h2>
+            <h2 className="font-semibold text-sm">云端模块</h2>
             <p className="text-xs text-eleball-text-secondary mt-1">
               从云端拉取已购模块，点「安装到本地」激活。官方模块直接激活，第三方模块拉取容器镜像并校验签名（需 Docker/Podman + cosign）。
             </p>

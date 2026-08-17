@@ -89,6 +89,10 @@ func (s *SkillRuntimeSKUService) DeriveSKUs(rt *model.SkillRuntime, tools []MCPT
 	}
 	sig := toolsSignature(tools)
 
+	// 包身份变化也触发重派生：模块更新（名称/描述/版本/分类/包字段）后 SKU 卡片须同步刷新。
+	// 与 tools 签名合并缓存，探活周期内包字段未变则跳过（避免每轮探活重复写库）。
+	sig = deriveSignature(sig, rt)
+
 	// 全程持锁：派生是「读旧->算 diff->写新/改状态」的复合操作，串行化避免并发 Create 主键冲突。
 	// 探活周期 60s/5min，派生仅在工具集变化时触发，持锁耗时毫秒级，无 contention 顾虑。
 	s.mu.Lock()
@@ -229,6 +233,22 @@ func buildDerivedManifest(rt *model.SkillRuntime, t MCPTool) model.ToolManifest 
 		"module":          rt.ID,
 		"auto_sku_module": rt.ID,
 	}
+	// 包级标识：package_module 是前端包卡分组键（= module.json id / package.json name slug），
+	// package_title/description 供包卡展示；module 键（rt.ID）是 AgentToolLoader 在线门控的
+	// load-bearing 键，保持 rt.ID 不改。包身份变化（模块更新）会进入 derive 签名触发重派生，
+	// 使 SKU manifest 与卡片同步刷新（秘技包「更新则卡片更新」）。
+	if rt.PackageName != "" {
+		metadata["package_module"] = rt.PackageName
+	}
+	if rt.PackageTitle != "" {
+		metadata["package_title"] = rt.PackageTitle
+	}
+	if rt.PackageDescription != "" {
+		metadata["package_description"] = rt.PackageDescription
+	}
+	if rt.Version != "" {
+		metadata["package_version"] = rt.Version // 随派生源记录，更新检测比对
+	}
 	// M5：伪工具标注（read_resource/get_prompt 由协议层据 resources/prompts capability 合成），
 	// 供 UI 区分展示「资源读取器/提示获取器」而非普通工具。
 	switch t.Name {
@@ -238,13 +258,19 @@ func buildDerivedManifest(rt *model.SkillRuntime, t MCPTool) model.ToolManifest 
 		metadata["pseudo_tool"] = "prompt"
 	}
 
+	// 分类取包级 category（rt.Category），空回退 rt.Name（保 legacy 模块无 category 时的旧行为）。
+	category := rt.Category
+	if category == "" {
+		category = rt.Name
+	}
+
 	return model.ToolManifest{
 		ID:          moduleSKUID(rt.ID, t.Name),
 		Name:        name,
 		Description: desc,
 		Driver:      model.ToolDriverType(rt.DriverID),
 		RuntimeType: runtimeType,
-		Category:    rt.Name,
+		Category:    category,
 		Level:       int(model.AgentLevelHuang),
 		PriceDanwan: 0,
 		Parameters:  params,
@@ -252,6 +278,17 @@ func buildDerivedManifest(rt *model.SkillRuntime, t MCPTool) model.ToolManifest 
 		Metadata:    metadata,
 		Credentials: rt.CredentialsMap(),
 	}
+}
+
+// deriveSignature 把派生源中影响 SKU 展示的包身份字段并入签名：
+// 包字段/名称/描述/版本/分类任一变化都会让签名失效，触发 deriveAndSync 全量重刷 SKU manifest
+// （SyncDerivedDisplay 保留 admin pin 字段与购买统计，仅刷新派生源）。
+func deriveSignature(toolSig string, rt *model.SkillRuntime) string {
+	if rt == nil {
+		return toolSig
+	}
+	return toolSig + "|" + rt.PackageName + "|" + rt.PackageTitle + "|" + rt.PackageDescription +
+		"|" + rt.Category + "|" + rt.Name + "|" + rt.Description + "|" + rt.Version
 }
 
 // toolsSignature 计算工具集签名：按 name 排序后整体 marshal 再 sha256。

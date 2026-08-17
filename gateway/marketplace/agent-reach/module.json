@@ -2,6 +2,7 @@
   "id": "agent-reach",
   "name": "Agent-Reach 互联网能力",
   "description": "网页阅读、搜索、视频字幕、GitHub、社交平台等",
+  "category": "互联网",
   "source": "marketplace",
   "source_origin": "eleball_cloud",
   "transport": "mcp_http",

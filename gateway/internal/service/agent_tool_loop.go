@@ -22,6 +22,15 @@ type AgentLLMClient interface {
 	ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan llm.ChatChunk, error)
 }
 
+// ToolCallStart 工具执行前的事件负载（F1：对齐 DSH tool/call 前置，前端即时 running 状态）
+type ToolCallStart struct {
+	Step      int    `json:"step"`
+	CallID    string `json:"call_id,omitempty"`
+	Tool      string `json:"tool"`
+	Arguments string `json:"arguments"`
+	Summary   string `json:"summary,omitempty"` // 参数关键字段一行摘要（命令/路径/URL），供卡片标题
+}
+
 // ToolCallRecord 工具调用记录
 type ToolCallRecord struct {
 	Step      int                    `json:"step"`
@@ -68,6 +77,10 @@ const defaultSparseResultThreshold = 200
 
 // sparseResultNudgePrompt 工具结果稀疏时紧随工具结果注入的提示（advisory，非硬约束）
 const sparseResultNudgePrompt = "（系统提示）以上工具返回的信息较为有限。请仅基于工具实际返回的内容作答；如需补充背景知识，请明确标注为你的补充说明而非工具返回；信息不足以支撑结论时，如实说明“工具未返回该信息”，不要用编造的具体事实补全。"
+
+// noProgressNudgePrompt 首次检测到无进展重复调用时注入的提示（advisory，每次 run 仅一次）。
+// 引导模型区分「轮询等待」与「卡死重试」：长任务应基于进度先回应用户，而非立即连续轮询。
+const noProgressNudgePrompt = "（系统提示）刚才的工具调用返回了与之前完全相同的结果，没有获得新信息。请停止无意义的重复调用：若你在轮询异步任务（如爬取/生成任务），任务推进需要时间，不要立即连续轮询——可基于当前进度先向用户说明状态；若确认调用无效或任务已卡住，请直接基于已有信息给出结论。"
 
 // ToolCallingLoop Function Calling 循环
 type ToolCallingLoop struct {
@@ -141,7 +154,7 @@ type RunResult struct {
 	Records          []ToolCallRecord
 	FinalContent     string
 	ReachMaxSteps    bool
-	LoopDetected     bool       // 检测到同工具同参数循环调用
+	LoopDetected     bool       // 检测到无进展循环（同 tool+args 返回完全一致的连续重复调用）
 	ReachTokenBudget bool       // AR-03：达到 token 预算上限
 	BudgetExceeded   bool       // AR-03：执行中余额校验失败
 	ReachCostBudget  bool       // AR-03：达到 max_cost_per_task 成本上限
@@ -154,6 +167,8 @@ type AssistantOutput struct {
 	ReasoningContent string
 	Delta            string
 	IsFinal          bool
+	// Usage 本次 LLM 调用的 token 用量（F1：step_usage 事件，含缓存命中 CachedTokens）
+	Usage *llm.Usage
 }
 
 // CompactEvent C4：工具循环内压缩事件，透传到 SSE。
@@ -175,11 +190,12 @@ func (l *ToolCallingLoop) Run(
 	onToolCall func(record ToolCallRecord) error,
 	onAssistantOutput func(output AssistantOutput),
 ) (*RunResult, error) {
-	return l.RunWithRegistry(ctx, l.registry, client, model, tools, messages, nil, env, onToolCall, onAssistantOutput, nil)
+	return l.RunWithRegistry(ctx, l.registry, client, model, tools, messages, nil, env, nil, onToolCall, onAssistantOutput, nil)
 }
 
 // RunWithRegistry 执行 Function Calling 循环，使用传入的 Registry（支持动态工具）
 // messageIDs 与 messages 平行，C4 压缩时定位 first_kept_entry_id；onCompactEvent 在压缩开始/结束时触发。
+// onToolStart（F1，可空）在每个工具执行前调用，供 SSE 前置下发 running 状态（对齐 DSH tool/call 前置语义）。
 func (l *ToolCallingLoop) RunWithRegistry(
 	ctx context.Context,
 	registry *ToolRegistry,
@@ -189,6 +205,7 @@ func (l *ToolCallingLoop) RunWithRegistry(
 	messages []llm.Message,
 	messageIDs []string,
 	env *ToolEnv,
+	onToolStart func(start ToolCallStart),
 	onToolCall func(record ToolCallRecord) error,
 	onAssistantOutput func(output AssistantOutput),
 	onCompactEvent func(event CompactEvent),
@@ -205,10 +222,38 @@ func (l *ToolCallingLoop) RunWithRegistry(
 	toolCallCount := 0
 	callIndex := 1
 	maxIterations := l.maxSteps + 2
-	// 检测连续同工具同参数循环调用：允许最多连续 3 次，第 4 次终止工具链
-	lastToolCallKey := ""
-	consecutiveCount := 0
-	const maxConsecutiveRepeats = 2
+	// 无进展（no-progress）循环检测（与云端同语义，对标 Roo Code 3-strike）：
+	// 仅当「同 (tool+args) 且返回与上一次完全一致（无新信息）」才记 strike；
+	// 返回有任何变化即清零——crawl_status 等轮询类调用（进度在推进）不再被误伤。
+	lastResultByKey := make(map[string]string) // key(tool+args) -> 上次返回指纹（model 视角内容）
+	lastCallKey := ""
+	consecNoProgress := 0 // 同一 key 背靠背连续无进展次数
+	noProgressNudged := false
+	// trackNoProgress 在每次工具调用完成后记录返回指纹并判定连续无进展循环。
+	// 首次 strike 注入一次 advisory nudge；连续 2 次 strike（3 次完全相同调用）返回 true。
+	trackNoProgress := func(key, fingerprint string) bool {
+		const maxNoProgressConsec = 2
+		prev, seen := lastResultByKey[key]
+		strike := seen && prev == fingerprint
+		if strike {
+			if key == lastCallKey {
+				consecNoProgress++
+			} else {
+				consecNoProgress = 1
+			}
+		} else {
+			consecNoProgress = 0
+			lastResultByKey[key] = fingerprint
+		}
+		lastCallKey = key
+		wouldBreak := consecNoProgress >= maxNoProgressConsec
+		if strike && !wouldBreak && !noProgressNudged {
+			result.Messages = append(result.Messages, llm.Message{Role: "system", Content: noProgressNudgePrompt})
+			msgIDs = append(msgIDs, "")
+			noProgressNudged = true
+		}
+		return wouldBreak
+	}
 	// AR-20：方括号标签工具调用格式错误时反馈 LLM 重试的累计次数
 	malformedRetries := 0
 	// AR-25：裸 JSON 工具调用反馈 LLM 重试的累计次数
@@ -382,6 +427,7 @@ func (l *ToolCallingLoop) RunWithRegistry(
 				ReasoningContent: resp.ReasoningContent,
 				Delta:            resp.Delta,
 				IsFinal:          isFinal,
+				Usage:            resp.Usage,
 			})
 		}
 
@@ -399,25 +445,8 @@ func (l *ToolCallingLoop) RunWithRegistry(
 		})
 		msgIDs = append(msgIDs, "")
 
-		// 先检测本轮 tool_calls 是否构成连续同工具同参数循环
-		loopDetected := false
-		for _, tc := range resp.ToolCalls {
-			key := tc.Function.Name + ":" + tc.Function.Arguments
-			if key == lastToolCallKey {
-				consecutiveCount++
-			} else {
-				lastToolCallKey = key
-				consecutiveCount = 1
-			}
-			if consecutiveCount > maxConsecutiveRepeats {
-				loopDetected = true
-				break
-			}
-		}
-		if loopDetected {
-			result.LoopDetected = true
-			break
-		}
+		// 循环检测已下沉到工具执行后（trackNoProgress，result-aware）：
+		// 同 (tool+args) 且返回完全一致才计 strike，见本轮执行尾部。
 
 		// C8：收集本轮工具调用触及的文件路径，用于回合结束后按需注入动态规则。
 		var roundTouchedPaths []string
@@ -435,6 +464,9 @@ func (l *ToolCallingLoop) RunWithRegistry(
 			// AR-26：FunctionGet 元工具拦截。走内嵌标记的模型用它主动拉取工具列表，
 			// 不执行真实工具，返回当前 assistant 的工具能力（RenderToolsAsText）作为 tool_result。
 			if strings.EqualFold(tc.Function.Name, functionGetName) {
+				if onToolStart != nil {
+					onToolStart(ToolCallStart{Step: callIndex, CallID: tc.ID, Tool: functionGetName, Arguments: tc.Function.Arguments, Summary: "拉取工具列表"})
+				}
 				functionGetCalls++
 				var list string
 				if functionGetCalls <= maxFunctionGetCalls {
@@ -462,6 +494,10 @@ func (l *ToolCallingLoop) RunWithRegistry(
 				})
 				msgIDs = append(msgIDs, "")
 				toolCallCount++
+				// 无进展检测：FunctionGet 反复拉取同一工具列表（返回一致）也会被计 strike
+				if trackNoProgress(tc.Function.Name+":"+tc.Function.Arguments, list) {
+					result.LoopDetected = true
+				}
 				continue
 			}
 
@@ -469,6 +505,18 @@ func (l *ToolCallingLoop) RunWithRegistry(
 				Step:      callIndex,
 				Tool:      tc.Function.Name,
 				Arguments: tc.Function.Arguments,
+			}
+
+			// F1：工具执行前回调（对齐 DSH tool/call 前置）——前端据此即时渲染 running 卡片，
+			// 覆盖审批等待与实际执行全程；onToolCall 仍在执行结束后携带结果回调。
+			if onToolStart != nil {
+				onToolStart(ToolCallStart{
+					Step:      callIndex,
+					CallID:    tc.ID,
+					Tool:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+					Summary:   summarizeToolCall(tc.Function.Name, input),
+				})
 			}
 
 			tool, resolvedName, ok := registry.Resolve(tc.Function.Name)
@@ -537,6 +585,12 @@ func (l *ToolCallingLoop) RunWithRegistry(
 				msgIDs = append(msgIDs, "")
 			}
 			toolCallCount++
+
+			// 无进展循环检测（result-aware）：本次返回与上次同 (tool+args) 的返回完全一致
+			// 才计 strike（model 视角无新信息，含错误重试）；返回有变化即清零，轮询不误伤。
+			if trackNoProgress(tc.Function.Name+":"+tc.Function.Arguments, toolContent) {
+				result.LoopDetected = true
+			}
 
 		}
 
@@ -612,9 +666,50 @@ func (l *ToolCallingLoop) RunWithRegistry(
 			ReasoningContent: finalResp.ReasoningContent,
 			Delta:            finalResp.Delta,
 			IsFinal:          true,
+			Usage:            finalResp.Usage,
 		})
 	}
 	return result, nil
+}
+
+// summarizeToolCall 提取工具参数的一行摘要（F1：工具卡片标题，对齐 DSH deriveSummary）。
+// 按工具名取关键字段（Shell→command，文件类→path，FetchURL→url，SearchWeb→query），
+// 缺省时回落到第一个非空字符串参数；截断到 80 字符。
+func summarizeToolCall(toolName string, input map[string]interface{}) string {
+	if input == nil {
+		return ""
+	}
+	keyByTool := map[string]string{
+		"Shell": "command", "BackgroundShell": "command",
+		"ReadFile": "path", "WriteFile": "path", "StrReplaceFile": "path", "ListDir": "path",
+		"Grep": "pattern", "Glob": "pattern",
+		"FetchURL": "url", "SearchWeb": "query",
+	}
+	pick := func(keys ...string) string {
+		for _, k := range keys {
+			if v, ok := input[k].(string); ok && v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+	summary := ""
+	if key, ok := keyByTool[toolName]; ok {
+		summary = pick(key)
+	}
+	if summary == "" {
+		for _, v := range input {
+			if s, ok := v.(string); ok && s != "" {
+				summary = s
+				break
+			}
+		}
+	}
+	// 只取首行，避免多行命令撑爆卡片标题
+	if idx := strings.IndexByte(summary, '\n'); idx >= 0 {
+		summary = summary[:idx]
+	}
+	return truncateByRunes(strings.TrimSpace(summary), 80)
 }
 
 // normalizeToolMessages 防御性校验 messages 中 assistant tool_calls 与 tool messages 的对应关系。

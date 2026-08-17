@@ -229,7 +229,31 @@ func (fs *FileSandbox) WriteFile(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(absPath), 0750); err != nil {
 		return fmt.Errorf("创建目录失败: %w", err)
 	}
-	return os.WriteFile(absPath, data, 0640)
+	return atomicWriteFile(absPath, data)
+}
+
+// atomicWriteFile 原子写入（F2，借鉴 DSH dsh-atomic-write）：先写同目录临时文件再 rename，
+// 避免写入中断留下半个文件；rename 失败（如 Windows 目标被占用）回退直接写。
+func atomicWriteFile(absPath string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(absPath), ".atomic-*")
+	if err != nil {
+		return os.WriteFile(absPath, data, 0640)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, absPath); err != nil {
+		os.Remove(tmpName)
+		return os.WriteFile(absPath, data, 0640)
+	}
+	return nil
 }
 
 // WriteFileReader 从 io.Reader 流式写入沙箱内文件（接收绝对路径，需校验在 basePath 下）

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -196,9 +198,112 @@ func (s *ModuleService) RegisterModule(record *model.ModuleRecord) error {
 	return s.registry.Register(rt)
 }
 
-// UnregisterModule 注销模块
+// UnregisterModule 注销模块（级联下架本模块/本包的 SKU 卡片）。
+// 秘技集市卡片与模块强关联：模块注销后其派生 SKU 一并下架（delisted，保留购买记录不硬删），
+// 集市列表（status=approved 过滤）即不再出现对应卡片。官方内置模块注销后由 rescan 重新物化。
 func (s *ModuleService) UnregisterModule(moduleID string) error {
+	// 先级联下架本模块（及其所属包）的 SKU，再注销运行时。
+	// 注销前仍可读到运行时包身份，故先取再删。
+	if rt := s.registry.Get(moduleID); rt != nil {
+		s.delistPackageSKUs(rt)
+	}
 	return s.registry.Unregister(moduleID)
+}
+
+// UninstallModule 真·卸载非官方模块（claw-only，秘技包级）：
+// 官方守卫 → 停进程/容器 → 下架本包全部 SKU（保留购买记录）→ 删 marketplace/<slug>/ 目录 → 注销本包全部运行时。
+// 官方模块（内置 / official=true）拒绝卸载：由 rescan 重播种，更新走「重新扫描」重派生 SKU。
+// moduleID = 运行时 ID（控制台包卡传入首运行时）；slug = 包名（rt.PackageName，空回退 rt.ID）。
+func (s *ModuleService) UninstallModule(moduleID string) error {
+	if s.repo == nil || s.registry == nil {
+		return errors.New("ModuleService 依赖未初始化")
+	}
+	rt, err := s.repo.GetByID(moduleID)
+	if err != nil {
+		return fmt.Errorf("模块 %s 不存在: %w", moduleID, err)
+	}
+	slug := rt.PackageName
+	if slug == "" {
+		slug = rt.ID
+	}
+	// 官方守卫：official=true（内置/云端官方）一律拒绝；user/mcp/第三方 cloud 可卸载。
+	if rt.Official {
+		return fmt.Errorf("官方模块 %s 不可卸载，请在「云端模块」页更新或重新扫描", slug)
+	}
+
+	// 1. 停运行时（process：kill 子进程；docker：compose down）。失败不阻断后续清理。
+	if s.manager != nil {
+		_ = s.manager.Stop(rt.ID)
+	}
+
+	// 2. 下架本包全部 SKU（沿「消失工具→下架」模式，delisted 保留购买记录，不硬删）。
+	s.delistPackageSKUs(rt)
+
+	// 3. 删磁盘目录（仅 user/mcp 起源有 marketplace/<slug>/ 本地文件；cloud 第三方是容器无目录，安全跳过）。
+	if rt.SourceOrigin == model.SkillRuntimeOriginUser || rt.SourceOrigin == model.SkillRuntimeOriginMCP {
+		if root := ResolveMarketplaceRoot(); root != "" {
+			target := filepath.Join(root, filepath.Base(slug))
+			// 防路径逃逸：仅删除 marketplace 根下的直接子目录
+			if strings.HasPrefix(target, root+string(filepath.Separator)) {
+				_ = os.RemoveAll(target)
+			}
+		}
+	}
+
+	// 4. 注销本包全部运行时（PackageName==slug 或 ID==slug 或 ID 前缀 slug- 的多运行时一并注销）。
+	runtimes, lerr := s.repo.List()
+	if lerr != nil {
+		return fmt.Errorf("列出运行时失败: %w", lerr)
+	}
+	for _, r := range runtimes {
+		if r.PackageName == slug || r.ID == slug || strings.HasPrefix(r.ID, slug+"-") {
+			_ = s.registry.Unregister(r.ID)
+		}
+	}
+	return nil
+}
+
+// delistPackageSKUs 下架某运行时所属秘技包的全部 SKU 卡片：
+// 先按运行时 ID 前缀粗筛（ListByModuleSKUs），再据 manifest 的 auto_sku_module / package_module
+// 精确判定归属（防前缀误伤同名前缀的其他包 SKU）；delisted 保留购买记录不硬删。
+func (s *ModuleService) delistPackageSKUs(rt *model.SkillRuntime) {
+	if s.agentRepo == nil || rt == nil {
+		return
+	}
+	// 归属键集合：运行时自身 ID + 包 slug（多运行时包共享 slug）
+	keys := map[string]bool{rt.ID: true}
+	if rt.PackageName != "" {
+		keys[rt.PackageName] = true
+	}
+	for _, id := range []string{rt.ID, rt.PackageName} {
+		if id == "" {
+			continue
+		}
+		items, err := s.agentRepo.ListByModuleSKUs(id)
+		if err != nil {
+			continue
+		}
+		for _, it := range items {
+			if it.Status != model.AgentStatusApproved {
+				continue
+			}
+			mf, err := it.Manifest()
+			if err != nil || mf == nil {
+				continue
+			}
+			// 精确归属：auto_sku_module（派生 SKU）或 module / package_module（手写/包派生 SKU）命中任一键
+			owned := false
+			for _, k := range []string{mf.Metadata["auto_sku_module"], mf.Metadata["module"], mf.Metadata["package_module"]} {
+				if k != "" && keys[k] {
+					owned = true
+					break
+				}
+			}
+			if owned {
+				_ = s.agentRepo.UpdateStatus(it.ID, model.AgentStatusDelisted)
+			}
+		}
+	}
 }
 
 // ListModules 列出所有已注册模块（返回实时健康状态）
@@ -432,6 +537,7 @@ type marketplaceModuleManifest struct {
 	ModuleID          string                         `json:"module_id"` // 兼容旧格式
 	Name              string                         `json:"name"`
 	Description       string                         `json:"description"`
+	Category          string                         `json:"category,omitempty"`            // 包分类（空回退 rt.Name，供包卡聚合展示）
 	URL               string                         `json:"url"`                           // 兼容旧格式
 	Endpoint          string                         `json:"endpoint"`                      // 新格式
 	Transport         string                         `json:"transport"`                     // 新格式
@@ -508,7 +614,231 @@ func (s *ModuleService) RescanMarketplace(logger *zap.Logger) error {
 		}
 		return nil
 	}
-	return s.ensureMarketplaceModules(root, logger)
+	if err := s.ensureMarketplaceModules(root, logger); err != nil {
+		return err
+	}
+	// 升级兼容：存量数据补齐包身份（运行时 + SKU manifest），使既有模块全部进入「秘技包」体系
+	// （包卡聚合 / 生命周期联动），幂等，对已补全的行无副作用。
+	if err := s.backfillPackageIdentity(logger); err != nil {
+		return err
+	}
+	// 孤儿 SKU 对账：旧版本注销模块时不级联下架 SKU（UnregisterModule 级联是后续修复），
+	// 历史遗留的 approved SKU 引用的运行时已不存在，卡片仍在集市展示。
+	// 幂等对账：引用已不存在运行时的 approved 可执行 SKU（driver≠none）下架，卡片即消失
+	// （delisted 保留购买记录）；prompt-only 秘技（driver=none）不受影响。
+	return s.reconcileOrphanedSKUs(logger)
+}
+
+// genericDriverAliases 通用运行时驱动别名（module/mcp/remote_url）：经 driverRegistry 注册为
+// 统一 SkillRuntimeDriver（启动时注册），执行时按 manifest.metadata.module 定位运行时。
+// 此类 SKU 的有效性取决于其 module 引用的运行时是否存在，而非 driver 本身。
+var genericDriverAliases = map[string]bool{
+	"module":     true,
+	"mcp":        true,
+	"remote_url": true,
+}
+
+// reconcileOrphanedSKUs 清理孤儿能力项（升级兼容，幂等）：
+// 遍历 approved 的可执行 SKU（driver≠none/builtin），其 driver 无对应运行时（按 DriverID 精确匹配）
+// 且非通用别名（module/mcp/remote_url）时，判定为死项下架——即使其 metadata.package_module 命中
+// 现存包的包名（迁移场景：旧模块运行时被新 {pkg}-mcp-{key} 运行时取代，旧 SKU 的 driver 指向
+// 已删除的旧运行时，但 package_module 与现存活包同名，按包归属会误判为有效）。
+// 通用别名 SKU 的有效性取决于 metadata.module 引用的运行时（保留原包归属判定）。
+//
+// delisted 保留购买记录与激活态，仅从集市列表（approved 过滤）消失——与 UnregisterModule
+// 级联下架、DeriveSKUs 消失工具下架同一语义。
+func (s *ModuleService) reconcileOrphanedSKUs(logger *zap.Logger) error {
+	if s.repo == nil || s.agentRepo == nil {
+		return nil
+	}
+	// 现存运行时 ID + 包 slug 集合（disabled 也算存在：用户主动禁用不视为孤儿）
+	runtimes, err := s.repo.List()
+	if err != nil {
+		return err
+	}
+	existing := make(map[string]bool, len(runtimes)*2)
+	for _, rt := range runtimes {
+		existing[rt.ID] = true
+		if rt.PackageName != "" {
+			existing[rt.PackageName] = true
+		}
+	}
+
+	items, _, err := s.agentRepo.ListByStatus(model.AgentStatusApproved, 1, 10000)
+	if err != nil {
+		return err
+	}
+	delisted := 0
+	for _, it := range items {
+		mf, err := it.Manifest()
+		if err != nil || mf == nil {
+			continue
+		}
+		// prompt-only / builtin 无运行时依赖，跳过
+		driver := string(mf.Driver)
+		if driver == "" || driver == string(model.ToolDriverNone) || driver == string(model.ToolDriverBuiltin) {
+			continue
+		}
+		// driver 直接命中现存运行时的 DriverID -> 有效
+		if _, err := s.repo.GetByDriverID(driver); err == nil {
+			continue
+		}
+		// 通用别名：有效性取决于 metadata.module 引用的运行时
+		if genericDriverAliases[driver] {
+			ref := mf.Metadata["auto_sku_module"]
+			if ref == "" {
+				ref = mf.Metadata["module"]
+			}
+			if ref == "" {
+				ref = mf.Metadata["package_module"]
+			}
+			if ref != "" && existing[ref] {
+				continue
+			}
+			// 引用失效 -> 落入下架
+		}
+		if err := s.agentRepo.UpdateStatus(it.ID, model.AgentStatusDelisted); err != nil {
+			warn := func(msg string, fields ...zap.Field) {
+				if logger != nil {
+					logger.Warn(msg, fields...)
+				}
+			}
+			warn("下架孤儿 SKU 失败", zap.String("sku_id", it.ID), zap.Error(err))
+			continue
+		}
+		delisted++
+		if logger != nil {
+			logger.Info("下架孤儿 SKU（driver 无对应运行时/模块已注销）",
+				zap.String("sku_id", it.ID),
+				zap.String("driver", driver),
+				zap.String("module_ref", mf.Metadata["module"]))
+		}
+	}
+	if delisted > 0 && logger != nil {
+		logger.Info("孤儿 SKU 对账完成", zap.Int("delisted", delisted))
+	}
+	return nil
+}
+
+// 内置模块分类兜底：存量安装的 marketplace/module.json 不被 SeedOfficial 覆盖（只补缺失文件），
+// 老文件无 category 字段时按此表回填，与当前 marketplace 源文件保持同值（新增模块需同步维护）。
+var builtinModuleCategoryFallback = map[string]string{
+	"agent-reach":    "互联网",
+	"firecrawl":      "互联网",
+	"search-web":     "搜索",
+	"stt":            "多媒体",
+	"mcp-hello":      "示例",
+	"mcp-stdio-echo": "示例",
+}
+
+// backfillPackageIdentity 存量数据补齐包身份（升级兼容，幂等）：
+// 老库运行时无 PackageName、手写 SKU manifest 无 package_module 时，按物化后的运行时回填：
+//  1. 运行时 PackageName/PackageTitle/PackageDescription 为空 -> 用 ID/Name/Description 回填
+//     （单运行时包 slug = 运行时 ID；多运行时包共享 slug 由各写入点保证）；官方内置模块
+//     无 Category 时按 builtinModuleCategoryFallback 兜底（老 module.json 无 category 字段）。
+//  2. approved SKU 的 manifest 缺 package_module 但 metadata.module / auto_sku_module 命中本包运行时
+//     -> 注入 package_module/package_title/package_description（保留其余字段与购买记录）。
+//
+// 由 RescanMarketplace（启动扫描 + 控制台「重新扫描」）调用，确保存量与新增模块都在秘技包体系内。
+func (s *ModuleService) backfillPackageIdentity(logger *zap.Logger) error {
+	if s.repo == nil || s.agentRepo == nil {
+		return nil
+	}
+	runtimes, err := s.repo.List()
+	if err != nil {
+		return err
+	}
+	warn := func(msg string, fields ...zap.Field) {
+		if logger != nil {
+			logger.Warn(msg, fields...)
+		}
+	}
+
+	// 1) 运行时包身份回填（PackageName 为空才写）
+	slugByID := make(map[string]string, len(runtimes))
+	for _, rt := range runtimes {
+		changed := false
+		slug := rt.PackageName
+		if slug == "" {
+			slug = rt.ID
+			rt.PackageName = slug
+			changed = true
+		}
+		if rt.PackageTitle == "" && rt.Name != "" {
+			rt.PackageTitle = rt.Name
+			changed = true
+		}
+		if rt.PackageDescription == "" && rt.Description != "" {
+			rt.PackageDescription = rt.Description
+			changed = true
+		}
+		// 官方内置模块分类兜底（老 module.json 无 category 字段时；分类影响派生 SKU 的集市过滤）
+		if rt.Category == "" && rt.Official {
+			if c, ok := builtinModuleCategoryFallback[rt.ID]; ok && c != "" {
+				rt.Category = c
+				changed = true
+			}
+		}
+		slugByID[rt.ID] = slug
+		if changed {
+			if err := s.repo.CreateOrUpdate(rt); err != nil {
+				warn("回填运行时包身份失败", zap.String("runtime_id", rt.ID), zap.Error(err))
+			}
+		}
+	}
+
+	// 2) SKU manifest 包元数据注入（仅 approved；delisted 保留原样）
+	for _, rt := range runtimes {
+		slug := slugByID[rt.ID]
+		if slug == "" {
+			continue
+		}
+		for _, prefix := range []string{rt.ID, slug} {
+			if prefix == "" {
+				continue
+			}
+			items, err := s.agentRepo.ListByModuleSKUs(prefix)
+			if err != nil {
+				continue
+			}
+			for _, it := range items {
+				if it.Status != model.AgentStatusApproved {
+					continue
+				}
+				mf, err := it.Manifest()
+				if err != nil || mf == nil {
+					continue
+				}
+				// 归属判定：module/auto_sku_module/package_module 命中本包任一键（防前缀误伤）
+				owned := false
+				for _, k := range []string{mf.Metadata["auto_sku_module"], mf.Metadata["module"], mf.Metadata["package_module"]} {
+					if k == rt.ID || (slug != "" && k == slug) {
+						owned = true
+						break
+					}
+				}
+				if !owned || mf.Metadata["package_module"] != "" {
+					continue // 非本包 SKU 或已补齐
+				}
+				mf.Metadata["package_module"] = slug
+				if rt.PackageTitle != "" {
+					mf.Metadata["package_title"] = rt.PackageTitle
+				}
+				if rt.PackageDescription != "" {
+					mf.Metadata["package_description"] = rt.PackageDescription
+				}
+				b, err := json.Marshal(mf)
+				if err != nil {
+					continue
+				}
+				it.ManifestJSON = string(b)
+				if err := s.agentRepo.Update(it); err != nil {
+					warn("回填 SKU 包元数据失败", zap.String("sku_id", it.ID), zap.Error(err))
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // ResolveMarketplaceRoot 解析 marketplace 根目录：
@@ -605,6 +935,10 @@ func (s *ModuleService) WriteUserModule(req UserModuleGenerateRequest, tools []M
 	if err := writeUserModuleJSON(moduleDir, moduleID, req, tools); err != nil {
 		return nil, err
 	}
+	// E3：双写 kimi 式标准秘技包清单 package.json，使 DIY 产出对云端与标准生态可读。
+	if err := writeUserPackageJSON(moduleDir, moduleID, req); err != nil {
+		return nil, err
+	}
 
 	// rescan 注册 SkillRuntime（含 AutoSKU/Credentials/DriverID）
 	if err := s.RescanMarketplace(nil); err != nil {
@@ -685,12 +1019,237 @@ func writeUserModuleJSON(moduleDir, moduleID string, req UserModuleGenerateReque
 	return os.WriteFile(filepath.Join(moduleDir, "module.json"), data, 0o644)
 }
 
-// sanitizeUserModuleID 据展示名推导合法 module ID：小写 + [a-z0-9-]，其余折叠为单 -，
-// 再追加 uuid8 后缀（复用 cloud generateUniqueModuleID 的 uuid 模式）使重名模块不撞
-// （为 T11 分享到云端铺路：不同用户同名模块得到不同 ID，云端无需改名、本地↔云端 ID 链稳定）。
-// 仅用于新生成模块（module_id 缺省路径，WriteUserModule:596）；显式传 module_id 的重新生成/定点
-// 走 :594 旁路，不经过本函数，故「仅影响新生成模块，不破坏存量查找，官方模块 ID 不变」。
-func sanitizeUserModuleID(name string) string {
+// userPackageManifest kimi 式标准秘技包清单（specs/package-manifest-schema.json 的
+// stdio MCP 子集——造秘技页当前只产 stdio 模块）。schema 对 credentials 条目
+// additionalProperties=false 且不含 scope，故凭证定义单列 slim 类型（丢弃 Scope）。
+type userPackageManifest struct {
+	Name        string                          `json:"name"`
+	Version     string                          `json:"version"`
+	Title       string                          `json:"title,omitempty"`
+	Description string                          `json:"description"`
+	Author      string                          `json:"author,omitempty"`
+	AutoSKU     bool                            `json:"auto_sku"`
+	MCPServers  map[string]userPackageMCPServer `json:"mcpServers"`
+}
+
+// userPackageMCPServer 标准包内单个 MCP server：command 为完整 argv（命令+参数合并）。
+type userPackageMCPServer struct {
+	Transport   string                     `json:"transport"`
+	Command     []string                   `json:"command"`
+	Env         map[string]string          `json:"env,omitempty"`
+	Credentials map[string]userPackageCred `json:"credentials,omitempty"`
+}
+
+// userPackageCred 标准包凭证声明（与 schema 对齐，不含 module.json 的 scope 字段）。
+type userPackageCred struct {
+	Type        string `json:"type"`
+	Label       string `json:"label,omitempty"`
+	Description string `json:"description,omitempty"`
+	Placeholder string `json:"placeholder,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+// writeUserPackageJSON 双写 kimi 式标准秘技包清单 package.json（E3）。
+// module.json 仍是 claw 运行时事实源（rescan/autostart 不读 package.json）；
+// package.json 使 DIY 产出可被云端 package 体系（catalog/package 下载、submissions
+// 审批）与标准生态工具直接识别，为「本地造 -> 云端分享」铺路。
+func writeUserPackageJSON(moduleDir, moduleID string, req UserModuleGenerateRequest) error {
+	command := req.Command
+	if command == "" {
+		command = "python"
+	}
+	args := req.Args
+	if len(args) == 0 {
+		args = []string{"main.py"}
+	}
+	argv := append([]string{command}, args...)
+	var creds map[string]userPackageCred
+	if len(req.CredentialsMeta) > 0 {
+		creds = make(map[string]userPackageCred, len(req.CredentialsMeta))
+		for k, c := range req.CredentialsMeta {
+			creds[k] = userPackageCred{
+				Type:        string(c.Type),
+				Label:       c.Label,
+				Description: c.Description,
+				Placeholder: c.Placeholder,
+				Required:    c.Required,
+			}
+		}
+	}
+	m := userPackageManifest{
+		Name:        moduleID,
+		Version:     "1.0.0",
+		Title:       req.Name,
+		Description: req.Description,
+		Author:      req.Username,
+		AutoSKU:     true,
+		MCPServers: map[string]userPackageMCPServer{
+			moduleID: {
+				Transport:   "stdio",
+				Command:     argv,
+				Env:         req.Env,
+				Credentials: creds,
+			},
+		},
+	}
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化 package.json 失败: %w", err)
+	}
+	return os.WriteFile(filepath.Join(moduleDir, "package.json"), data, 0o644)
+}
+
+// PromptSkillGenerateRequest /v1/claw-console/skills/generate 请求体（E4：prompt-only 秘技生成）。
+type PromptSkillGenerateRequest struct {
+	SkillID     string `json:"skill_id"`    // slug（^[a-z0-9][a-z0-9-]*$）；缺省据 Name 折叠推导
+	Name        string `json:"name"`        // 展示名（写 frontmatter metadata.title）
+	Description string `json:"description"` // 触发条件描述（frontmatter.description）
+	Category    string `json:"category"`    // 分类（metadata.category），缺省由同步层落「提示」
+	Body        string `json:"body"`        // SKILL.md 正文（即注入对话的 SystemPrompt）
+	Username    string `json:"username"`    // 创建者名（handler 透传进 SKU CreatorName）
+}
+
+// PromptSkillGenerateResult 生成结果。
+type PromptSkillGenerateResult struct {
+	SkillID string `json:"skill_id"`
+	Dir     string `json:"dir"` // 落盘目录（marketplace/{skill_id}）
+}
+
+// checkPromptSkillDir 校验 slug 并返回可写入的秘技目录（WritePromptSkill/Raw 共用守卫）：
+// slug 合法、不覆盖内嵌官方目录、不覆盖已是模块/秘技包的目录；用户纯 skill 目录允许覆盖更新。
+func (s *ModuleService) checkPromptSkillDir(slug string) (string, error) {
+	if !slugPattern.MatchString(slug) {
+		return "", fmt.Errorf("skill_id %q 不合法：须匹配 ^[a-z0-9][a-z0-9-]*$", slug)
+	}
+	// 内嵌官方目录（skill-maker/copywriting/各官方模块）禁止覆盖
+	if _, err := fs.Stat(marketplace.FS, slug); err == nil {
+		return "", fmt.Errorf("skill_id %s 与官方秘技冲突，请换一个", slug)
+	}
+	root, err := EnsureMarketplaceRoot()
+	if err != nil {
+		return "", fmt.Errorf("初始化 marketplace 目录失败: %w", err)
+	}
+	if root == "" {
+		return "", errors.New("无法定位 marketplace 目录（设 CLAW_MARKETPLACE_DIR 或在仓库内运行）")
+	}
+	dir := filepath.Join(root, slug)
+	if _, err := os.Stat(filepath.Join(dir, "module.json")); err == nil {
+		return "", fmt.Errorf("目录 %s 已是模块（含 module.json），请换一个 skill_id", slug)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
+		return "", fmt.Errorf("目录 %s 已是秘技包（含 package.json），请换一个 skill_id", slug)
+	}
+	return dir, nil
+}
+
+// WritePromptSkillRaw 以原始内容导入 prompt-only 秘技（F4：DSH 插件/社区 SKILL.md 导入）。
+// 与 WritePromptSkill 的差异：不重写 frontmatter，原样保留导入文件的全部字段
+// （license/allowed-tools/when-to-use 等），仅校验其可解析且 name/description 齐备；
+// frontmatter.name 与 slug 不一致时以 slug 重写 name 行，保证目录与标识一致。
+func (s *ModuleService) WritePromptSkillRaw(slug string, content []byte) (*PromptSkillGenerateResult, error) {
+	m, err := ParseSkillMDContent(content)
+	if err != nil {
+		return nil, err
+	}
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		slug = foldSlugBase(m.Name)
+	}
+	if slug == "" {
+		return nil, errors.New("无法推导合法 skill_id，请显式传入（小写字母/数字/中划线）")
+	}
+	dir, err := s.checkPromptSkillDir(slug)
+	if err != nil {
+		return nil, err
+	}
+	// name 与目录 slug 对齐（frontmatter.name 是秘技标识，必须等于目录名）
+	if m.Name != slug {
+		content = rewriteSkillMDName(content, slug)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("创建秘技目录失败: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), content, 0o644); err != nil {
+		return nil, fmt.Errorf("写入 SKILL.md 失败: %w", err)
+	}
+	return &PromptSkillGenerateResult{SkillID: slug, Dir: dir}, nil
+}
+
+// rewriteSkillMDName 重写 SKILL.md frontmatter 的 name 行（保持其余字节不变）。
+// frontmatter 必含 name（ParseSkillMDContent 已校验），按行替换首个 "name:" 项。
+func rewriteSkillMDName(content []byte, slug string) []byte {
+	text := string(content)
+	parts := strings.SplitN(text, "---", 3)
+	if len(parts) < 3 {
+		return content
+	}
+	lines := strings.Split(parts[1], "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "name:") {
+			lines[i] = "name: " + slug
+			break
+		}
+	}
+	return []byte(parts[0] + "---" + strings.Join(lines, "\n") + "---" + parts[2])
+}
+
+// WritePromptSkill 生成 prompt-only 秘技：在 marketplace/{slug}/ 写 Anthropic 标准 SKILL.md
+// （E4）。SKU 同步不在此处做（service 层不依赖 seed 包），由调用方（handler）随后调
+// seed.SyncPromptSkillDir 定向同步出 driver=none 的 SKU。
+// 防覆盖：目录已存在且含 module.json/package.json（是模块而非纯 skill）或属于内嵌官方
+// 目录（marketplace.FS）时拒绝；已存在的用户纯 skill 目录允许覆盖更新（SKILL.md 是源格式）。
+func (s *ModuleService) WritePromptSkill(req PromptSkillGenerateRequest) (*PromptSkillGenerateResult, error) {
+	if strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Description) == "" || strings.TrimSpace(req.Body) == "" {
+		return nil, errors.New("name / description / body 不能为空")
+	}
+	slug := strings.TrimSpace(req.SkillID)
+	if slug == "" {
+		slug = foldSlugBase(req.Name)
+	}
+	if slug == "" {
+		return nil, errors.New("无法推导合法 skill_id，请显式传入（小写字母/数字/中划线）")
+	}
+	dir, err := s.checkPromptSkillDir(slug)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("创建秘技目录失败: %w", err)
+	}
+
+	var fm strings.Builder
+	fm.WriteString("---\n")
+	fm.WriteString("name: " + slug + "\n")
+	fm.WriteString("description: " + yamlOneLine(req.Description) + "\n")
+	fm.WriteString("metadata:\n")
+	fm.WriteString("  title: " + yamlOneLine(req.Name) + "\n")
+	if c := strings.TrimSpace(req.Category); c != "" {
+		fm.WriteString("  category: " + yamlOneLine(c) + "\n")
+	}
+	fm.WriteString("---\n\n")
+	fm.WriteString(strings.TrimSpace(req.Body) + "\n")
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(fm.String()), 0o644); err != nil {
+		return nil, fmt.Errorf("写入 SKILL.md 失败: %w", err)
+	}
+	return &PromptSkillGenerateResult{SkillID: slug, Dir: dir}, nil
+}
+
+// slugPattern 合法 slug（package-manifest-schema 的 name 同款约束）。
+var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
+// yamlOneLine 把用户输入压成单行 YAML 标量（换行折叠为空格，防 frontmatter 注断行）。
+// 含冒号/引号等特殊字符时加双引号包裹并转义，保证 frontmatter 可解析。
+func yamlOneLine(s string) string {
+	s = strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+	if strings.ContainsAny(s, `:"'#{}[],&*?|-<>=!%@`+"`") || strings.HasPrefix(s, " ") {
+		return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
+	}
+	return s
+}
+
+// foldSlugBase 把展示名折叠为 slug 基（小写 + [a-z0-9-]，其余折叠为单 -，去首尾 -）。
+// 无法折叠出任何字符时返回空串（调用方决定报错或加消歧后缀）。
+func foldSlugBase(name string) string {
 	var sb strings.Builder
 	prevDash := false
 	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
@@ -702,7 +1261,16 @@ func sanitizeUserModuleID(name string) string {
 			prevDash = true
 		}
 	}
-	base := strings.Trim(sb.String(), "-")
+	return strings.Trim(sb.String(), "-")
+}
+
+// sanitizeUserModuleID 据展示名推导合法 module ID：小写 + [a-z0-9-]，其余折叠为单 -，
+// 再追加 uuid8 后缀（复用 cloud generateUniqueModuleID 的 uuid 模式）使重名模块不撞
+// （为 T11 分享到云端铺路：不同用户同名模块得到不同 ID，云端无需改名、本地↔云端 ID 链稳定）。
+// 仅用于新生成模块（module_id 缺省路径，WriteUserModule:596）；显式传 module_id 的重新生成/定点
+// 走 :594 旁路，不经过本函数，故「仅影响新生成模块，不破坏存量查找，官方模块 ID 不变」。
+func sanitizeUserModuleID(name string) string {
+	base := foldSlugBase(name)
 	if base == "" {
 		base = "mod" // 名称无可折叠字符时回退，镜像 cloud generateUniqueModuleID 的 mod-<uuid8>
 	}
@@ -960,6 +1528,12 @@ func (s *ModuleService) ensureMarketplaceModules(root string, logger *zap.Logger
 			Official:          true,
 			DriverID:          m.Driver.ID,
 			AutoSKU:           m.AutoSKU,
+			// 包身份：module.json 即包事实源，id 作为包 slug（多运行时包共享同一 package_name），
+			// name/description 作为包级展示名/描述，供 DeriveSKUs 派生 SKU 与前端包卡继承。
+			Category:           m.Category,
+			PackageName:        moduleID,
+			PackageTitle:       m.Name,
+			PackageDescription: m.Description,
 		}
 		rt.SetArgs(m.Args)
 		rt.SetEnv(m.Env)
@@ -1109,6 +1683,10 @@ func (s *ModuleService) InstallMCPRuntime(req *MCPInstallRequest, tools []MCPToo
 		AutoSKU:     true,
 		DriverID:    runtimeID, // 自驱动
 		Status:      model.SkillRuntimeStatusOffline,
+		// 包身份：MCP 安装即单包，slug 取运行时 ID（展示名/描述供包卡聚合）。
+		PackageName:        runtimeID,
+		PackageTitle:       req.Name,
+		PackageDescription: req.Description,
 	}
 	rt.SourceOrigin = model.SkillRuntimeOriginMCP // type4b：MCP 安装，actor=MCP 名
 	rt.SourceActor = req.Name
@@ -1158,13 +1736,18 @@ func (s *ModuleService) InstallMCPRuntime(req *MCPInstallRequest, tools []MCPToo
 }
 
 // mcpDesktopServer Claude Desktop（claude_desktop_config.json）/ Cursor / .mcp.json 单个 MCP server 配置。
-// stdio（command/args/env）或 http（url/headers）二选一；不认识的字段（type/alwaysAllow 等）忽略不报错。
+// stdio（command/args/env）或 http（url/serverUrl + headers）二选一；type/transport 仅用于
+// 识别 sse 条目显式跳过（mcp_sse 未实现，误当 http 探测只会得到误导性失败）；
+// 不认识的字段（alwaysAllow 等）忽略不报错。
 type mcpDesktopServer struct {
-	Command string            `json:"command"` // stdio 启动命令（如 npx）
-	Args    []string          `json:"args"`    // stdio 参数
-	Env     map[string]string `json:"env"`     // stdio 环境变量
-	URL     string            `json:"url"`     // http MCP 地址（Cursor/.mcp.json 用 url 而非 command）
-	Headers map[string]string `json:"headers"` // http MCP 请求头
+	Command   string            `json:"command"`   // stdio 启动命令（如 npx）
+	Args      []string          `json:"args"`      // stdio 参数
+	Env       map[string]string `json:"env"`       // stdio 环境变量
+	URL       string            `json:"url"`       // http MCP 地址（Cursor/.mcp.json 用 url 而非 command）
+	ServerURL string            `json:"serverUrl"` // url 别名（部分生态配置用 serverUrl）
+	Headers   map[string]string `json:"headers"`   // http MCP 请求头
+	Type      string            `json:"type"`      // Claude Desktop 的 transport 声明（stdio/sse）
+	Transport string            `json:"transport"` // 部分生态配置的 transport 字段
 }
 
 // mcpDesktopConfig Claude Desktop / Cursor / .mcp.json 通用 MCP 配置根结构。
@@ -1172,34 +1755,82 @@ type mcpDesktopConfig struct {
 	McpServers map[string]mcpDesktopServer `json:"mcpServers"`
 }
 
+// SkippedMCPServer 导入时被跳过的 server 及原因（E2：带进因返回而非静默丢弃）。
+type SkippedMCPServer struct {
+	Name   string `json:"name"`
+	Code   string `json:"code"`   // unsupported_transport | invalid_entry
+	Reason string `json:"reason"` // 人类可读原因
+}
+
+// configPlaceholderRe 匹配 ${VAR} 占位符（社区 MCP 配置常用其引用本机环境变量）。
+var configPlaceholderRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandConfigPlaceholders 展开值中的 ${VAR}：从 claw 进程环境取值；未设置则保留占位符原文
+// （此时值多半需要用户在凭证/环境变量中补填，保留原文比替换成空串更可诊断）。
+func expandConfigPlaceholders(v string) string {
+	return configPlaceholderRe.ReplaceAllStringFunc(v, func(m string) string {
+		name := configPlaceholderRe.FindStringSubmatch(m)[1]
+		if val, ok := os.LookupEnv(name); ok {
+			return val
+		}
+		return m
+	})
+}
+
+// expandConfigMap 对 env/headers 的每个值做 ${VAR} 展开。
+func expandConfigMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return in
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = expandConfigPlaceholders(v)
+	}
+	return out
+}
+
 // ParseMCPConfig 解析标准 MCP client 配置（Claude Desktop / Cursor / .mcp.json 通用格式，M4），
 // 把每个 mcpServers 条目映射为 MCPInstallRequest 供调用方逐个 InstallMCPRuntime。
-// 有 url -> mcp_http（endpoint=url, headers）；有 command -> mcp_stdio（command/args/env）；
-// 两者皆无则跳过（不报错，便于兼容含纯声明条目的配置）。Name 取 mcpServers 的 key。
+// url 取值顺序 url -> serverUrl（别名）；有 url -> mcp_http（endpoint=url, headers）；
+// 有 command -> mcp_stdio（command/args/env）；type/transport=sse 的条目进 skipped
+// （unsupported_transport，mcp_sse 未实现）；两者皆无也进 skipped（invalid_entry）。
+// env/headers 值中的 ${VAR} 从 claw 进程环境展开（未设置保留占位符原文）。
 // 纯结构化解析，不执行任何命令；命令执行仍由 InstallMCPRuntime 经 G3 受控 spawn。
-func ParseMCPConfig(raw []byte) ([]*MCPInstallRequest, error) {
+func ParseMCPConfig(raw []byte) ([]*MCPInstallRequest, []SkippedMCPServer, error) {
 	var cfg mcpDesktopConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return nil, fmt.Errorf("解析 MCP 配置失败: %w", err)
+		return nil, nil, fmt.Errorf("解析 MCP 配置失败: %w", err)
 	}
 	reqs := make([]*MCPInstallRequest, 0, len(cfg.McpServers))
+	skipped := make([]SkippedMCPServer, 0)
 	for name, srv := range cfg.McpServers {
+		if strings.EqualFold(srv.Type, "sse") || strings.EqualFold(srv.Transport, "sse") {
+			skipped = append(skipped, SkippedMCPServer{Name: name, Code: "unsupported_transport",
+				Reason: "暂不支持 SSE transport（mcp_sse 未实现），请改用该 server 的 streamable-http 端点"})
+			continue
+		}
+		endpoint := srv.URL
+		if endpoint == "" {
+			endpoint = srv.ServerURL
+		}
 		req := &MCPInstallRequest{Name: name}
-		if srv.URL != "" {
+		if endpoint != "" {
 			req.Transport = "mcp_http"
-			req.Endpoint = srv.URL
-			req.Headers = srv.Headers
+			req.Endpoint = endpoint
+			req.Headers = expandConfigMap(srv.Headers)
 		} else if srv.Command != "" {
 			req.Transport = "mcp_stdio"
 			req.Command = srv.Command
 			req.Args = srv.Args
-			req.Env = srv.Env
+			req.Env = expandConfigMap(srv.Env)
 		} else {
-			continue // 无 command 也无 url，跳过（不报错）
+			skipped = append(skipped, SkippedMCPServer{Name: name, Code: "invalid_entry",
+				Reason: "条目缺少 command（stdio）或 url（http），无法导入"})
+			continue
 		}
 		reqs = append(reqs, req)
 	}
-	return reqs, nil
+	return reqs, skipped, nil
 }
 
 // UnregisterDriver 注销驱动映射
@@ -1288,6 +1919,10 @@ func moduleRecordToRuntime(rec *model.ModuleRecord) *model.SkillRuntime {
 		Version:     rec.Version,
 		Official:    rec.Official,
 		DriverID:    rec.ID,
+		// 控制台注册/更新路径的包身份：单模块即单包，slug 取模块 ID。
+		PackageName:        rec.ID,
+		PackageTitle:       rec.Name,
+		PackageDescription: rec.Description,
 	}
 	rt.SetCapabilities(rec.CapabilitiesList())
 	return rt
@@ -1308,6 +1943,12 @@ func runtimeToModuleRecord(rt *model.SkillRuntime, st *SkillRuntimeStatusSnapsho
 		ImageDigest:   rt.ImageDigest,
 		Signature:     rt.Signature,
 		AuthToken:     rt.AuthToken,
+		// 包身份视图字段（控制台按 package_name 归组秘技包）
+		PackageName:        rt.PackageName,
+		PackageTitle:       rt.PackageTitle,
+		PackageDescription: rt.PackageDescription,
+		Category:           rt.Category,
+		Deployment:         string(rt.Deployment),
 	}
 	rec.SetCapabilities(rt.CapabilitiesList())
 

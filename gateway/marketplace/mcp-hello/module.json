@@ -2,6 +2,7 @@
   "id": "mcp-hello",
   "name": "MCP Hello 示例",
   "description": "MCP Streamable HTTP 驱动示例，暴露 hello/echo 工具。",
+  "category": "示例",
   "source": "marketplace",
   "transport": "mcp_http",
   "deployment": "docker",

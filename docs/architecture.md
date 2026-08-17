@@ -25,8 +25,8 @@ eleball-claw/
 │   ├── pkg/               # crypto / llm / util（与云端共享）
 │   ├── configs/claw.yaml  # 本地配置
 │   ├── web/               # 用户端 React（与云端同构）
-│   ├── admin-web/         # 本地控制台 React（只读为主）
-│   └── marketplace/       # 预置官方模块
+│   ├── admin-web/         # 本地控制台 React（秘技包管理 + 只读展示）
+│   └── marketplace/       # 预置官方模块（module.json + main.py + skus/）
 ├── install.sh / install.ps1   # 一键安装
 └── Makefile                   # 分发构建
 ```
@@ -80,6 +80,20 @@ pkg/
 - **LLM 调用**：Ele Agent 模型经 `server.eleagent_base_url`（默认 `https://api.eleball.cn/v1`）转发至云端，由云端账户计费；BYOK 模式可直连用户自带的上游端点。
 - **账户鉴权**：本地 JWT 验签，失败自动 fallback 云端 `/auth/me`（`middleware.JWTAuthCloudFallback`）。
 - **秘技集市**：技能页登录态拉云端已购秘技，下载/安装走本地 `/v1/claw-console/modules/install`，激活后由 `AgentToolLoader` 载入。
+
+## 5.1 秘技包模型（卡片 = 秘技包，强关联模块生命周期）
+
+集市卡片与插件系统模块**强关联**，一个秘技包 = 一个卡片，包内多项能力（SKU）可被作为工具调用：
+
+- **包身份物化**：`SkillRuntime` 增 `Category/PackageName/PackageTitle/PackageDescription`。module.json 扫描（`ensureMarketplaceModules`）、控制台注册/更新（`moduleRecordToRuntime`）、MCP 安装（`InstallMCPRuntime`）都会写入包身份；`PackageName` 即包 slug（多运行时包共享）。
+- **SKU 打标**：`DeriveSKUs` 派生 SKU 时写 `metadata.package_module/package_title/package_description/package_version`（`buildDerivedManifest`）；派生签名并入包身份字段，模块更新（名称/描述/版本/分类）即触发重派生，**SKU 卡片同步刷新**。
+- **级联下架**：`UnregisterModule` 注销模块时 `delistPackageSKUs` 按 `auto_sku_module/module/package_module` 精确归属下架本包全部 SKU（delisted 保留购买记录，集市列表即消失）。
+- **真·卸载**：`DELETE /v1/claw-console/modules/:id/uninstall`（`UninstallModule`）：官方守卫 → 停进程/容器 → 下架本包 SKU → 删 marketplace/<slug>/ 目录（user/mcp 起源）→ 注销本包全部运行时。
+- **前端聚合**：技能页 `AgentMarket` 按 `package_module` 聚合包卡 + 包详情逐 SKU 勾选 + 包级一键激活；助手组装（`AssistantManager`）按包分组；控制台 `admin-web`「本地秘技包」页按包归组展示运行时子表 + SKU 清单 + 显著「卸载」按钮。
+
+**存量覆盖**：手写 SKU manifest（`marketplace/<mod>/skus/*.json`）与 module.json 均携带 `package_module/category` 等包级字段；`RescanMarketplace` 额外执行 `backfillPackageIdentity`（幂等）——老库运行时无包身份、SKU manifest 缺 package_module 的存量行在启动扫描/「重新扫描」时自动补齐，确保既有模块（agent-reach/firecrawl/search-web/mcp-hello/mcp-stdio-echo/stt + prompt-only skill）全部进入秘技包体系。
+
+**孤儿 SKU 对账**：旧版本注销模块只删运行时、不级联下架 SKU，历史遗留的 approved SKU 卡片仍展示。`RescanMarketplace` 每次执行 `reconcileOrphanedSKUs`（幂等）：引用已不存在运行时（按 auto_sku_module/module/package_module 归属，driver≠none 的可执行 SKU）一律下架（delisted 保留购买记录）；prompt-only 秘技（driver=none）与无归属元数据的 SKU 保守保留。
 
 ## 6. 目标演进
 

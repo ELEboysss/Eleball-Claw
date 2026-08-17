@@ -3,12 +3,16 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/eleball/gateway/internal/repository"
+	"github.com/eleball/gateway/internal/seed"
 	"github.com/eleball/gateway/internal/service"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -24,6 +28,8 @@ type ClawConsoleHandler struct {
 	processWorkDirs      []string                      // process 沙箱允许的工作目录前缀（探测时校验）
 	moduleService        *service.ModuleService        // /mcp/generate 写模块 + rescan + autostart
 	interpreterBootstrap *service.InterpreterBootstrap // H1 托管解释器安装（python-build-standalone）
+	dshPluginSvc         *service.DSHPluginService     // F4：DSH 插件（npm 包）预览/导入
+	skillSyncFn          func(dir, skillID, creatorID, creatorName string) (int, int, int) // F4：SKU 定向同步（main 适配 seed）
 }
 
 // NewClawConsoleHandler 创建 claw 控制台处理器
@@ -49,6 +55,72 @@ func (h *ClawConsoleHandler) SetModuleService(s *service.ModuleService) {
 // SetInterpreterBootstrap 注入托管解释器引导器（H1，供 /tools/install-interpreter）
 func (h *ClawConsoleHandler) SetInterpreterBootstrap(b *service.InterpreterBootstrap) {
 	h.interpreterBootstrap = b
+}
+
+// SetDSHPluginService 注入 DSH 插件导入服务（F4，/dsh-plugin/preview|import）
+func (h *ClawConsoleHandler) SetDSHPluginService(s *service.DSHPluginService) {
+	h.dshPluginSvc = s
+}
+
+// SetSkillSyncFn 注入 prompt 秘技 SKU 定向同步函数（F4，main 侧适配 seed.SyncPromptSkillDir）
+func (h *ClawConsoleHandler) SetSkillSyncFn(fn func(dir, skillID, creatorID, creatorName string) (int, int, int)) {
+	h.skillSyncFn = fn
+}
+
+// dshPluginPreviewRequest /v1/claw-console/dsh-plugin/preview 请求体
+type dshPluginPreviewRequest struct {
+	Package string `json:"package"` // npm 包名（可带 @version / @scope）
+}
+
+// PreviewDSHPlugin 预览 DSH 插件（npm 包）可导入内容（F4）。
+// POST /v1/claw-console/dsh-plugin/preview：拉 tarball 扫描 SKILL.md + mcpServers，不写盘。
+func (h *ClawConsoleHandler) PreviewDSHPlugin(c *gin.Context) {
+	var req dshPluginPreviewRequest
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Package) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "package 不能为空（npm 包名，可带 @version）"})
+		return
+	}
+	if h.dshPluginSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 2002, "message": "DSH 插件服务未初始化"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	defer cancel()
+	preview, err := h.dshPluginSvc.Preview(ctx, req.Package)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": preview})
+}
+
+// dshPluginImportRequest /v1/claw-console/dsh-plugin/import 请求体
+type dshPluginImportRequest struct {
+	Package    string   `json:"package"`
+	Skills     []string `json:"skills"`      // 选中的包内 SKILL.md 路径；空=全部
+	MCPServers []string `json:"mcp_servers"` // 选中的 MCP server 名；空=不导入
+}
+
+// ImportDSHPlugin 导入 DSH 插件选中项（F4）。
+// POST /v1/claw-console/dsh-plugin/import：SKILL.md → 秘技包落盘+SKU 同步；mcpServers → 探测安装。
+func (h *ClawConsoleHandler) ImportDSHPlugin(c *gin.Context) {
+	var req dshPluginImportRequest
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Package) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "package 不能为空"})
+		return
+	}
+	if h.dshPluginSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 2002, "message": "DSH 插件服务未初始化"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 120*time.Second)
+	defer cancel()
+	result, err := h.dshPluginSvc.Import(ctx, req.Package, req.Skills, req.MCPServers, c.GetString("user_id"), h.skillSyncFn)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": err.Error(), "data": result})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "success", "data": result})
 }
 
 // tokenUsageStats 本地 token 用量聚合
@@ -342,12 +414,12 @@ func (h *ClawConsoleHandler) ImportMCPConfig(c *gin.Context) {
 		return
 	}
 
-	reqs, err := service.ParseMCPConfig(raw)
+	reqs, skipped, err := service.ParseMCPConfig(raw)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": err.Error()})
 		return
 	}
-	if len(reqs) == 0 {
+	if len(reqs) == 0 && len(skipped) == 0 {
 		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": "配置中无可导入的 MCP server（需 command 或 url）"})
 		return
 	}
@@ -356,7 +428,11 @@ func (h *ClawConsoleHandler) ImportMCPConfig(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(len(reqs))*30*time.Second)
 	defer cancel()
 
-	outcomes := make([]mcpInstallOutcome, 0, len(reqs))
+	outcomes := make([]mcpInstallOutcome, 0, len(reqs)+len(skipped))
+	// E2：被跳过的条目（sse / 缺 command/url）带进因并入结果，不再静默丢弃。
+	for _, sk := range skipped {
+		outcomes = append(outcomes, mcpInstallOutcome{Name: sk.Name, ErrorCode: sk.Code, Message: sk.Reason})
+	}
 	for _, rq := range reqs {
 		one := mcpInstallRequest{
 			mcpProbeRequest: mcpProbeRequest{
@@ -387,6 +463,79 @@ func (h *ClawConsoleHandler) ImportMCPConfig(c *gin.Context) {
 		"code":    0,
 		"message": "success",
 		"data":    gin.H{"results": outcomes},
+	})
+}
+
+// SearchMCPRegistry 搜索 MCP 官方社区注册表（E1）。
+// GET /v1/claw-console/mcp/registry/search?q=&limit=：只读代理 registry.modelcontextprotocol.io，
+// 每个结果映射为安装表单建议（streamable-http remote -> mcp_http；npm/pypi -> npx/uvx stdio），
+// 前端「填入安装表单」后走既有探测->安装链路。上游不可达返回 code 2002。
+func (h *ClawConsoleHandler) SearchMCPRegistry(c *gin.Context) {
+	q := strings.TrimSpace(c.Query("q"))
+	if q == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "q 不能为空"})
+		return
+	}
+	limit := 0
+	if v := c.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+	defer cancel()
+	results, err := service.NewMCPRegistryClient().Search(ctx, q, limit)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "success",
+		"data":    gin.H{"results": results},
+	})
+}
+
+// GeneratePromptSkill 生成 prompt-only 秘技（E4）。
+// POST /v1/claw-console/skills/generate：写 marketplace/{slug}/SKILL.md（Anthropic 标准，
+// frontmatter 含 name/description/metadata.title/metadata.category）->
+// seed.SyncPromptSkillDir 定向同步出 driver=none SKU（skillmd-{slug}，创建者=当前用户）。
+func (h *ClawConsoleHandler) GeneratePromptSkill(c *gin.Context) {
+	var req service.PromptSkillGenerateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 1001, "message": "请求参数错误: " + err.Error()})
+		return
+	}
+	if h.moduleService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 2002, "message": "模块服务未初始化"})
+		return
+	}
+	result, err := h.moduleService.WritePromptSkill(req)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": err.Error()})
+		return
+	}
+	// 定向同步 SKU（只处理这一个目录，不做全量扫描防误下架）：
+	// 创建者取登录用户 + 前端透传 username（缺省「我」），用户生成不标「官方」。
+	creatorName := strings.TrimSpace(req.Username)
+	if creatorName == "" {
+		creatorName = "我"
+	}
+	created, synced, skipped := seed.SyncPromptSkillDir(
+		repository.NewAgentRepo(h.db), filepath.Dir(result.Dir), result.SkillID,
+		c.GetString("user_id"), creatorName, nil)
+	if created+synced == 0 {
+		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": fmt.Sprintf("SKILL.md 已写入但 SKU 同步失败（skipped=%d），请检查 frontmatter", skipped)})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "success",
+		"data": gin.H{
+			"skill_id": result.SkillID,
+			"sku_id":   "skillmd-" + result.SkillID,
+			"dir":      result.Dir,
+		},
 	})
 }
 

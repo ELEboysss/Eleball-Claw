@@ -323,6 +323,79 @@ func TestToolCallingLoop_FunctionGetLimit(t *testing.T) {
 
 var _ AgentLLMClient = (*mockAgentLLM)(nil)
 
+// TestToolCallingLoop_ToolStartBeforeResult F1：onToolStart 在工具执行前回调（running 即时状态），
+// 且带 call_id/summary；onToolCall 仍在执行结束后带结果回调；AssistantOutput 携带逐步 Usage。
+func TestToolCallingLoop_ToolStartBeforeResult(t *testing.T) {
+	registry := NewToolRegistryWithDeps(&mockRunner{shellOutput: "ok"}, &mockSearchProvider{})
+	loop := NewToolCallingLoop(registry, 3)
+	client := &mockAgentLLM{
+		responses: []llm.ChatChunk{
+			{
+				ToolCalls: []llm.ToolCall{
+					{ID: "tc1", Type: "function", Function: llm.ToolCallFunction{Name: "Shell", Arguments: `{"command":"echo","args":["hello"]}`}},
+				},
+				Usage: &llm.Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110, CachedTokens: 80},
+			},
+			{Delta: "done"},
+		},
+	}
+
+	var events []string
+	var startPayload ToolCallStart
+	result, err := loop.RunWithRegistry(context.Background(), registry, client, "m", nil,
+		[]llm.Message{{Role: "user", Content: "run echo"}}, nil, &ToolEnv{},
+		func(start ToolCallStart) {
+			events = append(events, "start:"+start.Tool)
+			startPayload = start
+		},
+		func(record ToolCallRecord) error {
+			events = append(events, "result:"+record.Tool)
+			return nil
+		},
+		nil, nil)
+	if err != nil {
+		t.Fatalf("不应报错: %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("应有 1 条记录: %v", result.Records)
+	}
+	// 顺序：start 必须先于 result
+	if len(events) != 2 || events[0] != "start:Shell" || events[1] != "result:Shell" {
+		t.Fatalf("事件顺序应为 start→result: %v", events)
+	}
+	if startPayload.CallID != "tc1" {
+		t.Fatalf("start 应带 call_id: %+v", startPayload)
+	}
+	if startPayload.Summary != "echo" {
+		t.Fatalf("Shell 摘要应取 command 首行: %q", startPayload.Summary)
+	}
+}
+
+// TestSummarizeToolCall 参数摘要：按工具名取关键字段，截断到 80 字符。
+func TestSummarizeToolCall(t *testing.T) {
+	cases := []struct {
+		tool  string
+		input map[string]interface{}
+		want  string
+	}{
+		{"Shell", map[string]interface{}{"command": "ls -la /tmp\npwd"}, "ls -la /tmp"},
+		{"WriteFile", map[string]interface{}{"path": "a/b.go", "content": "x"}, "a/b.go"},
+		{"SearchWeb", map[string]interface{}{"query": "今日新闻"}, "今日新闻"},
+		{"FetchURL", map[string]interface{}{"url": "https://example.com"}, "https://example.com"},
+		{"Custom", map[string]interface{}{"foo": "bar"}, "bar"},
+		{"Shell", nil, ""},
+	}
+	for _, c := range cases {
+		if got := summarizeToolCall(c.tool, c.input); got != c.want {
+			t.Fatalf("summarizeToolCall(%s, %v)=%q, want %q", c.tool, c.input, got, c.want)
+		}
+	}
+	long := strings.Repeat("x", 200)
+	if got := summarizeToolCall("Shell", map[string]interface{}{"command": long}); len([]rune(got)) > 84 {
+		t.Fatalf("摘要应截断到 80 rune（+省略号）: %d", len([]rune(got)))
+	}
+}
+
 // TestToolCallingLoop_DynamicRuleInjection C8：工具调用触及的文件路径会触发 .claw/rules/*.md 动态注入。
 func TestToolCallingLoop_DynamicRuleInjection(t *testing.T) {
 	root := t.TempDir()

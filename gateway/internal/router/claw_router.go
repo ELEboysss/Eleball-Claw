@@ -233,6 +233,8 @@ func NewClawRouter(
 				console.GET("/modules", moduleHandler.ListModules)
 				console.POST("/modules", moduleHandler.RegisterModule)
 				console.DELETE("/modules/:id", moduleHandler.UnregisterModule)
+				// 真·卸载非官方秘技包（停进程/删目录/下架 SKU/注销运行时）；官方包拒绝
+				console.DELETE("/modules/:id/uninstall", moduleHandler.UninstallModule)
 				console.POST("/modules/:id/refresh", moduleHandler.RefreshModule)
 				// 拉起模块（process 同步 / docker 异步），「本地模块」页「启动服务」按钮调用
 				console.POST("/modules/:id/start", moduleHandler.StartModule)
@@ -264,6 +266,16 @@ func NewClawRouter(
 
 				// M4：批量导入标准 MCP 配置（Claude Desktop/Cursor/.mcp.json，逐 server 走 G3 probe+install+DeriveSKUs）
 				console.POST("/mcp/import-config", clawConsoleHandler.ImportMCPConfig)
+
+				// E1：搜索 MCP 官方社区注册表（只读代理 registry.modelcontextprotocol.io，结果映射安装表单建议）
+				console.GET("/mcp/registry/search", clawConsoleHandler.SearchMCPRegistry)
+
+				// E4：生成 prompt-only 秘技（写 Anthropic 标准 SKILL.md -> 定向同步 driver=none SKU）
+				console.POST("/skills/generate", clawConsoleHandler.GeneratePromptSkill)
+
+				// F4：DSH 插件（npm 包）预览/导入（tarball 扫描 SKILL.md + mcpServers -> 秘技/MCP 落盘）
+				console.POST("/dsh-plugin/preview", clawConsoleHandler.PreviewDSHPlugin)
+				console.POST("/dsh-plugin/import", clawConsoleHandler.ImportDSHPlugin)
 
 				// F1 收尾：skill-maker AI 起草 main.py 草稿（能力描述 + 凭证声明 -> 对话模型生成 stdio MCP 脚本）
 				console.POST("/mcp/draft-main", clawConsoleHandler.DraftMainPy)

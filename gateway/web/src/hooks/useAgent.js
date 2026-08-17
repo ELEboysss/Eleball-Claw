@@ -56,6 +56,8 @@ export function useAgent() {
   const [agentPhase, setAgentPhase] = useState(null)
   // C10 T5：当前运行中 Session ID 集合，用于侧栏实时指示
   const [runningSessionIds, setRunningSessionIds] = useState(() => new Set())
+  // F1：本次执行的实时 token 用量（step_usage 事件累计），供执行中用量条展示
+  const [liveUsage, setLiveUsage] = useState(null)
 
   const abortRef = useRef(false)
   // AR-02：AbortController 真正断连，让服务端 ctx 取消停止后续工具调用与 token 消耗
@@ -87,6 +89,7 @@ export function useAgent() {
     setFollowupQueue([])
     setSessionId('')
     setAgentPhase(null)
+    setLiveUsage(null)
     dispatch({ type: 'reset' })
     streamingMessageRef.current = null
     abortRef.current = false
@@ -105,7 +108,7 @@ export function useAgent() {
     dispatch({ type: 'update', message: next })
   }, [])
 
-  const execute = useCallback(({ conversationId, message, attachments = [], history = [], model, provider, baseUrl, apiKey, enableTools, enableWebSearch, searchProvider, assistantId, cwd, permissionMode }) => {
+  const execute = useCallback(({ conversationId, message, attachments = [], history = [], model, provider, baseUrl, apiKey, enableTools, enableWebSearch, searchProvider, assistantId, cwd, permissionMode, mode }) => {
     reset()
     setStatus('executing')
     abortRef.current = false
@@ -124,6 +127,7 @@ export function useAgent() {
       let finalToolSummary = ''
       let finalWarning = ''
       let finalSteps = []
+      let finalUsage = null // F1：done 事件携带的用量（修复 AR-07 遗留：此前从未捕获，用量条恒空）
       let isCompleted = false
 
       // C10：统一完成路径，防止 reconcile / done / AbortError 重复 resolve/reject
@@ -153,7 +157,7 @@ export function useAgent() {
             toolSummary: finalToolSummary,
             warning: finalWarning,
             sessionId: runningSessionIdRef.current || '',
-            usage: null, // AR-07：用量可见性（tokens/cost/步数/上下文规模）
+            usage: finalUsage, // AR-07/F1：用量可见性（tokens/cost/步数/上下文规模/缓存命中）
             steps: finalSteps
           })
         }
@@ -178,7 +182,9 @@ export function useAgent() {
           // 会话绑定的助手；空字符串时不传该字段，后端回退到会话值/全部已激活工具
           assistant_id: assistantId || undefined,
           // C1 权限模式（default/acceptEdits/plan）；空时不传，后端回退会话持久化值
-          permission_mode: permissionMode || undefined
+          permission_mode: permissionMode || undefined,
+          // F3 对话模式（standard/creator）；空/standard 时不传
+          mode: mode && mode !== 'standard' ? mode : undefined
         },
         (event) => {
           if (abortRef.current) return
@@ -207,6 +213,10 @@ export function useAgent() {
                 step: event.data.step,
                 tool: event.data.tool,
                 arguments: event.data.arguments,
+                // F1：执行前置事件（工具刚开始执行）——running 即时状态 + 参数摘要 + 计时起点
+                summary: event.data.summary || '',
+                callId: event.data.call_id || '',
+                startedAt: Date.now(),
                 status: 'running',
                 sessionId
               }
@@ -228,7 +238,9 @@ export function useAgent() {
               break
             }
             case 'tool_result': {
-              const { step, tool, status, output, error_message } = event.data
+              const { step, tool, status, output, error_message, latency_ms } = event.data
+              // F1：后端回传的执行耗时（毫秒），卡片直接展示
+              const latencyMs = latency_ms || 0
               // Agent Team P5：子循环 step 编号从 1 重启，按 (sessionId, step) 匹配避免与主循环撞号
               const sessionId = event.data.session_id || ''
               const matchKey = (s) => s.step === step && (s.sessionId || '') === sessionId
@@ -238,22 +250,23 @@ export function useAgent() {
                   ...finalToolSteps[resultIndex],
                   status,
                   output,
-                  error: error_message
+                  error: error_message,
+                  latencyMs
                 }
               }
               const stepIndex = finalSteps.findIndex(s => (s.type === 'tool_call' || s.type === 'tool_result') && matchKey(s))
               if (stepIndex >= 0) {
                 finalSteps = finalSteps.map((s, idx) =>
                   idx === stepIndex
-                    ? { ...s, status, output, error: error_message }
+                    ? { ...s, status, output, error: error_message, latencyMs }
                     : s
                 )
               } else {
-                finalSteps = [...finalSteps, { type: 'tool_result', step, tool, status, output, error: error_message, sessionId }]
+                finalSteps = [...finalSteps, { type: 'tool_result', step, tool, status, output, error: error_message, latencyMs, sessionId }]
               }
               setToolSteps(prev => prev.map(s =>
                 matchKey(s)
-                  ? { ...s, status, output, error: error_message }
+                  ? { ...s, status, output, error: error_message, latencyMs }
                   : s
               ))
               setSteps(prev => {
@@ -261,11 +274,11 @@ export function useAgent() {
                 if (idx >= 0) {
                   return prev.map((s, i) =>
                     i === idx
-                      ? { ...s, status, output, error: error_message }
+                      ? { ...s, status, output, error: error_message, latencyMs }
                       : s
                   )
                 }
-                return [...prev, { type: 'tool_result', step, tool, status, output, error: error_message, sessionId }]
+                return [...prev, { type: 'tool_result', step, tool, status, output, error: error_message, latencyMs, sessionId }]
               })
               // C10 / AR-47：工具完成，从阶段中移除；若仍有 bash/shell 类工具则保持 running_command
               setAgentPhase(prev => {
@@ -550,7 +563,20 @@ export function useAgent() {
               })
               break
             }
+            case 'step_usage': {
+              // F1：每次 LLM 调用后的逐步用量——累计为实时用量（含缓存命中）
+              const u = event.data || {}
+              setLiveUsage(prev => ({
+                promptTokens: (prev?.promptTokens || 0) + (u.prompt_tokens || 0),
+                completionTokens: (prev?.completionTokens || 0) + (u.completion_tokens || 0),
+                totalTokens: (prev?.totalTokens || 0) + (u.total_tokens || 0),
+                cachedTokens: (prev?.cachedTokens || 0) + (u.cached_tokens || 0),
+                llmCalls: (prev?.llmCalls || 0) + 1
+              }))
+              break
+            }
             case 'done':
+              finalUsage = event.data?.usage || null
               finish(finalError ? new Error(finalError) : null)
               break
           }
@@ -717,6 +743,8 @@ export function useAgent() {
     streamingMessage: streamState.streamingMessage,
     agentPhase,
     // C10 T5：运行中 Session ID 集合，供侧栏显示实时指示
-    runningSessionIds
+    runningSessionIds,
+    // F1：执行中实时 token 用量（step_usage 累计，含 cachedTokens 缓存命中）
+    liveUsage
   }
 }

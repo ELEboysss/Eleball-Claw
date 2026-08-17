@@ -2,6 +2,7 @@
   "id": "mcp-stdio-echo",
   "name": "MCP stdio Echo 示例",
   "description": "本地 stdio MCP 驱动示例，暴露 echo/ping 工具，用于验证子进程 JSON-RPC 全链路（spawn→initialize→tools/list→tools/call→supervisor 探活重连）。",
+  "category": "示例",
   "source": "marketplace",
   "transport": "mcp_stdio",
   "deployment": "process",

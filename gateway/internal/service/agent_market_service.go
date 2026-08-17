@@ -15,14 +15,14 @@ import (
 
 // AgentMarketService Agent 市场服务
 type AgentMarketService struct {
-	agentRepo      *repository.AgentRepo
-	userRepo       *repository.UserRepo
-	vipService     *VIPService
-	skillRuntimeRegistry *SkillRuntimeRegistry
-	moduleService        *ModuleService
-	moduleRepo           *repository.ModuleRepo // claw：IsCloudPurchasedAgent 读取旧 modules 表安装来源
-	db                   *gorm.DB
-	agentToolLoader      *AgentToolLoader
+	agentRepo              *repository.AgentRepo
+	userRepo               *repository.UserRepo
+	vipService             *VIPService
+	skillRuntimeRegistry   *SkillRuntimeRegistry
+	moduleService          *ModuleService
+	moduleRepo             *repository.ModuleRepo // claw：IsCloudPurchasedAgent 读取旧 modules 表安装来源
+	db                     *gorm.DB
+	agentToolLoader        *AgentToolLoader
 	agentCredentialService *AgentCredentialService
 	// localFreeOnly=true 时仅允许免费 SKU 本地购买（claw：付费秘技统一引导到云端 eleball.cn 购买）。
 	// 云端 cmd/server 不设置，保持原有余额扣费购买行为。
@@ -162,11 +162,19 @@ func (s *AgentMarketService) ListAgents(userID string, page, pageSize int, categ
 	var err error
 
 	if filter == "owned" && userID != "" {
-		// 已购买列表：不过滤模块在线状态，用户已购的秘技始终可见
+		// 已购买列表：不过滤模块在线状态，用户已购的秘技始终可见；
+		// 但已下架（delisted）的 SKU 不可购买/激活，从「我的秘技」隐藏（购买记录保留在库里）。
 		items, err = s.agentRepo.ListPurchasedByUser(userID)
 		if err != nil {
 			return nil, 0, err
 		}
+		filtered := make([]*model.AgentItem, 0, len(items))
+		for _, item := range items {
+			if item.Status == model.AgentStatusApproved {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
 		// 分类过滤
 		if category != "" {
 			filtered := make([]*model.AgentItem, 0, len(items))
@@ -863,12 +871,12 @@ func (s *AgentMarketService) ensureDriverForManifest(manifest *model.ToolManifes
 
 // AgentDependencyStatus SKU 依赖的驱动/模块状态，供管理后台审批时展示。
 type AgentDependencyStatus struct {
-	Driver          string `json:"driver"`
-	DriverName      string `json:"driver_name,omitempty"`
-	DriverRegistered bool  `json:"driver_registered"`
-	ModuleID        string `json:"module_id,omitempty"`
-	ModuleRegistered bool  `json:"module_registered,omitempty"`
-	ModuleOnline    *bool  `json:"module_online,omitempty"`
+	Driver           string `json:"driver"`
+	DriverName       string `json:"driver_name,omitempty"`
+	DriverRegistered bool   `json:"driver_registered"`
+	ModuleID         string `json:"module_id,omitempty"`
+	ModuleRegistered bool   `json:"module_registered,omitempty"`
+	ModuleOnline     *bool  `json:"module_online,omitempty"`
 }
 
 // GetAgentDependencyStatus 获取 SKU 依赖的驱动与模块状态。

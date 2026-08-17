@@ -88,7 +88,7 @@ func SyncOfficialSKUs(repo *repository.AgentRepo, side string, logger *zap.Logge
 		if !ok {
 			// 无 module.json：尝试 SKILL.md prompt-only skill（Anthropic 标准，
 			// 1 SKILL.md = 1 SKU，body 即 SystemPrompt，不建 SkillRuntime）。
-			c, sy, sk := syncPromptSkillSKU(repo, root, modName, adminID, now, logger)
+			c, sy, sk := syncPromptSkillSKU(repo, root, modName, adminID, "官方", now, logger)
 			created += c
 			synced += sy
 			skipped += sk
@@ -299,7 +299,7 @@ func shouldSyncManifest(existing, fromFile string) bool {
 // frontmatter metadata.category 可覆盖默认分类「提示」。
 //
 // 返回 (created, synced, skipped) 计数，由调用方累加。无 SKILL.md 或解析失败时全 0（跳过）。
-func syncPromptSkillSKU(repo *repository.AgentRepo, root, modName, adminID string, now time.Time, logger *zap.Logger) (int, int, int) {
+func syncPromptSkillSKU(repo *repository.AgentRepo, root, modName, creatorID, creatorName string, now time.Time, logger *zap.Logger) (int, int, int) {
 	skillmd, err := service.ParseSkillMD(filepath.Join(root, modName, "SKILL.md"))
 	if err != nil {
 		// 无 SKILL.md 或 frontmatter 不合法：非 prompt-only skill 目录，静默跳过。
@@ -315,6 +315,8 @@ func syncPromptSkillSKU(repo *repository.AgentRepo, root, modName, adminID strin
 	}
 	// 极简 ToolManifest：driver=none 标识 prompt-only，SystemPrompt 存 AgentItem 字段
 	// （ToolManifest 无 system_prompt 字段，SKILL.md 是 prompt-only SKU 的源格式，并行于 skus/*.json）。
+	// 包身份：prompt-only skill 也是秘技包（1 SKILL.md = 1 包 1 能力），package_module 使技能页
+	// 按包聚合（包卡标题取 SKILL.md 展示名），module 键供在线门控（none 驱动恒可用）。
 	manifest := &model.ToolManifest{
 		ID:          agentID,
 		Name:        skillmd.Name,
@@ -322,6 +324,12 @@ func syncPromptSkillSKU(repo *repository.AgentRepo, root, modName, adminID strin
 		Driver:      model.ToolDriverNone,
 		Category:    category,
 		Parameters:  map[string]interface{}{},
+		Metadata: map[string]string{
+			"module":              modName,
+			"package_module":      modName,
+			"package_title":       skillmd.DisplayName(),
+			"package_description": skillmd.Description,
+		},
 	}
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {
@@ -334,12 +342,14 @@ func syncPromptSkillSKU(repo *repository.AgentRepo, root, modName, adminID strin
 
 	existing, err := repo.GetByID(agentID)
 	if err == nil && existing != nil {
-		// SKILL.md 是源格式：body/name/desc 任一变化即同步（不同于 shouldSyncManifest 比 manifest_json）。
-		if existing.SystemPrompt == body && existing.Name == skillmd.Name && existing.Description == skillmd.Description {
+		// SKILL.md 是源格式：body/name/desc/manifest（含包身份元数据）任一变化即同步
+		// （不同于 shouldSyncManifest 只比 manifest_json；manifest 变化用于存量行补包元数据）。
+		if existing.SystemPrompt == body && existing.Name == skillmd.DisplayName() &&
+			existing.Description == skillmd.Description && existing.ManifestJSON == manifestStr {
 			return 0, 0, 1
 		}
 		existing.ManifestJSON = manifestStr
-		existing.Name = skillmd.Name
+		existing.Name = skillmd.DisplayName()
 		existing.Description = skillmd.Description
 		existing.Category = category
 		existing.SystemPrompt = body
@@ -353,14 +363,14 @@ func syncPromptSkillSKU(repo *repository.AgentRepo, root, modName, adminID strin
 	}
 	item := &model.AgentItem{
 		ID:           agentID,
-		Name:         skillmd.Name,
+		Name:         skillmd.DisplayName(),
 		Description:  skillmd.Description,
 		Category:     category,
 		SystemPrompt: body,
 		ManifestJSON: manifestStr,
 		Status:       model.AgentStatusApproved,
-		CreatorID:    adminID,
-		CreatorName:  "官方",
+		CreatorID:    creatorID,
+		CreatorName:  creatorName,
 		CreatedAt:    now,
 	}
 	if err := repo.Create(item); err != nil {
@@ -370,4 +380,12 @@ func syncPromptSkillSKU(repo *repository.AgentRepo, root, modName, adminID strin
 		return 0, 0, 0
 	}
 	return 1, 0, 0
+}
+
+// SyncPromptSkillDir 运行时定向同步单个 prompt-only skill 目录（claw-console
+// /skills/generate 用，E4）。与 SyncOfficialSKUs 的全量扫描不同，只处理一个目录，
+// 创建者可指定（用户生成的秘技不标「官方」）。root 为 marketplace 根，modName 为目录名。
+// 返回 (created, synced, skipped)；目录无合法 SKILL.md 时全 0（调用方据此报错）。
+func SyncPromptSkillDir(repo *repository.AgentRepo, root, modName, creatorID, creatorName string, logger *zap.Logger) (int, int, int) {
+	return syncPromptSkillSKU(repo, root, modName, creatorID, creatorName, time.Now(), logger)
 }

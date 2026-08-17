@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import useSEO from '../hooks/useSEO'
-import { Loader2, Plus, Trash2, FolderOpen, Play, DownloadCloud, CheckCircle2, Server, Globe, Terminal, Upload, FileText } from 'lucide-react'
+import { Loader2, Plus, Trash2, FolderOpen, Play, DownloadCloud, CheckCircle2, Server, Globe, Terminal, Upload, FileText, Search } from 'lucide-react'
 import { moduleGeneratorApi } from '../api/client'
 import DirectoryPicker from '../components/DirectoryPicker'
 import InterpreterMissingBanner from '../components/InterpreterMissingBanner'
@@ -72,6 +72,14 @@ export default function MCPInstall() {
   const [importing, setImporting] = useState(false)
   const [importResult, setImportResult] = useState(null)
   const [importError, setImportError] = useState(null)
+
+  // E1：搜索 MCP 官方社区注册表（后端只读代理 registry.modelcontextprotocol.io），
+  // 结果「填入安装表单」预填下方既有表单，用户补密钥后走探测->安装链路（不盲目一键装）。
+  const [regQuery, setRegQuery] = useState('')
+  const [regSearching, setRegSearching] = useState(false)
+  const [regError, setRegError] = useState(null)
+  const [regResults, setRegResults] = useState(null)
+  const [filledKey, setFilledKey] = useState(null) // 刚填入的条目 name（按钮短暂显示「已填入 ✓」）
 
   const args = useMemo(() => argsText.split(/\s+/).filter(Boolean), [argsText])
 
@@ -166,8 +174,144 @@ export default function MCPInstall() {
 
   const isStdio = transport === 'mcp_stdio'
 
+  // E1：搜索官方 MCP Registry
+  const onRegistrySearch = async () => {
+    const q = regQuery.trim()
+    if (!q) {
+      setRegError({ message: '请输入搜索关键词' })
+      return
+    }
+    setRegSearching(true)
+    setRegError(null)
+    setRegResults(null)
+    try {
+      const data = await moduleGeneratorApi.registrySearch(q)
+      setRegResults(data?.results || [])
+    } catch (e) {
+      setRegError({ message: e.message, data: e.data })
+    } finally {
+      setRegSearching(false)
+    }
+  }
+
+  // E1：把 registry 条目的 install 建议填入下方安装表单（env/headers 预填变量名、留空值由用户补密钥）
+  const fillFromRegistry = (entry) => {
+    const inst = entry.install
+    if (!inst) return
+    setTransport(inst.transport || 'mcp_stdio')
+    const shortName = (entry.title || '').trim() || (entry.name || '').split('/').pop() || ''
+    setName(shortName)
+    setDescription(entry.description || '')
+    if (inst.transport === 'mcp_http') {
+      setEndpoint(inst.endpoint || '')
+      setHeaders((inst.env_vars || []).map((v) => ({ name: v.name, value: '' })))
+    } else {
+      setCommand(inst.command || 'npx')
+      setArgsText((inst.args || []).join(' '))
+      setEnv((inst.env_vars || []).map((v) => ({ name: v.name, value: '' })))
+    }
+    // 清空旧探测/安装结果，避免与新填入的配置混淆
+    setTools(null)
+    setProbeError(null)
+    setResult(null)
+    setInstallError(null)
+    setFilledKey(entry.name)
+    setTimeout(() => setFilledKey((k) => (k === entry.name ? null : k)), 2000)
+  }
+
   return (
     <div>
+      {/* E1：搜索社区 MCP（官方 Registry） */}
+      <div className="card mb-4">
+        <SectionTitle
+          icon={Search}
+          desc="搜索 MCP 官方社区注册表（registry.modelcontextprotocol.io），一键填入下方安装表单，探测确认后即可装为本地秘技。"
+        >
+          搜索社区 MCP
+        </SectionTitle>
+        <div className="flex gap-2">
+          <input
+            className="input flex-1 text-sm"
+            value={regQuery}
+            onChange={(e) => setRegQuery(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && onRegistrySearch()}
+            placeholder="如 filesystem / github / fetch"
+          />
+          <button
+            type="button"
+            onClick={onRegistrySearch}
+            disabled={regSearching}
+            className="btn-primary text-sm px-5 py-2.5 disabled:opacity-50"
+          >
+            {regSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+            搜索
+          </button>
+        </div>
+
+        {regError && (
+          <div className="mt-3 text-sm px-3 py-2 rounded-xl bg-red-50 text-red-600">{regError.message}</div>
+        )}
+        {regResults && regResults.length === 0 && (
+          <div className="mt-3 text-sm text-eleball-text-tertiary">未找到匹配的 MCP server</div>
+        )}
+        {regResults && regResults.length > 0 && (
+          <div className="mt-3 space-y-2">
+            {regResults.map((r) => (
+              <div key={r.name} className="rounded-xl border border-eleball-outline p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-semibold text-eleball-text">
+                        {r.title || (r.name || '').split('/').pop()}
+                      </span>
+                      {r.version && (
+                        <span className="text-[11px] px-1.5 py-0.5 rounded bg-eleball-surface-variant text-eleball-text-tertiary font-mono">
+                          v{r.version}
+                        </span>
+                      )}
+                      {r.install?.transport && (
+                        <span className="text-[11px] text-eleball-text-tertiary">
+                          {r.install.transport === 'mcp_stdio' ? 'stdio' : 'http'}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[11px] font-mono text-eleball-text-tertiary mt-0.5 truncate">{r.name}</div>
+                    {r.description && (
+                      <p className="text-xs text-eleball-text-secondary mt-1 line-clamp-2">{r.description}</p>
+                    )}
+                    {/* registry 声明的环境变量/请求头：填入后留空值由用户补（* 必填，密钥标黄） */}
+                    {r.install?.env_vars?.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1.5">
+                        {r.install.env_vars.map((v) => (
+                          <span
+                            key={v.name}
+                            title={v.description || ''}
+                            className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 font-mono"
+                          >
+                            {v.name}{v.required ? ' *' : ''}{v.secret ? '（密钥）' : ''}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {!r.supported && r.note && (
+                      <p className="text-xs text-eleball-text-tertiary mt-1">{r.note}</p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={!r.supported}
+                    onClick={() => fillFromRegistry(r)}
+                    className="btn-secondary text-xs px-3 py-1.5 flex-shrink-0 disabled:opacity-50"
+                  >
+                    {filledKey === r.name ? '已填入 ✓' : '填入安装表单'}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* M4：批量导入标准 MCP 配置文件 */}
       <div className="card mb-4">
         <SectionTitle

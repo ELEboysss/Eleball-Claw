@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ func streamRegistry(t *testing.T) *ToolRegistry {
 func TestShellStream_Output(t *testing.T) {
 	skipIfNoShell(t)
 	runner := &windowsToolRunner{}
-	out, truncated, exitCode, err := runner.ShellStream(context.Background(), "echo hello | cat", nil, "", 0)
+	out, truncated, _, exitCode, err := runner.ShellStream(context.Background(), "echo hello | cat", nil, "", 0, "")
 	if err != nil {
 		t.Fatalf("流式执行应成功: %v", err)
 	}
@@ -41,8 +42,8 @@ func TestShellStream_Output(t *testing.T) {
 func TestShellStream_HeadLimit(t *testing.T) {
 	skipIfNoShell(t)
 	runner := &windowsToolRunner{}
-	out, truncated, exitCode, err := runner.ShellStream(context.Background(),
-		`for i in {1..30}; do echo "n$i"; done`, nil, "", 5)
+	out, truncated, _, exitCode, err := runner.ShellStream(context.Background(),
+		`for i in {1..30}; do echo "n$i"; done`, nil, "", 5, "")
 	if err != nil {
 		t.Fatalf("流式执行应成功: %v", err)
 	}
@@ -64,7 +65,7 @@ func TestShellStream_HeadLimit(t *testing.T) {
 func TestShellStream_ExitCode(t *testing.T) {
 	skipIfNoShell(t)
 	runner := &windowsToolRunner{}
-	out, _, exitCode, err := runner.ShellStream(context.Background(), "echo before; exit 3", nil, "", 0)
+	out, _, _, exitCode, err := runner.ShellStream(context.Background(), "echo before; exit 3", nil, "", 0, "")
 	if err == nil {
 		t.Fatalf("非零退出应返回 ExitError")
 	}
@@ -79,6 +80,52 @@ func TestShellStream_ExitCode(t *testing.T) {
 	}
 }
 
+// TestShellStream_Spill 截断时完整输出落盘 spill 文件（F2），spill 含头部与被截断的尾部。
+func TestShellStream_Spill(t *testing.T) {
+	skipIfNoShell(t)
+	runner := &windowsToolRunner{}
+	spillDir := t.TempDir()
+	out, truncated, spillPath, exitCode, err := runner.ShellStream(context.Background(),
+		`for i in {1..30}; do echo "n$i"; done`, nil, "", 5, spillDir)
+	if err != nil {
+		t.Fatalf("流式执行应成功: %v", err)
+	}
+	if !truncated || exitCode != 0 {
+		t.Fatalf("应截断且退出码为 0: truncated=%v exit=%d", truncated, exitCode)
+	}
+	if spillPath == "" {
+		t.Fatalf("截断且有 spillDir 应返回 spill 路径")
+	}
+	data, rErr := os.ReadFile(spillPath)
+	if rErr != nil {
+		t.Fatalf("spill 文件应可读: %v", rErr)
+	}
+	full := string(data)
+	if !strings.Contains(full, "n1") || !strings.Contains(full, "n30") {
+		t.Fatalf("spill 应含完整输出（头部 n1 + 尾部 n30）: %q", full)
+	}
+	if strings.Contains(out, "n30") {
+		t.Fatalf("返回输出不应含被截断的尾部: %q", out)
+	}
+}
+
+// TestShellStream_NoSpillWithoutDir 未提供 spillDir 时截断不产生 spill（向后兼容）。
+func TestShellStream_NoSpillWithoutDir(t *testing.T) {
+	skipIfNoShell(t)
+	runner := &windowsToolRunner{}
+	_, truncated, spillPath, _, err := runner.ShellStream(context.Background(),
+		`for i in {1..30}; do echo "n$i"; done`, nil, "", 5, "")
+	if err != nil {
+		t.Fatalf("流式执行应成功: %v", err)
+	}
+	if !truncated {
+		t.Fatalf("应截断")
+	}
+	if spillPath != "" {
+		t.Fatalf("无 spillDir 不应产生 spill: %q", spillPath)
+	}
+}
+
 // TestShellStream_ToolShell toolShell 返回 truncated/exit_code 字段；非零退出返回 result+nil。
 func TestShellStream_ToolShell(t *testing.T) {
 	skipIfNoShell(t)
@@ -88,7 +135,7 @@ func TestShellStream_ToolShell(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		out, err := shellTool.Func(context.Background(), map[string]interface{}{
-			"command":   "echo ok | cat",
+			"command":    "echo ok | cat",
 			"head_limit": 10,
 		}, env)
 		if err != nil {

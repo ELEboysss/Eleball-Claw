@@ -87,6 +87,8 @@ export const moduleApi = {
   listModules: () => client.get('/claw-console/modules'),
   registerModule: (data) => client.post('/claw-console/modules', data),
   deleteModule: (id) => client.delete(`/claw-console/modules/${id}`),
+  // 真·卸载非官方秘技包（停进程/删目录/下架 SKU/注销运行时；官方包拒绝）
+  uninstallModule: (id) => client.delete(`/claw-console/modules/${id}/uninstall`),
   refreshModule: (id) => client.post(`/claw-console/modules/${id}/refresh`),
   startModule: (id) => client.post(`/claw-console/modules/${id}/start`),
   rescanMarketplace: () => client.post('/claw-console/modules/rescan'),
@@ -98,6 +100,13 @@ export const moduleApi = {
   // T8：本地秘技分享到云端审核（handler 打包 tarball + 元数据转发云端暂存；免 auth_token 鸡生蛋）
   submitForReview: (moduleId) =>
     client.post('/claw-console/modules/submit-review', { module_id: moduleId }),
+}
+
+// ====== 本地秘技 SKU（AgentItem）清单（claw 本地集市 /agents，复用 agentHandler）======
+// 供「本地秘技」页把派生 SKU 归组到所属秘技包（manifest.metadata.package_module）。
+export const agentApi = {
+  listAgents: (page = 1, pageSize = 500) =>
+    client.get(`/agents?page=${page}&page_size=${pageSize}`),
 }
 
 // ====== claw 云端秘技拉取（已购列表，安装到本地）======

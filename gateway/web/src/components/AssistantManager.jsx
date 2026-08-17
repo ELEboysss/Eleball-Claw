@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { assistantApi, agentMarketApi, teamApi, modelApi } from '../api/client'
-import { Bot, Plus, Pencil, Trash2, Loader2, Sparkles, Share2, Folder, Cpu } from 'lucide-react'
+import { Bot, Plus, Pencil, Trash2, Loader2, Sparkles, Share2, Folder, Cpu, ChevronDown } from 'lucide-react'
 import { PROVIDERS, groupEleAgentModelsByProvider } from '../utils/model'
 
 // 助手管理：助手 = 已激活秘技的命名组合，可在对话页按会话绑定，
@@ -118,6 +118,67 @@ export default function AssistantManager() {
         next.add(agentId)
       }
       return { ...prev, agentIds: next }
+    })
+  }
+
+  // 已激活秘技按能力包聚合（分组键 package_module || module），助手组装按包分组：
+  // 一个秘技包 = 一个卡片，包内多项能力（SKU）可被作为工具调用。
+  const parseManifest = (agent) => {
+    try {
+      return typeof agent.manifest_json === 'string' ? JSON.parse(agent.manifest_json) : agent.manifest_json
+    } catch {
+      return null
+    }
+  }
+  const packageKeyOf = (agent) => {
+    const md = parseManifest(agent)?.metadata || {}
+    return md.package_module || md.module || ''
+  }
+  const packageTitleOf = (agent) => {
+    const md = parseManifest(agent)?.metadata || {}
+    return md.package_title || md.package_module || ''
+  }
+
+  // 展开的包分组键集合
+  const [expandedPackages, setExpandedPackages] = useState(new Set())
+
+  const groupedCandidates = useMemo(() => {
+    const groups = new Map()
+    const standalone = []
+    for (const agent of activeAgents) {
+      const key = packageKeyOf(agent)
+      if (!key) {
+        standalone.push(agent)
+        continue
+      }
+      let g = groups.get(key)
+      if (!g) {
+        g = { key, title: packageTitleOf(agent) || key, members: [] }
+        groups.set(key, g)
+      }
+      if (g.title === key && packageTitleOf(agent)) g.title = packageTitleOf(agent)
+      g.members.push(agent)
+    }
+    return { packages: [...groups.values()], standalone }
+  }, [activeAgents])
+
+  // 包级全选/取消全选：勾选 = 包内全部成员 agent_id 入编辑集（助手组装按包）
+  const togglePackage = (pkg) => {
+    const ids = pkg.members.map((m) => m.id)
+    setEditor((prev) => {
+      if (!prev) return prev
+      const next = new Set(prev.agentIds)
+      const allSelected = ids.every((id) => next.has(id))
+      ids.forEach((id) => (allSelected ? next.delete(id) : next.add(id)))
+      return { ...prev, agentIds: next }
+    })
+  }
+
+  const togglePackageExpand = (key) => {
+    setExpandedPackages((prev) => {
+      const next = new Set(prev)
+      next.has(key) ? next.delete(key) : next.add(key)
+      return next
     })
   }
 
@@ -471,8 +532,59 @@ export default function AssistantManager() {
                     暂无已激活的秘技，请先到技能页激活后再组合
                   </p>
                 ) : (
-                  <div className="border border-eleball-outline rounded-xl divide-y divide-eleball-outline-variant max-h-56 overflow-auto">
-                    {activeAgents.map((agent) => (
+                  <div className="border border-eleball-outline rounded-xl divide-y divide-eleball-outline-variant max-h-72 overflow-auto">
+                    {groupedCandidates.packages.map((pkg) => {
+                      const ids = pkg.members.map((m) => m.id)
+                      const selected = ids.filter((id) => editor.agentIds.has(id)).length
+                      const expanded = expandedPackages.has(pkg.key)
+                      return (
+                        <div key={`pkg-${pkg.key}`}>
+                          <div className="flex items-center gap-3 px-3 py-2.5 bg-eleball-surface-variant/60">
+                            <input
+                              type="checkbox"
+                              checked={selected === ids.length && ids.length > 0}
+                              ref={(el) => {
+                                if (el) el.indeterminate = selected > 0 && selected < ids.length
+                              }}
+                              onChange={() => togglePackage(pkg)}
+                              className="w-4 h-4 accent-eleball-primary"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => togglePackageExpand(pkg.key)}
+                              className="flex-1 flex items-center justify-between min-w-0 text-left"
+                            >
+                              <span className="text-sm font-medium text-eleball-text truncate">{pkg.title}</span>
+                              <span className="flex items-center gap-2 text-xs text-eleball-text-tertiary shrink-0">
+                                {selected}/{ids.length}
+                                <ChevronDown className={`w-4 h-4 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+                              </span>
+                            </button>
+                          </div>
+                          {expanded &&
+                            pkg.members.map((agent) => (
+                              <label
+                                key={agent.id}
+                                className="flex items-center gap-3 pl-8 pr-3 py-2.5 cursor-pointer hover:bg-eleball-primary-light/40 transition-colors"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={editor.agentIds.has(agent.id)}
+                                  onChange={() => toggleAgent(agent.id)}
+                                  className="w-4 h-4 accent-eleball-primary"
+                                />
+                                <div className="min-w-0">
+                                  <div className="text-sm text-eleball-text truncate">{agent.name}</div>
+                                  {agent.description && (
+                                    <div className="text-xs text-eleball-text-tertiary truncate">{agent.description}</div>
+                                  )}
+                                </div>
+                              </label>
+                            ))}
+                        </div>
+                      )
+                    })}
+                    {groupedCandidates.standalone.map((agent) => (
                       <label
                         key={agent.id}
                         className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-eleball-primary-light/40 transition-colors"

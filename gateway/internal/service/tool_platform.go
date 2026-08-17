@@ -20,8 +20,10 @@ type PlatformToolRunner interface {
 	// AR-E6：Shell 现委托 ShellStream 流式执行（headLimit=0 不截断），保持旧全量输出语义。
 	Shell(ctx context.Context, command string, args []string, cwd string) (string, error)
 	// ShellStream 流式执行 shell 命令，合并 stdout/stderr，按 headLimit 行截断防 context 爆。
-	// 返回合并输出、是否截断、退出码与错误（非零退出时 err 非 nil，含退出码）。headLimit<=0 不截断。
-	ShellStream(ctx context.Context, command string, args []string, cwd string, headLimit int) (output string, truncated bool, exitCode int, err error)
+	// 返回合并输出、是否截断、完整输出 spill 文件路径（仅截断且 spillDir 非空时）、退出码与错误
+	// （非零退出时 err 非 nil，含退出码）。headLimit<=0 不截断。
+	// spillDir（F2，借鉴 DSH spill）：截断时把完整输出落盘到该目录，模型可经 ReadFile 分段查看全文。
+	ShellStream(ctx context.Context, command string, args []string, cwd string, headLimit int, spillDir string) (output string, truncated bool, spillPath string, exitCode int, err error)
 }
 
 // NewPlatformRunner 根据当前操作系统返回合适的运行器
@@ -213,21 +215,21 @@ func findShell() string {
 // Shell 执行本地 shell 命令（D3 本地模型：去白名单/去元字符禁令，危险黑名单 + 真 bash）。
 // AR-E6：委托 ShellStream 流式执行（headLimit=0 不截断），保持旧全量输出语义。
 func (r *defaultPlatformRunner) Shell(ctx context.Context, command string, args []string, cwd string) (string, error) {
-	out, _, _, err := r.ShellStream(ctx, command, args, cwd, 0)
+	out, _, _, _, err := r.ShellStream(ctx, command, args, cwd, 0, "")
 	return out, err
 }
 
 // ShellStream 流式执行（Linux/macOS）：归一化 + 危险黑名单 + 路由 + 流式截断。
-func (r *defaultPlatformRunner) ShellStream(ctx context.Context, command string, args []string, cwd string, headLimit int) (string, bool, int, error) {
+func (r *defaultPlatformRunner) ShellStream(ctx context.Context, command string, args []string, cwd string, headLimit int, spillDir string) (string, bool, string, int, error) {
 	command, args, raw, err := prepareShell(command, args)
 	if err != nil {
-		return "", false, -1, err
+		return "", false, "", -1, err
 	}
 	cmd, err := buildExecCmd(ctx, command, args, raw, cwd)
 	if err != nil {
-		return "", false, -1, err
+		return "", false, "", -1, err
 	}
-	return runStreamingCommand(ctx, cmd, headLimit)
+	return runStreamingCommand(ctx, cmd, headLimit, spillDir)
 }
 
 // findExecutable 查找可执行文件，支持 Windows .exe 后缀
@@ -264,43 +266,48 @@ func (r *windowsToolRunner) OCR(ctx context.Context, imagePath string) (string, 
 
 // Shell 执行本地 shell 命令（Windows）。AR-E6：委托 ShellStream 流式执行（headLimit=0 不截断）。
 func (r *windowsToolRunner) Shell(ctx context.Context, command string, args []string, cwd string) (string, error) {
-	out, _, _, err := r.ShellStream(ctx, command, args, cwd, 0)
+	out, _, _, _, err := r.ShellStream(ctx, command, args, cwd, 0, "")
 	return out, err
 }
 
 // ShellStream 流式执行（Windows）：归一化 + 危险黑名单 + 路由；无操作符命令优先 Go 内置实现
 // （grep/find/ls/cat 等，输出按 headLimit 截断），未覆盖的命令（python/node 等）回退流式 exec。
-func (r *windowsToolRunner) ShellStream(ctx context.Context, command string, args []string, cwd string, headLimit int) (string, bool, int, error) {
+func (r *windowsToolRunner) ShellStream(ctx context.Context, command string, args []string, cwd string, headLimit int, spillDir string) (string, bool, string, int, error) {
 	command, args, raw, err := prepareShell(command, args)
 	if err != nil {
-		return "", false, -1, err
+		return "", false, "", -1, err
 	}
 	// 路由判定基于原始命令（用户意图）：含操作符才需 bash 解释。
 	// 不能用 buildCommandLine 的转义结果判定，否则 args 中的 * 等被引号包裹后会误触发 bash 路由。
 	if hasShellOperator(raw) {
 		cmd, err := buildExecCmd(ctx, command, args, raw, cwd)
 		if err != nil {
-			return "", false, -1, err
+			return "", false, "", -1, err
 		}
-		return runStreamingCommand(ctx, cmd, headLimit)
+		return runStreamingCommand(ctx, cmd, headLimit, spillDir)
 	}
 	// 简单命令（无操作符）：优先 Go 内置实现（grep/find/ls/cat/head/tail/wc/sort/uniq/cut 等），
 	// 无需安装 Unix 工具；未覆盖的命令（python/node/npm/npx 等）回退流式外部进程。
 	if out, handled, err := builtinShell(ctx, command, args); handled {
 		trunc := false
+		spillPath := ""
 		if headLimit > 0 {
+			full := out
 			out, trunc = truncateLines(out, headLimit)
+			if trunc {
+				spillPath = spillFullOutput(spillDir, full) // F2：内置命令截断同样落盘全文
+			}
 		}
 		if err != nil {
-			return out, trunc, -1, fmt.Errorf("shell 执行失败: %w", err)
+			return out, trunc, spillPath, -1, fmt.Errorf("shell 执行失败: %w", err)
 		}
-		return out, trunc, 0, nil
+		return out, trunc, spillPath, 0, nil
 	}
 	cmd, err := buildExecCmd(ctx, command, args, raw, cwd)
 	if err != nil {
-		return "", false, -1, err
+		return "", false, "", -1, err
 	}
-	return runStreamingCommand(ctx, cmd, headLimit)
+	return runStreamingCommand(ctx, cmd, headLimit, spillDir)
 }
 
 // sanitized 将提示词中的特殊字符替换为下划线，用于文件名

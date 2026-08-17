@@ -102,6 +102,12 @@ type SkillRuntime struct {
 	// 为 true 时，supervisor/探活成功后由 SkillRuntimeSKUService 合成并同步 AgentItem+ToolManifest，
 	// 免去在 marketplace/<mod>/skus/ 下手写 SKU 文件。stdio 模块凭证须 scope=module。
 	AutoSKU bool `gorm:"default:false" json:"auto_sku,omitempty"`
+	// 包身份（module.json/package.json 物化时写入，供 DeriveSKUs 派生 SKU 继承包级分类/展示名）。
+	// PackageName 是前端包卡分组键（= 包 slug），多运行时包共享同一 slug；空回退 rt.ID。
+	Category           string `json:"category,omitempty"`            // 包分类（module.json category，空回退 rt.Name）
+	PackageName        string `json:"package_name,omitempty"`        // 包 slug（package.json name / module.json id）
+	PackageTitle       string `json:"package_title,omitempty"`       // 包人类标题（module.json name，空回退 slug）
+	PackageDescription string `json:"package_description,omitempty"` // 包描述（module.json description）
 	// DriverID 该运行时对外暴露的驱动别名，SKU manifest 的 driver 字段与此对应。
 	DriverID string `gorm:"index:idx_skill_runtime_driver_id" json:"driver_id,omitempty"`
 	// MCPServerConfig MCP HTTP 服务器配置（JSON），transport=mcp_http 时必填。
