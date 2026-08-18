@@ -505,24 +505,36 @@ type ModuleImageMeta struct {
 	Digest     string `json:"digest,omitempty"` // sha256:... 内容寻址
 }
 
+// ModuleSKUManifest 模块级聚合下发项：同一模块下当前用户已购的单个 SKU 的
+// AgentItem ID + ToolManifest 原文（见 specs/api-schema.yml ModuleInstallMeta.sku_manifests）。
+type ModuleSKUManifest struct {
+	AgentID  string          `json:"agent_id"`
+	Manifest json.RawMessage `json:"manifest"`
+}
+
 // ModuleInstallMeta 云端秘技拉取接口返回的单项（见 specs/api-schema.yml ModuleInstallMeta）。
 // claw 据此安装到本地：official=true 直接激活预置；否则走 ImageInstaller 拉镜像 + 签名校验。
+//
+// 聚合语义（2026-08 起）：云端按模块聚合，一个模块一条；agent_id/manifest 为代表性 SKU，
+// 完整已购 SKU 列表在 sku_manifests，EnsureCloudAgentProvision 逐条落库（缺漏会导致包内能力不全）。
 type ModuleInstallMeta struct {
 	ModuleID      string           `json:"module_id"`
-	AgentID       string           `json:"agent_id,omitempty"` // 云端秘技（AgentItem）ID；安装后据此在本地 upsert AgentItem，为空回退 manifest.id
+	AgentID       string           `json:"agent_id,omitempty"` // 代表性云端秘技（AgentItem）ID；安装后据此在本地 upsert AgentItem，为空回退 manifest.id
 	Name          string           `json:"name"`
 	Description   string           `json:"description"`
 	Version       string           `json:"version"`
 	TransportType string           `json:"transport_type"`
 	DriverID      string           `json:"driver_id,omitempty"`
 	Official      bool             `json:"official"`
+	Own           bool             `json:"own,omitempty"` // 当前用户即模块作者（云端判定下发）：豁免 VIP 安装门控与 cloud-purchased 来源标记
 	SourceOrigin  string           `json:"source_origin,omitempty"` // 模块来源属性（eleball_cloud/eleball_builtin/user/mcp），云端下发，InstallFromCloudMeta 持久化到本地运行时
 	SourceActor   string           `json:"source_actor,omitempty"`  // 来源主体（user=用户名 / mcp=MCP 名）；eleball_* 为空
 	Capabilities  []string         `json:"capabilities,omitempty"`
 	Image         *ModuleImageMeta `json:"image,omitempty"`
 	Signature     string           `json:"signature,omitempty"`
-	Manifest      json.RawMessage  `json:"manifest,omitempty"`
-	AuthToken     string           `json:"auth_token,omitempty"`
+	Manifest      json.RawMessage  `json:"manifest,omitempty"` // 代表性 SKU 的 ToolManifest 原文
+	SKUManifests  []ModuleSKUManifest `json:"sku_manifests,omitempty"` // 本模块下已购的全部 SKU（聚合下发）
+	AuthToken     string              `json:"auth_token,omitempty"`
 	UpdatedAt     string           `json:"updated_at,omitempty"`
 	AvgRating     float64          `json:"avg_rating,omitempty"`
 	PurchaseCount int64            `json:"purchase_count,omitempty"`
@@ -1833,6 +1845,15 @@ func ParseMCPConfig(raw []byte) ([]*MCPInstallRequest, []SkippedMCPServer, error
 	return reqs, skipped, nil
 }
 
+// MarkLocalInstaller 本地安装即开通：登记本地来源（origin=user/mcp）运行时的安装者，
+// 为该用户幂等补 0 元购买记录（stdio 运行时的 SKU 在异步探活派生后自动补）。
+// 使本地开发/安装的秘技包无需「领取」即可激活，官方/云端来源不受影响。
+func (s *ModuleService) MarkLocalInstaller(runtimeID, userID string) {
+	if s.registry != nil {
+		s.registry.MarkLocalInstaller(runtimeID, userID)
+	}
+}
+
 // UnregisterDriver 注销驱动映射
 func (s *ModuleService) UnregisterDriver(driverID string) error {
 	rt, err := s.repo.GetByDriverID(driverID)
@@ -2172,6 +2193,10 @@ func (s *ModuleService) InstallFromCloudMeta(meta ModuleInstallMeta) (*model.Mod
 			return nil, err
 		}
 	}
+	// own=true（作者本人安装自己的分享包）：不按云端商品标记来源，激活免 VIP 门控。
+	if meta.Own {
+		record.InstallSource = "local"
+	}
 	return record, nil
 }
 
@@ -2279,29 +2304,47 @@ func (s *ModuleService) upsertDriverBinding(meta ModuleInstallMeta) error {
 	return nil
 }
 
-// EnsureCloudAgentProvision 云端秘技安装成功后，按 meta.Manifest 在本地落库：
+// EnsureCloudAgentProvision 云端秘技安装成功后，把已购 SKU 在本地落库：
 //   - upsert AgentItem（status=approved、manifest_json 落库；已存在时保留 purchase_count 等统计字段）；
 //   - 为当前用户幂等写入 AgentPurchase（金额 0，来源为云端已购）。
 //
-// 未注入 AgentRepo（云端 cmd/server）或 meta 未携带 manifest 时直接跳过。
-// 本地 AgentItem.ID 优先取 meta.AgentID，为空回退 manifest.id。
+// 遍历 meta.SKUManifests（聚合下发的全量已购 SKU，缺漏会导致包内能力不全）；
+// 旧云端无 sku_manifests 时回退单条 meta.Manifest（代表性 SKU）。
+// 未注入 AgentRepo（云端 cmd/server）或无任何 manifest 时直接跳过。
+// 本地 AgentItem.ID 优先取下发的 agent_id，为空回退 manifest.id。
 func (s *ModuleService) EnsureCloudAgentProvision(meta ModuleInstallMeta, userID string) error {
 	if s.agentRepo == nil {
 		return nil
 	}
-	if len(meta.Manifest) == 0 || string(meta.Manifest) == "null" {
+	skus := meta.SKUManifests
+	if len(skus) == 0 && len(meta.Manifest) != 0 && string(meta.Manifest) != "null" {
+		skus = []ModuleSKUManifest{{AgentID: meta.AgentID, Manifest: meta.Manifest}}
+	}
+	if len(skus) == 0 {
 		return nil
 	}
 	if userID == "" {
 		return errors.New("无法识别当前用户，无法写入秘技购买记录")
 	}
+	for _, sku := range skus {
+		if err := s.ensureCloudAgentProvisionOne(meta, sku, userID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
+// ensureCloudAgentProvisionOne 落库单个已购 SKU（AgentItem upsert + 幂等购买记录）。
+func (s *ModuleService) ensureCloudAgentProvisionOne(meta ModuleInstallMeta, sku ModuleSKUManifest, userID string) error {
+	if len(sku.Manifest) == 0 || string(sku.Manifest) == "null" {
+		return nil
+	}
 	var manifest model.ToolManifest
-	if err := json.Unmarshal(meta.Manifest, &manifest); err != nil {
+	if err := json.Unmarshal(sku.Manifest, &manifest); err != nil {
 		return fmt.Errorf("manifest 解析失败: %w", err)
 	}
 
-	agentID := meta.AgentID
+	agentID := sku.AgentID
 	if agentID == "" {
 		agentID = manifest.ID
 	}
@@ -2328,7 +2371,7 @@ func (s *ModuleService) EnsureCloudAgentProvision(meta ModuleInstallMeta, userID
 		existing.Description = description
 		existing.Category = manifest.Category
 		existing.Level = level
-		existing.ManifestJSON = string(meta.Manifest)
+		existing.ManifestJSON = string(sku.Manifest)
 		existing.Status = model.AgentStatusApproved
 		if err := s.agentRepo.Update(existing); err != nil {
 			return fmt.Errorf("更新本地秘技 %s 失败: %w", agentID, err)
@@ -2342,7 +2385,7 @@ func (s *ModuleService) EnsureCloudAgentProvision(meta ModuleInstallMeta, userID
 			CreatorName:  "Eleball 云端",
 			Category:     manifest.Category,
 			Level:        level,
-			ManifestJSON: string(meta.Manifest),
+			ManifestJSON: string(sku.Manifest),
 			Status:       model.AgentStatusApproved,
 		}
 		if err := s.agentRepo.Create(item); err != nil {

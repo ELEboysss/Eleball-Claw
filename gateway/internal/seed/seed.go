@@ -18,6 +18,7 @@ import (
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
 	"github.com/eleball/gateway/internal/service"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -359,6 +360,7 @@ func syncPromptSkillSKU(repo *repository.AgentRepo, root, modName, creatorID, cr
 			}
 			return 0, 0, 0
 		}
+		provisionLocalSkillPurchase(repo, agentID, creatorID, logger)
 		return 0, 1, 0
 	}
 	item := &model.AgentItem{
@@ -379,7 +381,29 @@ func syncPromptSkillSKU(repo *repository.AgentRepo, root, modName, creatorID, cr
 		}
 		return 0, 0, 0
 	}
+	provisionLocalSkillPurchase(repo, agentID, creatorID, logger)
 	return 1, 0, 0
+}
+
+// provisionLocalSkillPurchase 本地创造即开通：为用户创造的 prompt 秘技幂等补 0 元购买记录，
+// 免去「自己造的秘技还要自己领取」。官方同步（creatorID=adminID）与空 creator 跳过。
+func provisionLocalSkillPurchase(repo *repository.AgentRepo, agentID, creatorID string, logger *zap.Logger) {
+	if creatorID == "" || creatorID == "00000000-0000-0000-0000-000000000000" {
+		return
+	}
+	purchased, err := repo.HasPurchased(agentID, creatorID)
+	if err != nil || purchased {
+		return
+	}
+	if err := repo.CreatePurchase(&model.AgentPurchase{
+		ID:        uuid.New().String(),
+		AgentID:   agentID,
+		BuyerID:   creatorID,
+		PricePaid: 0,
+		Currency:  "local-install",
+	}); err != nil && logger != nil {
+		logger.Warn("本地秘技补单失败", zap.String("id", agentID), zap.Error(err))
+	}
 }
 
 // SyncPromptSkillDir 运行时定向同步单个 prompt-only skill 目录（claw-console

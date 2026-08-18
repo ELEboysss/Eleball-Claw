@@ -6,6 +6,7 @@ import (
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
 	sqlite "github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
@@ -16,6 +17,18 @@ func newSKUServiceTestDB(t *testing.T) *repository.AgentRepo {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&model.AgentItem{}))
+	return repository.NewAgentRepo(db)
+}
+
+// newSKUServiceTestDBWithPurchase 内存 SQLite + AgentItem/AgentPurchase 表（本地安装补单测试用）。
+func newSKUServiceTestDBWithPurchase(t *testing.T) *repository.AgentRepo {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+	require.NoError(t, db.AutoMigrate(&model.AgentItem{}, &model.AgentPurchase{}))
 	return repository.NewAgentRepo(db)
 }
 
@@ -338,4 +351,57 @@ func TestDeriveSKUs_PinProtectsOverriddenFields(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "派生名", mf.Name, "manifest.Name 为派生源值，不受 pin 影响")
 	require.Equal(t, "派生描述", mf.Description)
+}
+
+// TestDeriveSKUs_LocalInstallProvisionsInstaller 本地安装即开通（stdio 异步路径）：
+// 装机时先 MarkLocalInstaller 登记安装者（SKU 尚未派生），DeriveSKUs 派生成功后自动补 0 元购买记录。
+func TestDeriveSKUs_LocalInstallProvisionsInstaller(t *testing.T) {
+	repo := newSKUServiceTestDBWithPurchase(t)
+	svc := NewSkillRuntimeSKUService(repo, nil)
+	rt := autoSKUTestRuntime("mcp-remote-demo-12345678", "mcp-remote-demo-12345678")
+	rt.SourceOrigin = model.SkillRuntimeOriginMCP
+
+	svc.MarkLocalInstaller(rt, "u1") // 装机时 SKU 尚未派生，仅登记
+	svc.DeriveSKUs(rt, mcpTestTools("echo", "ping"))
+
+	for _, id := range []string{"mcp-remote-demo-12345678-echo", "mcp-remote-demo-12345678-ping"} {
+		ok, err := repo.HasPurchased(id, "u1")
+		require.NoError(t, err)
+		assert.True(t, ok, "安装者应已开通 %s", id)
+	}
+	// 其他用户不受影响
+	ok, err := repo.HasPurchased("mcp-remote-demo-12345678-echo", "u2")
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
+// TestMarkLocalInstaller_ProvisionsExistingSKUs 本地安装即开通（http 同步路径）：
+// SKU 已派生后 MarkLocalInstaller 立即补单；重复标记幂等。
+func TestMarkLocalInstaller_ProvisionsExistingSKUs(t *testing.T) {
+	repo := newSKUServiceTestDBWithPurchase(t)
+	svc := NewSkillRuntimeSKUService(repo, nil)
+	rt := autoSKUTestRuntime("my-user-mod", "my-user-mod")
+	rt.SourceOrigin = model.SkillRuntimeOriginUser
+
+	svc.DeriveSKUs(rt, mcpTestTools("echo"))
+	svc.MarkLocalInstaller(rt, "u1")
+	svc.MarkLocalInstaller(rt, "u1") // 幂等
+
+	ok, err := repo.HasPurchased("my-user-mod-echo", "u1")
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+// TestMarkLocalInstaller_OfficialNotExempt 官方/内置来源不豁免：不补单，仍走领取/门控。
+func TestMarkLocalInstaller_OfficialNotExempt(t *testing.T) {
+	repo := newSKUServiceTestDBWithPurchase(t)
+	svc := NewSkillRuntimeSKUService(repo, nil)
+	rt := autoSKUTestRuntime("mcp-stdio-echo", "mcp_stdio_echo") // SourceOrigin 空（内置）
+
+	svc.MarkLocalInstaller(rt, "u1")
+	svc.DeriveSKUs(rt, mcpTestTools("echo"))
+
+	ok, err := repo.HasPurchased("mcp-stdio-echo-echo", "u1")
+	require.NoError(t, err)
+	assert.False(t, ok)
 }

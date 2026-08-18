@@ -366,3 +366,53 @@ func TestInstallFromCloudMeta_CloudManifestDisablesAutoSKU(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, model.AgentStatusApproved, hand.Status, "手写 SKU 不应被下架")
 }
+
+// TestEnsureCloudAgentProvision_SKUManifests 聚合下发：sku_manifests 携带的全部已购 SKU
+// 逐条落库（AgentItem upsert + 幂等购买记录），不再只落代表性 SKU。
+func TestEnsureCloudAgentProvision_SKUManifests(t *testing.T) {
+	moduleSvc, _, agentRepo, _ := setupCloudInstallTest(t)
+
+	mkManifest := func(id, name string) json.RawMessage {
+		raw, _ := json.Marshal(map[string]interface{}{
+			"id":         id,
+			"name":       name,
+			"driver":     "search_web",
+			"category":   "search",
+			"parameters": map[string]interface{}{"type": "object"},
+			"metadata":   map[string]string{"module": "search-web", "package_module": "search-web"},
+		})
+		return raw
+	}
+	meta := cloudInstallMeta()
+	meta.Manifest = nil // 聚合下发：代表性 manifest 可缺省，全量在 sku_manifests
+	meta.SKUManifests = []ModuleSKUManifest{
+		{AgentID: "search-web-baidu", Manifest: mkManifest("search-web-baidu", "百度搜索")},
+		{AgentID: "search-web-bing", Manifest: mkManifest("search-web-bing", "必应搜索")},
+	}
+
+	require.NoError(t, moduleSvc.EnsureCloudAgentProvision(meta, "u1"))
+
+	for _, id := range []string{"search-web-baidu", "search-web-bing"} {
+		item, err := agentRepo.GetByID(id)
+		require.NoError(t, err)
+		assert.Equal(t, model.AgentStatusApproved, item.Status)
+		ok, err := agentRepo.HasPurchased(id, "u1")
+		require.NoError(t, err)
+		assert.True(t, ok, "%s 应已补购买记录", id)
+	}
+
+	// 幂等：重复执行不报错、不重复
+	require.NoError(t, moduleSvc.EnsureCloudAgentProvision(meta, "u1"))
+}
+
+// TestEnsureCloudAgentProvision_LegacySingleManifest 兼容旧云端（无 sku_manifests）：
+// 回退落代表性 meta.Manifest 单条。
+func TestEnsureCloudAgentProvision_LegacySingleManifest(t *testing.T) {
+	moduleSvc, _, agentRepo, _ := setupCloudInstallTest(t)
+	meta := cloudInstallMeta() // 仅 manifest + agent_id，无 sku_manifests
+
+	require.NoError(t, moduleSvc.EnsureCloudAgentProvision(meta, "u1"))
+	ok, err := agentRepo.HasPurchased("agent-search-web", "u1")
+	require.NoError(t, err)
+	assert.True(t, ok)
+}

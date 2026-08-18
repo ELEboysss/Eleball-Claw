@@ -12,6 +12,7 @@ import (
 
 	"github.com/eleball/gateway/internal/model"
 	"github.com/eleball/gateway/internal/repository"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -32,6 +33,10 @@ type SkillRuntimeSKUService struct {
 	logger *zap.Logger
 	mu     sync.Mutex
 	last   map[string]string // runtime_id -> tools 签名（sha256），签名未变则跳过，避免每轮探活重复写库
+	// pendingInstallers 本地安装者（runtime_id -> user_id）：本地来源（origin=user/mcp）的运行时
+	// 安装即开通——派生完成后为安装者幂等补 0 元购买记录，免去「自己装的秘技还要自己领取」。
+	// stdio 运行时的 SKU 由后台探活异步派生，故需在派生回调处消费本表。
+	pendingInstallers map[string]string
 }
 
 // NewSkillRuntimeSKUService 创建自动 SKU 派生服务
@@ -40,9 +45,59 @@ func NewSkillRuntimeSKUService(repo *repository.AgentRepo, logger *zap.Logger) *
 		logger = zap.NewNop()
 	}
 	return &SkillRuntimeSKUService{
-		repo:   repo,
-		logger: logger,
-		last:   make(map[string]string),
+		repo:              repo,
+		logger:            logger,
+		last:              make(map[string]string),
+		pendingInstallers: make(map[string]string),
+	}
+}
+
+// MarkLocalInstaller 标记本地安装者并立即为已派生的 SKU 补购买记录。
+// 仅本地来源（origin=user/mcp）运行时生效；官方/云端来源不豁免领取与门控。
+// stdio 运行时装机时 SKU 尚未派生（异步探活），此处先登记，DeriveSKUs 成功后补单。
+func (s *SkillRuntimeSKUService) MarkLocalInstaller(rt *model.SkillRuntime, userID string) {
+	if rt == nil || userID == "" || s.repo == nil {
+		return
+	}
+	if rt.SourceOrigin != model.SkillRuntimeOriginMCP && rt.SourceOrigin != model.SkillRuntimeOriginUser {
+		return
+	}
+	s.mu.Lock()
+	s.pendingInstallers[rt.ID] = userID
+	s.mu.Unlock()
+	s.provisionLocalInstall(rt, userID)
+}
+
+// provisionLocalInstall 为安装者幂等补 0 元购买记录（本地安装即开通）。
+// 仅处理本运行时派生的 approved 且免费的 SKU；已购跳过（HasPurchased 幂等）。
+func (s *SkillRuntimeSKUService) provisionLocalInstall(rt *model.SkillRuntime, userID string) {
+	if rt.SourceOrigin != model.SkillRuntimeOriginMCP && rt.SourceOrigin != model.SkillRuntimeOriginUser {
+		return
+	}
+	skus, err := s.repo.ListByModuleSKUs(rt.ID)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("查询模块 SKU 失败，跳过本地安装补单", zap.String("runtime_id", rt.ID), zap.Error(err))
+		}
+		return
+	}
+	for _, item := range skus {
+		if item.Status != model.AgentStatusApproved || item.PriceDanwan > 0 {
+			continue
+		}
+		purchased, err := s.repo.HasPurchased(item.ID, userID)
+		if err != nil || purchased {
+			continue
+		}
+		if err := s.repo.CreatePurchase(&model.AgentPurchase{
+			ID:        uuid.New().String(),
+			AgentID:   item.ID,
+			BuyerID:   userID,
+			PricePaid: 0,
+			Currency:  "local-install",
+		}); err != nil && s.logger != nil {
+			s.logger.Warn("本地安装补单失败", zap.String("sku_id", item.ID), zap.Error(err))
+		}
 	}
 }
 
@@ -109,6 +164,10 @@ func (s *SkillRuntimeSKUService) DeriveSKUs(rt *model.SkillRuntime, tools []MCPT
 		return
 	}
 	s.last[rt.ID] = sig
+	// 本地安装即开通：stdio 运行时装机时 SKU 尚未派生，此处（异步探活派生成功后）补单。
+	if uid := s.pendingInstallers[rt.ID]; uid != "" {
+		s.provisionLocalInstall(rt, uid)
+	}
 	if s.logger != nil {
 		s.logger.Info("自动派生 SKU 完成",
 			zap.String("runtime_id", rt.ID),

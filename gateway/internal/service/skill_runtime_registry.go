@@ -99,6 +99,18 @@ func (r *SkillRuntimeRegistry) SetSKUService(svc *SkillRuntimeSKUService) {
 	r.skuService = svc
 }
 
+// MarkLocalInstaller 标记本地安装者（本地来源 origin=user/mcp 运行时安装即开通），
+// 转发 SKU 派生服务登记并为已派生 SKU 立即补单；stdio 运行时的 SKU 在异步探活派生后补。
+func (r *SkillRuntimeRegistry) MarkLocalInstaller(runtimeID, userID string) {
+	r.mu.Lock()
+	svc := r.skuService
+	r.mu.Unlock()
+	if svc == nil {
+		return
+	}
+	svc.MarkLocalInstaller(r.Get(runtimeID), userID)
+}
+
 // SetRepo 设置持久化仓库并加载已有运行时
 func (r *SkillRuntimeRegistry) SetRepo(repo *repository.SkillRuntimeRepo) {
 	r.mu.Lock()

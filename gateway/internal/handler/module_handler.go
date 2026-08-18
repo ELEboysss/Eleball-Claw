@@ -220,7 +220,8 @@ func (h *ModuleHandler) InstallModule(c *gin.Context) {
 
 	// 凡云端来源模块（经 /market/modules/installed 拉取，无论 official）安装均需 VIP1+。
 	// claw 本地扫描/内置秘技（如 SearchWeb）不经过此接口，天然豁免。
-	if !requireCloudVIP1(c, h.cloudAccount) {
+	// own=true（云端判定当前用户即模块作者）豁免：作者本人安装自己的分享包不按云端商品对待。
+	if !meta.Own && !requireCloudVIP1(c, h.cloudAccount) {
 		return
 	}
 
