@@ -118,13 +118,36 @@ export default function Modules() {
     return [...m.values()]
   }, [modules])
 
-  // P4：安装云端已购模块到本地（均需 VIP1+；官方直接激活预置，第三方拉镜像+签名校验）
-  const handleInstall = async (meta) => {
+  // 云端已购模块按 module_id 聚合：同一模块只保留一行（代表项取 updated_at 最新者，
+  // 即云端最新版本），安装时遍历组内成员逐条安装（幂等：新增或更新本地同名模块）。
+  // 云端自 2026-08 起按模块聚合下发（sku_manifests 携带全量已购 SKU），此处分组主要兼容旧服务端逐 SKU 下发。
+  const cloudGroups = useMemo(() => {
+    const m = new Map()
+    for (const meta of cloudInstalled) {
+      const key = meta.module_id || meta.agent_id
+      if (!key) continue
+      if (!m.has(key)) m.set(key, [])
+      m.get(key).push(meta)
+    }
+    return [...m.values()].map((members) => ({
+      members,
+      rep: members.reduce((a, b) => (String(a.updated_at || '') >= String(b.updated_at || '') ? a : b)),
+    }))
+  }, [cloudInstalled])
+
+  // P4：安装云端已购模块到本地（均需 VIP1+；官方直接激活预置，第三方拉镜像+签名校验）。
+  // 入参为聚合组：逐条安装幂等，本地同名模块新增或更新到最新版本。
+  const handleInstall = async (group) => {
+    const metas = Array.isArray(group) ? group : [group]
+    const meta = metas[0]
+    if (!meta) return
     if (!window.confirm(`确定安装模块 ${meta.module_id} 到本地？（需 VIP1 及以上）${meta.official ? '（官方秘技，直接激活预置）' : '（第三方，将拉取容器镜像并校验签名，需 Docker/Podman）'}`)) return
     setInstalling(meta.module_id)
     setError('')
     try {
-      await moduleApi.install(meta)
+      for (const m of metas) {
+        await moduleApi.install(m)
+      }
       setError(`模块 ${meta.module_id} 安装成功`)
       await fetchData()
     } catch (err) {
@@ -492,11 +515,16 @@ export default function Modules() {
               </tr>
             </thead>
             <tbody>
-              {cloudInstalled.map((m) => (
+              {cloudGroups.map(({ rep: m, members }) => (
                 <tr key={m.module_id} className="border-t border-eleball-outline">
                   <td className="px-4 py-3">
                     <div className="font-medium">{m.name}</div>
                     <div className="text-xs text-eleball-text-secondary font-mono">{m.module_id}</div>
+                    {(members.length > 1 || (m.sku_manifests || []).length > 1) && (
+                      <div className="text-xs text-eleball-text-tertiary mt-0.5">
+                        含 {Math.max(members.length, (m.sku_manifests || []).length)} 个已购能力
+                      </div>
+                    )}
                   </td>
                   <td className="px-4 py-3">{m.version || '-'}</td>
                   <td className="px-4 py-3">
@@ -515,7 +543,7 @@ export default function Modules() {
                   </td>
                   <td className="px-4 py-3">
                     <button
-                      onClick={() => handleInstall(m)}
+                      onClick={() => handleInstall(members)}
                       disabled={installing === m.module_id}
                       className="px-3 py-1 rounded-lg text-xs font-medium bg-eleball-primary text-white hover:bg-eleball-primary-dark disabled:opacity-50"
                     >
@@ -524,7 +552,7 @@ export default function Modules() {
                   </td>
                 </tr>
               ))}
-              {cloudInstalled.length === 0 && !loading && (
+              {cloudGroups.length === 0 && !loading && (
                 <tr><td colSpan={5} className="px-4 py-8 text-center text-eleball-text-secondary">
                   暂无云端已购秘技。请在云端 eleball.cn 购买秘技后刷新，或登录账号。
                 </td></tr>

@@ -208,6 +208,8 @@ func (s *AgentService) installMCPFromCreator(ctx context.Context, input map[stri
 	if err != nil {
 		return nil, err
 	}
+	// 本地安装即开通：安装者无需「领取」即可激活（stdio SKU 在异步探活派生后补单）
+	s.moduleSvc.MarkLocalInstaller(result.RuntimeID, env.UserID)
 	toolNames := make([]string, 0, len(result.Tools))
 	for _, t := range result.Tools {
 		toolNames = append(toolNames, t.Name)

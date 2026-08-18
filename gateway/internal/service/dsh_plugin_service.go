@@ -332,10 +332,13 @@ func (s *DSHPluginService) Import(ctx context.Context, spec string, skillPaths [
 			result.Skipped = append(result.Skipped, fmt.Sprintf("mcp %s: 探测失败: %v", srv.Name, pErr))
 			continue
 		}
-		if _, err := s.moduleSvc.InstallMCPRuntime(req, tools); err != nil {
+		installRes, err := s.moduleSvc.InstallMCPRuntime(req, tools)
+		if err != nil {
 			result.Skipped = append(result.Skipped, fmt.Sprintf("mcp %s: %v", srv.Name, err))
 			continue
 		}
+		// 本地安装即开通：导入者无需「领取」即可激活（stdio SKU 在异步探活派生后补单）
+		s.moduleSvc.MarkLocalInstaller(installRes.RuntimeID, creatorID)
 		result.MCPs = append(result.MCPs, srv.Name)
 	}
 	if len(result.Skills) == 0 && len(result.MCPs) == 0 && len(result.Skipped) > 0 {

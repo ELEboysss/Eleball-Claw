@@ -211,8 +211,10 @@ export default function AgentMarket() {
     }
   }
 
-  // 把云端 ModuleInstallMeta 合成为与本地卡片同构的展示对象（卡片数据来自 meta + meta.manifest）
-  const metaToCloudCard = (meta) => {
+  // 把云端 ModuleInstallMeta 合成为与本地卡片同构的展示对象（卡片数据来自 meta + meta.manifest）。
+  // members 为同模块（module_id）聚合的全部已购 meta（云端按模块聚合后通常只有 1 条，
+  // 其 sku_manifests 携带全量已购 SKU；旧云端按 SKU 逐条下发时 members 为多条）。
+  const metaToCloudCard = (meta, members) => {
     let manifest = meta.manifest
     if (typeof manifest === 'string') {
       try {
@@ -235,24 +237,34 @@ export default function AgentMarket() {
       creator_name: sourceLabel(meta.source_origin, meta.source_actor, meta.official),
       // 云端已购·未安装标记，渲染「下载到本地」按钮
       cloud_not_installed: true,
-      cloud_meta: meta
+      cloud_meta: meta,
+      cloud_group: members || [meta]
     }
   }
 
-  // 本地列表 + 云端已购未安装合并：本地已有同 agent_id 或同 module_id 的秘技时去重
+  // 本地列表 + 云端已购未安装合并：本地已有同 agent_id 或同 module_id 的秘技时去重。
+  // 云端 meta 先按 module_id 聚合成「一个模块一张卡」，与云端官网的包卡展示对齐——
+  // 不再让包内每个已购能力各出一张卡（能力项激活态在包详情弹窗内逐项设置）。
   const displayAgents = useMemo(() => {
     const localIds = new Set(agents.map((a) => a.id))
     const localModuleIds = new Set(agents.map((a) => parseManifestModuleId(a)).filter(Boolean))
-    const cloudCards = cloudMetas
-      .filter((m) => {
-        const aid = m.agent_id || m.module_id
-        if (localIds.has(aid)) return false
-        if (m.module_id && localModuleIds.has(m.module_id)) return false
-        return true
-      })
-      .map(metaToCloudCard)
-      .filter((c) => category === '全部' || !c.category || c.category === category)
-    return [...agents, ...cloudCards]
+    const groups = new Map()
+    for (const m of cloudMetas) {
+      const key = m.module_id || m.agent_id
+      if (!key) continue
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push(m)
+    }
+    const cloudCards = []
+    for (const members of groups.values()) {
+      // 代表项取 updated_at 最新者（云端新版本覆盖旧版本展示）
+      const rep = members.reduce((a, b) => (String(a.updated_at || '') >= String(b.updated_at || '') ? a : b))
+      if (members.some((m) => localIds.has(m.agent_id || m.module_id))) continue
+      if (members.some((m) => m.module_id && localModuleIds.has(m.module_id))) continue
+      cloudCards.push(metaToCloudCard(rep, members))
+    }
+    const filtered = cloudCards.filter((c) => category === '全部' || !c.category || c.category === category)
+    return [...agents, ...filtered]
   }, [agents, cloudMetas, category])
 
   const filteredAgents = useMemo(() => {
@@ -407,8 +419,13 @@ export default function AgentMarket() {
     }
   }
 
-  // 下载/安装云端已购秘技到本地：凡云端来源（无论 official）均需 VIP1+；第三方另需 Docker/Podman
-  const handleInstall = async (meta) => {
+  // 下载/安装云端已购秘技到本地：凡云端来源（无论 official）均需 VIP1+；第三方另需 Docker/Podman。
+  // 入参为同模块聚合的 meta 组（云端按模块聚合后为 1 条，其 sku_manifests 携带全量已购 SKU）；
+  // 逐条安装幂等：同名模块新增或更新，已购能力逐个落库。
+  const handleInstall = async (group) => {
+    const metas = Array.isArray(group) ? group : [group]
+    const meta = metas[0]
+    if (!meta) return
     const isVip = (user?.vip_level ?? 0) >= 1 || user?.role === 'admin'
     let hint = meta.official
       ? '（官方秘技，安装后直接激活，需 VIP1 及以上）'
@@ -421,7 +438,9 @@ export default function AgentMarket() {
     setInstallingId(meta.module_id)
     setMessage('')
     try {
-      await clawMarketApi.installModule(meta)
+      for (const m of metas) {
+        await clawMarketApi.installModule(m)
+      }
       setMessage(`${meta.name || meta.module_id} 安装成功，可在卡片上激活使用`)
       loadAgents()
     } catch (err) {
@@ -652,7 +671,7 @@ export default function AgentMarket() {
         </div>
         {agent.cloud_not_installed ? (
           <button
-            onClick={(e) => { e.stopPropagation(); handleInstall(agent.cloud_meta) }}
+            onClick={(e) => { e.stopPropagation(); handleInstall(agent.cloud_group || agent.cloud_meta) }}
             disabled={installingId === agent.cloud_meta?.module_id}
             className="btn-primary text-sm px-4 py-2 flex items-center gap-1.5 disabled:opacity-50"
             title={agent.cloud_meta?.official ? '官方秘技，需 VIP1 及以上' : '第三方秘技，需 Docker/Podman 且需 VIP1 及以上'}

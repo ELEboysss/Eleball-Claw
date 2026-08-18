@@ -271,8 +271,9 @@ type mcpInstallOutcome struct {
 // probeAndInstallMCP 探测 + 安装单个 MCP server（InstallMCP 与 ImportMCPConfig 共用，G3）。
 // 复用 ProbeMCP 的 stdio/http 探测逻辑校验 server 可用并拿工具列表，
 // -> moduleService.InstallMCPRuntime 创建 source=mcp_remote 的 SkillRuntime 并派生 SKU。
+// userID 为安装者（本地安装即开通：派生 SKU 后为其幂等补 0 元购买记录，免领取）；可空。
 // 成功时 fail=nil；失败时 result=nil，fail 描述原因（interpreter_missing 带 Interpreter/Hint）。
-func (h *ClawConsoleHandler) probeAndInstallMCP(ctx context.Context, req mcpInstallRequest) (*service.MCPInstallResult, *mcpInstallOutcome) {
+func (h *ClawConsoleHandler) probeAndInstallMCP(ctx context.Context, req mcpInstallRequest, userID string) (*service.MCPInstallResult, *mcpInstallOutcome) {
 	if req.Transport == "" {
 		req.Transport = "mcp_stdio"
 	}
@@ -328,6 +329,8 @@ func (h *ClawConsoleHandler) probeAndInstallMCP(ctx context.Context, req mcpInst
 	if err != nil {
 		return nil, fail("install_failed", "安装失败: "+err.Error())
 	}
+	// 本地安装即开通：安装者无需「领取」即可激活（stdio SKU 在异步探活派生后补单）
+	h.moduleService.MarkLocalInstaller(result.RuntimeID, userID)
 	return result, nil
 }
 
@@ -355,7 +358,7 @@ func (h *ClawConsoleHandler) InstallMCP(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
-	result, fail := h.probeAndInstallMCP(ctx, req)
+	result, fail := h.probeAndInstallMCP(ctx, req, c.GetString("user_id"))
 	if fail != nil {
 		if fail.ErrorCode == "interpreter_missing" {
 			c.JSON(http.StatusOK, gin.H{
@@ -446,7 +449,7 @@ func (h *ClawConsoleHandler) ImportMCPConfig(c *gin.Context) {
 			Name:        rq.Name,
 			Description: rq.Description,
 		}
-		result, fail := h.probeAndInstallMCP(ctx, one)
+		result, fail := h.probeAndInstallMCP(ctx, one, c.GetString("user_id"))
 		oc := mcpInstallOutcome{Name: rq.Name, Transport: rq.Transport}
 		if fail != nil {
 			oc.ErrorCode = fail.ErrorCode
@@ -622,6 +625,8 @@ func (h *ClawConsoleHandler) GenerateModule(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"code": 2002, "message": "生成模块失败: " + err.Error()})
 		return
 	}
+	// 本地安装即开通：创建者无需「领取」即可激活（stdio SKU 在异步探活派生后补单）
+	h.moduleService.MarkLocalInstaller(result.ModuleID, c.GetString("user_id"))
 	c.JSON(http.StatusOK, gin.H{
 		"code":    0,
 		"message": "success",
